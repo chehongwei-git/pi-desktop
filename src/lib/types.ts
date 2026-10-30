@@ -19,6 +19,31 @@ export interface SessionSummary {
   modified: number;
   warning: string | null;
 }
+export interface ToolPresentation {
+  callId: string;
+  name: string;
+  command?: string | null;
+  path?: string | null;
+  offset?: number | null;
+  limit?: number | null;
+  argsRef?: string | null;
+  writeRef?: string | null;
+  diffRef?: string | null;
+  diffPreview?: string;
+  diffLines?: number;
+  tail?: string;
+  outputLines?: number;
+  truncation?: {
+    truncated: boolean;
+    truncatedBy?: string | null;
+    outputLines?: number | null;
+    totalLines?: number | null;
+    maxBytes?: number | null;
+    maxLines?: number | null;
+    firstLineExceedsLimit?: boolean | null;
+  } | null;
+  fullOutputPath?: string | null;
+}
 export interface Message {
   id: string;
   role: string;
@@ -29,6 +54,9 @@ export interface Message {
   truncated?: boolean;
   status: string;
   name: string | null;
+  /** 本地提交占位，Pi 返回正式用户消息后替换。 */
+  delivery?: { mode: 'steer' | 'followUp'; state: 'sending' | 'queued' };
+  tool?: ToolPresentation | null;
 }
 export interface Model {
   id: string;

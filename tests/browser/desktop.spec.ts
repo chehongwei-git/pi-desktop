@@ -60,6 +60,14 @@ async function mock(
             return;
           }
           if (command === 'read_content') {
+            if (host.failContentOnce === args.id) {
+              host.failContentOnce = '';
+              throw new Error('模拟正文读取失败');
+            }
+            if (host.deferContent === args.id)
+              await new Promise<void>((resolve) => {
+                host.releaseContent = resolve;
+              });
             const text = (host.bodies[args.id] as string).slice(
               args.offset,
               args.offset + 65536,
@@ -177,6 +185,8 @@ async function mock(
                   hasMore: false,
                 };
               case 'prompt':
+                if (host.queuePrompts && args.action.mode)
+                  return { disposition: 'queued' };
                 pending = [
                   { type: 'run', state: 'running' },
                   {
@@ -191,7 +201,7 @@ async function mock(
                       '这是模拟回答。',
                     ),
                   },
-                  { type: 'run', state: 'idle' },
+                  ...(!host.holdRun ? [{ type: 'run', state: 'idle' }] : []),
                 ];
                 setTimeout(
                   () =>
@@ -215,6 +225,13 @@ async function mock(
           }
           throw new Error(`unmocked IPC: ${command}`);
         },
+      };
+      host.emitEvents = (events: unknown[]) => {
+        pending.push(...events);
+        callbacks.get(channel.id)({
+          index: index++,
+          message: { type: 'available', runtimeId: 'mock' },
+        });
       };
       host.longTasks = [];
       new PerformanceObserver((list) => {
@@ -586,7 +603,11 @@ test('full-content actions only appear for truncated messages and still open the
       message('long-tool', 'toolResult', true),
       message('long-answer', 'assistant', true),
     ];
-    (window as any).bodies = { 'long-answer': 'a'.repeat(65536) + '剩余正文' };
+    (window as any).bodies = {
+      'long-answer': 'a'.repeat(65536) + '剩余正文',
+      'short-tool': '正文 short-tool',
+      'long-tool': '正文 long-tool\n末尾工具正文',
+    };
   });
   await page.goto('/');
   await page
@@ -601,15 +622,18 @@ test('full-content actions only appear for truncated messages and still open the
       .getByRole('button', { name: '查看完整正文' }),
   ).toHaveCount(0);
   const shortTool = messages.filter({ hasText: '正文 short-tool' });
-  await shortTool.locator('summary').click();
+  await shortTool.locator('.tool-heading').click();
   await expect(
     shortTool.getByRole('button', { name: '分块查看完整输出' }),
   ).toHaveCount(0);
   const longTool = messages.filter({ hasText: '正文 long-tool' });
-  await longTool.locator('summary').click();
+  await longTool.locator('.tool-heading').click();
+  await expect(
+    longTool.getByText('末尾工具正文', { exact: true }),
+  ).toBeVisible();
   await expect(
     longTool.getByRole('button', { name: '分块查看完整输出' }),
-  ).toBeVisible();
+  ).toHaveCount(0);
   await page.getByRole('button', { name: '查看完整正文', exact: true }).click();
   const dialog = page.getByRole('dialog');
   await expect(dialog).toBeVisible();
@@ -619,6 +643,564 @@ test('full-content actions only appear for truncated messages and still open the
     dialog.getByRole('button', { name: '已到末尾', exact: true }),
   ).toBeDisabled();
 });
+test('tool summaries expand inline with code, edit diff, parameters and truncation notices', async ({
+  page,
+}) => {
+  const errors: string[] = [];
+  page.on('pageerror', (error) => errors.push(error.message));
+  await mock(page, 0);
+  await page.addInitScript(() => {
+    const host = window as any;
+    const diff = [
+      ' 1 const keep = true;',
+      '-2 const value = "old";',
+      '+2 const value = "new";',
+      ' 3 // context',
+      ...Array.from(
+        { length: 15 },
+        (_, i) => `+${i + 3} const added${i} = true;`,
+      ),
+    ].join('\n');
+    const shell = Array.from({ length: 12 }, (_, i) => `shell line ${i}`).join(
+      '\n',
+    );
+    host.bodies = {
+      read: 'const answer: number = 42;\n<script>alert("unsafe")</script>',
+      diff,
+      shell,
+      write: '写入成功',
+      written: 'const written = true;',
+      args: '{"path":"src/new.ts"}',
+    };
+    const message = (id: string, name: string, text: string, tool: object) => ({
+      id,
+      role: 'toolResult',
+      name,
+      text,
+      thinking: '',
+      status: 'done',
+      contentRef: id,
+      truncated: false,
+      tool: { callId: id, name, ...tool },
+    });
+    host.historyMessages = [
+      message('read', 'read', host.bodies.read, {
+        path: 'src/read.ts',
+        offset: 10,
+        limit: 2,
+        outputLines: 2,
+      }),
+      message('edit', 'edit', '编辑成功', {
+        path: 'src/edit.ts',
+        diffRef: 'diff',
+        diffPreview: diff.split('\n').slice(0, 10).join('\n'),
+        diffLines: 19,
+        outputLines: 1,
+      }),
+      message('shell', 'bash', shell, {
+        command: 'echo "hello"',
+        tail: shell.split('\n').slice(-5).join('\n'),
+        outputLines: 12,
+        truncation: {
+          truncated: true,
+          truncatedBy: 'lines',
+          outputLines: 12,
+          totalLines: 99,
+        },
+        fullOutputPath: 'C:/tmp/full.txt',
+      }),
+      message('write', 'write', '写入成功', {
+        path: 'src/new.ts',
+        writeRef: 'written',
+        argsRef: 'args',
+        outputLines: 1,
+      }),
+    ];
+  });
+  await page.goto('/');
+  await page
+    .getByRole('button', { name: '选择项目文件夹', exact: true })
+    .last()
+    .click();
+  const read = page
+    .locator('.tool-step')
+    .filter({ has: page.locator('.tool-path', { hasText: 'src/read.ts' }) });
+  await expect(read.locator('.tool-code')).toHaveCount(0);
+  await read.locator('.tool-heading').click();
+  await expect(read.locator('.hljs-keyword').first()).toBeVisible();
+  await expect(read.locator('.tool-code')).toContainText(
+    '<script>alert("unsafe")</script>',
+  );
+  expect(
+    await page.evaluate(
+      () => document.querySelectorAll('.tool-step script').length,
+    ),
+  ).toBe(0);
+  const edit = page
+    .locator('.tool-step')
+    .filter({ has: page.locator('.tool-path', { hasText: 'src/edit.ts' }) });
+  await expect(edit.locator('.tool-code-line')).toHaveCount(10);
+  await expect(edit.locator('.diff-removed mark')).toHaveText('old');
+  await expect(edit.locator('.diff-added mark')).toHaveText('new');
+  await edit.locator('.tool-heading').click();
+  await expect(
+    edit.getByText('+17 const added14 = true;', { exact: true }),
+  ).toBeVisible();
+  await edit.locator('.tool-heading').click();
+  await expect(edit.locator('.tool-code-line')).toHaveCount(10);
+  const shell = page
+    .locator('.tool-step')
+    .filter({ has: page.locator('.tool-name', { hasText: /^bash$/ }) });
+  await expect(shell.locator('.tool-preview .tool-code-line')).toHaveCount(5);
+  await expect(shell.locator('.tool-preview')).toContainText('shell line 11');
+  await expect(shell.locator('.tool-preview')).not.toContainText(
+    'shell line 0',
+  );
+  await expect(shell.locator('.tool-warning').first()).toContainText('12 / 99');
+  await expect(shell).toContainText('C:/tmp/full.txt');
+  await shell.locator('.tool-heading').click();
+  await expect(shell.getByText('shell line 0', { exact: true })).toBeVisible();
+  const write = page
+    .locator('.tool-step')
+    .filter({ has: page.locator('.tool-path', { hasText: 'src/new.ts' }) });
+  await write.locator('.tool-heading').click();
+  await write
+    .getByRole('button', { name: '写入内容 · 展开', exact: true })
+    .click();
+  await expect(write.locator('.language-typescript .hljs-keyword')).toHaveText(
+    'const',
+  );
+  await write
+    .getByRole('button', { name: '调用参数 · 展开', exact: true })
+    .click();
+  await expect(write.locator('.language-json .hljs-attr')).toHaveText('"path"');
+  await page.screenshot({ path: 'test-results/tools-light.png' });
+  await page.evaluate(() => {
+    document.documentElement.dataset.theme = 'dark';
+  });
+  await page.screenshot({ path: 'test-results/tools-dark.png' });
+  expect(errors).toEqual([]);
+});
+
+test('large tool output retries and reads to the end inline with bounded mounted rows', async ({
+  page,
+}) => {
+  const errors: string[] = [];
+  page.on('pageerror', (error) => errors.push(error.message));
+  await mock(page, 0);
+  await page.addInitScript(() => {
+    const host = window as any;
+    const text =
+      Array.from({ length: 1200 }, (_, i) => `${i}: ${'x'.repeat(160)}`).join(
+        '\n',
+      ) + '\n最后一行';
+    host.bodies = { large: text };
+    host.failContentOnce = 'large';
+    host.historyMessages = [
+      {
+        id: 'large',
+        role: 'toolResult',
+        name: 'custom',
+        text: text.slice(0, 65536),
+        thinking: '',
+        status: 'done',
+        contentRef: 'large',
+        truncated: true,
+        tool: { callId: 'large', name: 'custom', outputLines: 1201 },
+      },
+    ];
+  });
+  await page.goto('/');
+  await page
+    .getByRole('button', { name: '选择项目文件夹', exact: true })
+    .last()
+    .click();
+  const tool = page.locator('.tool-step');
+  await tool.locator('.tool-heading').click();
+  await expect(tool.getByRole('alert')).toContainText('模拟正文读取失败');
+  await tool.getByRole('button', { name: '重试读取', exact: true }).click();
+  await expect(tool.locator('.virtual-code')).toBeVisible();
+  for (let i = 0; i < 5; i++) {
+    await tool.locator('.virtual-code').evaluate((node) => {
+      node.scrollTop = node.scrollHeight;
+    });
+    await page.waitForTimeout(100);
+  }
+  await expect(tool).toContainText('已到末尾');
+  await tool.locator('.virtual-code').evaluate((node) => {
+    node.scrollTop = node.scrollHeight;
+  });
+  await expect(tool.getByText('最后一行', { exact: true })).toBeVisible();
+  expect(await tool.locator('.tool-code-line').count()).toBeLessThan(60);
+  await tool.locator('.tool-heading').click();
+  await expect(tool.locator('.virtual-code')).toHaveCount(0);
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  expect(errors).toEqual([]);
+});
+
+test('tool expansion survives transcript recycling and updates from running to complete', async ({
+  page,
+}) => {
+  await mock(page, 0);
+  await page.addInitScript(() => {
+    const host = window as any;
+    const tool = {
+      id: 'live-tool',
+      role: 'toolResult',
+      name: 'bash',
+      text: 'partial',
+      thinking: '',
+      status: 'running',
+      contentRef: null,
+      tool: {
+        callId: 'live-tool',
+        name: 'bash',
+        command: 'echo output',
+        tail: 'partial',
+        outputLines: 1,
+      },
+    };
+    host.liveTool = tool;
+    host.bodies = { finished: 'completed output' };
+    host.historyMessages = [
+      ...Array.from({ length: 80 }, (_, i) => ({
+        id: `m${i}`,
+        role: 'user',
+        text: `previous ${i}`,
+        thinking: '',
+        status: 'done',
+        contentRef: null,
+        name: null,
+      })),
+      tool,
+    ];
+  });
+  await page.goto('/');
+  await page
+    .getByRole('button', { name: '选择项目文件夹', exact: true })
+    .last()
+    .click();
+  const tool = page.locator('.tool-step');
+  await expect(tool.locator('.tool-state')).toHaveText('执行中');
+  await tool.locator('.tool-heading').click();
+  await page.evaluate(() => {
+    const host = window as any;
+    host.emitEvents([
+      {
+        type: 'message',
+        message: {
+          ...host.liveTool,
+          status: 'done',
+          text: 'completed output',
+          contentRef: 'finished',
+          tool: { ...host.liveTool.tool, tail: 'completed output' },
+        },
+      },
+    ]);
+  });
+  await expect(tool.locator('.tool-state')).toHaveText('已完成');
+  await expect(
+    tool.getByRole('region', { name: '工具正文', exact: true }),
+  ).toContainText('completed output');
+  const transcript = page.getByRole('region', {
+    name: '对话消息',
+    exact: true,
+  });
+  await transcript.hover();
+  await page.mouse.wheel(0, -1000);
+  await transcript.evaluate((node) => {
+    node.scrollTop = 0;
+  });
+  await expect(tool).toHaveCount(0);
+  await expect(
+    page.getByRole('button', { name: '回到底部', exact: true }),
+  ).toBeVisible();
+  await transcript.evaluate((node) => {
+    node.scrollTop = node.scrollHeight;
+  });
+  await expect(tool.locator('.tool-heading')).toHaveAttribute(
+    'aria-expanded',
+    'true',
+  );
+  await expect(
+    tool.getByRole('region', { name: '工具正文', exact: true }),
+  ).toContainText('completed output');
+});
+
+test('queued guidance is visible immediately and is replaced when Pi consumes it, with a filled stop button', async ({
+  page,
+}) => {
+  await mock(page, 0);
+  await page.goto('/');
+  await page
+    .getByRole('button', { name: '选择项目文件夹', exact: true })
+    .last()
+    .click();
+  await page.evaluate(() => {
+    const host = window as any;
+    host.holdRun = true;
+    host.queuePrompts = true;
+  });
+  const input = page.getByRole('textbox', { name: '消息输入', exact: true });
+  await input.fill('开始长任务');
+  await input.press('Enter');
+  const stop = page.getByRole('button', { name: '停止任务', exact: true });
+  await expect(stop).toBeVisible();
+  expect(
+    await stop.evaluate((node) => getComputedStyle(node).backgroundColor),
+  ).not.toBe('rgba(0, 0, 0, 0)');
+  await input.fill('先修复登录，再处理样式');
+  await input.press('Enter');
+  const row = page
+    .locator('.message.user')
+    .filter({ hasText: '先修复登录，再处理样式' });
+  await expect(row).toHaveCount(1);
+  await expect(row.locator('.delivery-status')).toHaveText(
+    '引导消息 · 等待处理',
+  );
+  await page.evaluate(() => {
+    (window as any).emitEvents([
+      {
+        type: 'message',
+        message: {
+          id: 'consumed-guidance',
+          role: 'user',
+          text: '先修复登录，再处理样式',
+          thinking: '',
+          status: 'done',
+          contentRef: null,
+          name: null,
+        },
+      },
+    ]);
+  });
+  await expect(row).toHaveCount(1);
+  await expect(row.locator('.delivery-status')).toHaveCount(0);
+  await expect(stop).toBeVisible();
+});
+
+test('running tasks accept direct steering and follow-up messages without stopping', async ({
+  page,
+}) => {
+  await mock(page, 0);
+  await page.goto('/');
+  await page
+    .getByRole('button', { name: '选择项目文件夹', exact: true })
+    .last()
+    .click();
+  await page.evaluate(() => {
+    (window as any).holdRun = true;
+  });
+  const input = page.getByRole('textbox', { name: '消息输入', exact: true });
+  await input.fill('开始长任务');
+  await input.press('Enter');
+  await expect(
+    page.getByRole('button', { name: '停止任务', exact: true }),
+  ).toBeVisible();
+  await expect(input).toBeEnabled();
+  await input.fill('先处理登录问题');
+  await input.press('Enter');
+  await expect(input).toHaveValue('');
+  await expect(page.getByText('引导消息已提交', { exact: true })).toBeVisible();
+  await input.fill('增加测试覆盖');
+  await page.getByRole('button', { name: '发送引导', exact: true }).click();
+  await expect(input).toHaveValue('');
+  await input.fill('完成后检查文档');
+  await page.getByRole('button', { name: '完成后发送', exact: true }).click();
+  await expect(input).toHaveValue('');
+  await expect(
+    page.getByRole('button', { name: '停止任务', exact: true }),
+  ).toBeVisible();
+  const actions = await page.evaluate(() =>
+    (window as any).ipcCalls
+      .filter((call: any) => call.command === 'perform')
+      .map((call: any) => call.action),
+  );
+  expect(
+    actions
+      .filter((action: any) => action.type === 'prompt')
+      .map((action: any) => action.mode),
+  ).toEqual([undefined, 'steer', 'steer', 'followUp']);
+  expect(actions.some((action: any) => action.type === 'stop')).toBe(false);
+});
+
+test('wheel over code scrolls the conversation and chains at long-code boundaries', async ({
+  page,
+}) => {
+  await mock(page, 0);
+  await page.addInitScript(() => {
+    const host = window as any;
+    const long = Array.from(
+      { length: 600 },
+      (_, i) => `const value${i} = ${i};`,
+    ).join('\n');
+    host.bodies = { long };
+    host.historyMessages = [
+      ...Array.from({ length: 40 }, (_, i) => ({
+        id: `m${i}`,
+        role: 'user',
+        text: `previous message ${i}`,
+        thinking: '',
+        status: 'done',
+        contentRef: null,
+        name: null,
+      })),
+      {
+        id: 'long',
+        role: 'toolResult',
+        name: 'read',
+        text: long,
+        thinking: '',
+        status: 'done',
+        contentRef: 'long',
+        tool: {
+          callId: 'long',
+          name: 'read',
+          path: 'src/long.ts',
+          outputLines: 600,
+        },
+      },
+      {
+        id: 'short',
+        role: 'toolResult',
+        name: 'bash',
+        text: 'short code line',
+        thinking: '',
+        status: 'done',
+        contentRef: null,
+        tool: {
+          callId: 'short',
+          name: 'bash',
+          command: 'echo short',
+          tail: 'short code line',
+          outputLines: 1,
+        },
+      },
+      {
+        id: 'markdown',
+        role: 'assistant',
+        text: '```typescript\nconst answer = 42;\n```',
+        thinking: '',
+        status: 'done',
+        contentRef: null,
+        name: null,
+      },
+    ];
+  });
+  await page.goto('/');
+  await page
+    .getByRole('button', { name: '选择项目文件夹', exact: true })
+    .last()
+    .click();
+  const transcript = page.getByRole('region', {
+    name: '对话消息',
+    exact: true,
+  });
+  const short = page
+    .locator('.tool-step')
+    .filter({ has: page.locator('.tool-name', { hasText: /^bash$/ }) });
+  await short.locator('.tool-code').hover();
+  const before = await transcript.evaluate((node) => node.scrollTop);
+  await page.mouse.wheel(0, -240);
+  await expect
+    .poll(() => transcript.evaluate((node) => node.scrollTop))
+    .toBeLessThan(before - 100);
+  await transcript.evaluate((node) => {
+    node.scrollTop = node.scrollHeight;
+  });
+  const markdown = page.locator('.markdown pre');
+  await markdown.hover();
+  const beforeMarkdown = await transcript.evaluate((node) => node.scrollTop);
+  await page.mouse.wheel(0, -240);
+  await expect
+    .poll(() => transcript.evaluate((node) => node.scrollTop))
+    .toBeLessThan(beforeMarkdown - 100);
+  await transcript.evaluate((node) => {
+    node.scrollTop = node.scrollHeight;
+  });
+  const long = page
+    .locator('.tool-step')
+    .filter({ has: page.locator('.tool-name', { hasText: /^read$/ }) });
+  await long.locator('.tool-heading').click();
+  const code = long.locator('.virtual-code');
+  await code.scrollIntoViewIfNeeded();
+  await code.hover();
+  await page.mouse.wheel(0, 240);
+  await expect
+    .poll(() => code.evaluate((node) => node.scrollTop))
+    .toBeGreaterThan(100);
+  await code.evaluate((node) => {
+    node.scrollTop = 0;
+  });
+  await page.waitForTimeout(150);
+  const atTop = await transcript.evaluate((node) => node.scrollTop);
+  await page.mouse.wheel(0, -240);
+  await expect
+    .poll(() => transcript.evaluate((node) => node.scrollTop))
+    .toBeLessThan(atTop - 100);
+});
+
+test('expanded code keeps its collapse control floating while the conversation scrolls', async ({
+  page,
+}) => {
+  await mock(page, 0);
+  await page.addInitScript(() => {
+    const host = window as any;
+    const text = Array.from(
+      { length: 180 },
+      (_, i) => `const line${i} = ${i};`,
+    ).join('\n');
+    host.bodies = { sticky: text };
+    host.historyMessages = [
+      {
+        id: 'sticky',
+        role: 'toolResult',
+        name: 'read',
+        text,
+        thinking: '',
+        status: 'done',
+        contentRef: 'sticky',
+        tool: {
+          callId: 'sticky',
+          name: 'read',
+          path: 'src/sticky.ts',
+          outputLines: 180,
+        },
+      },
+    ];
+  });
+  await page.goto('/');
+  await page
+    .getByRole('button', { name: '选择项目文件夹', exact: true })
+    .last()
+    .click();
+  const transcript = page.getByRole('region', {
+    name: '对话消息',
+    exact: true,
+  });
+  const heading = page.locator('.tool-heading');
+  await heading.click();
+  await expect(page.locator('.tool-code-line')).toHaveCount(180);
+  await transcript.evaluate((node) => {
+    node.scrollTop = 800;
+  });
+  await expect
+    .poll(async () => {
+      const bar = await heading.boundingBox();
+      const area = await transcript.boundingBox();
+      const inset = await transcript.evaluate((node) =>
+        parseFloat(getComputedStyle(node).paddingTop),
+      );
+      return bar && area ? Math.abs(bar.y - area.y - inset) : 1000;
+    })
+    .toBeLessThan(3);
+  await expect(heading).toBeInViewport();
+  await expect(heading.locator('.tool-toggle-label')).toHaveText('收起');
+  await heading.click();
+  await expect(heading).toHaveAttribute('aria-expanded', 'false');
+  await expect(page.locator('.tool-expanded')).toHaveCount(0);
+});
+
 test('the first small upward wheel gesture leaves the bottom without snapping back', async ({
   page,
 }) => {

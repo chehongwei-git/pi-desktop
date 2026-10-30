@@ -8,6 +8,72 @@ function fixture(action: Bridge['action']) {
   return new Desktop({ ...bridge, action });
 }
 describe('desktop business behavior', () => {
+  it('defaults running messages to steering and retains edited drafts and failure drafts', async () => {
+    let finish!: (result: unknown) => void;
+    const action = vi.fn().mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+    );
+    const desktop = fixture(action);
+    desktop.connection = 'ready';
+    desktop.run = 'running';
+    desktop.draft = '调整方向';
+    const pending = desktop.send();
+    expect(action).toHaveBeenCalledWith('', {
+      type: 'prompt',
+      message: '调整方向',
+      mode: 'steer',
+    });
+    expect(desktop.messages[0].delivery?.state).toBe('sending');
+    desktop.draft = '下一条草稿';
+    await desktop.send();
+    expect(action).toHaveBeenCalledTimes(1);
+    finish({});
+    await pending;
+    expect(desktop.draft).toBe('下一条草稿');
+    expect(desktop.notice).toBe('引导消息已提交');
+    expect(desktop.messages[0].delivery?.state).toBe('queued');
+    action.mockRejectedValueOnce(new Error('queue rejected'));
+    await expect(desktop.send('followUp')).rejects.toThrow('queue rejected');
+    expect(desktop.draft).toBe('下一条草稿');
+    expect(desktop.submitting).toBe(false);
+    expect(desktop.messages).toHaveLength(1);
+    action.mockResolvedValueOnce({});
+    await desktop.send('followUp');
+    expect(desktop.draft).toBe('');
+    expect(action).toHaveBeenLastCalledWith('', {
+      type: 'prompt',
+      message: '下一条草稿',
+      mode: 'followUp',
+    });
+  });
+  it('isolates tool expansion and rejects content responses from an earlier session or runtime', async () => {
+    let finish!: (page: { text: string; next: number; done: boolean }) => void;
+    const content = vi.fn().mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+    );
+    const desktop = new Desktop({ ...bridge, content });
+    desktop.runtimeId = 'runtime-a';
+    desktop.snapshot = { sessionFile: 'a.jsonl' };
+    desktop.toggleTool('t', 'output');
+    desktop.toggleTool('t', 'args');
+    expect(desktop.toolViews.t).toEqual({ output: true, args: true });
+    desktop.toggleTool('t', 'output');
+    expect(desktop.toolViews.t.output).toBe(false);
+    const pending = desktop.readContent('body', 0);
+    desktop.snapshot = { sessionFile: 'b.jsonl' };
+    finish({ text: 'stale', next: 5, done: true });
+    await expect(pending).rejects.toThrow('会话已切换');
+    const restarted = desktop.readContent('body', 0);
+    desktop.runtimeId = 'runtime-b';
+    finish({ text: 'stale', next: 5, done: true });
+    await expect(restarted).rejects.toThrow('会话已切换');
+  });
   it('keeps the opened title after Windows path normalization and index refresh, then resets it for a new session', async () => {
     let sessionFile = 'C:\\sessions\\original.jsonl';
     const action: Bridge['action'] = async <T>(
@@ -57,7 +123,9 @@ describe('desktop business behavior', () => {
     expect(desktop.sessionTitle).toBe('当前会话名称');
     await desktop.rename('新的会话名称');
     expect(desktop.sessionTitle).toBe('新的会话名称');
+    desktop.toggleTool('tool', 'output');
     await desktop.newSession();
+    expect(desktop.toolViews).toEqual({});
     expect(desktop.sessionTitle).toBe('新对话');
   });
   it('previews the target title while loading and restores the original title on cancellation or failure', async () => {

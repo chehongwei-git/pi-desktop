@@ -10,7 +10,7 @@
   } from '@tanstack/virtual-core';
   import MessageView from './MessageView.svelte';
   import Icon from './Icon.svelte';
-  import type { Message } from '../types';
+  import type { ContentPage, Message } from '../types';
   /** 分页由父门面负责，列表只保存滚动锚点；onload 为预览按需读取。 */
   let {
     messages,
@@ -21,6 +21,9 @@
     onload,
     onvisible,
     onerror,
+    toolViews,
+    ontoggletool,
+    read,
   }: {
     messages: Message[];
     hasMore?: boolean;
@@ -30,6 +33,9 @@
     onload: (message: Message) => Promise<void>;
     onvisible: (ids: string[]) => void;
     onerror: (message: string) => void;
+    toolViews: Record<string, Record<string, boolean>>;
+    ontoggletool: (id: string, section: string) => void;
+    read: (id: string, offset: number) => Promise<ContentPage>;
   } = $props();
   let viewport: HTMLDivElement;
   let virtual: Virtualizer<HTMLDivElement, HTMLElement> | undefined;
@@ -120,6 +126,40 @@
     }
     update();
   }
+  /** WebView/Chromium 对嵌套横向代码滚动区可能锁定滚轮；在纵向边界显式传给对话。 */
+  function wheel(node: HTMLElement) {
+    const handle = (event: WheelEvent) => {
+      if (event.ctrlKey || event.metaKey || event.shiftKey) return;
+      if (event.deltaY < 0) pauseFollow();
+      const code = (event.target as Element).closest<HTMLElement>(
+        '.tool-code, .markdown pre',
+      );
+      if (
+        !code ||
+        !node.contains(code) ||
+        !event.deltaY ||
+        Math.abs(event.deltaX) > Math.abs(event.deltaY)
+      )
+        return;
+      const delta =
+        event.deltaY *
+        (event.deltaMode === 1
+          ? 21
+          : event.deltaMode === 2
+            ? node.clientHeight
+            : 1);
+      const atBoundary =
+        delta < 0
+          ? code.scrollTop <= 1
+          : code.scrollHeight - code.clientHeight - code.scrollTop <= 1;
+      if (atBoundary) {
+        event.preventDefault();
+        node.scrollTop += delta;
+      }
+    };
+    node.addEventListener('wheel', handle, { passive: false });
+    return { destroy: () => node.removeEventListener('wheel', handle) };
+  }
   /** 用户操作立即取消队列和虚拟列表中尚未完成的定位，避免争夺滚动位置。 */
   function pauseFollow(): void {
     follow = false;
@@ -145,9 +185,7 @@
   class="transcript"
   bind:this={viewport}
   onscroll={scroll}
-  onwheel={(event) => {
-    if (event.deltaY < 0) pauseFollow();
-  }}
+  use:wheel
   ontouchstart={(event) => {
     touchY = event.touches[0]?.clientY ?? 0;
   }}
@@ -186,7 +224,18 @@
           style:transform={`translateY(${item.start}px)`}
           use:measure
         >
-          <MessageView {message} {onfull} {onload} {onerror} />
+          <MessageView
+            {message}
+            {onfull}
+            {onload}
+            {onerror}
+            {toolViews}
+            {read}
+            ontoggletool={(id, section) => {
+              pauseFollow();
+              ontoggletool(id, section);
+            }}
+          />
         </div>{/if}
     {/each}
   </div>

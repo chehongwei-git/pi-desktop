@@ -30,6 +30,11 @@ export class Desktop {
   runtimeId = $state('');
   version = $state('');
   messages = $state<Message[]>([]);
+  toolViews = $state<Record<string, Record<string, boolean>>>({});
+  toggleTool(id: string, section: string): void {
+    const view = this.toolViews[id] ?? {};
+    this.toolViews[id] = { ...view, [section]: !view[section] };
+  }
   sessions = $state<SessionSummary[]>([]);
   loadingSessions = $state(false);
   pinSaving = $state(false);
@@ -168,6 +173,7 @@ export class Desktop {
   private visible = new Set<string>();
   private accessed = new Map<string, number>();
   private accessSerial = 0;
+  private submissionSerial = 0;
   /** 虚拟列表报告挂载窗口；这些消息不被缓存淘汰，访问顺序用于 LRU。 */
   pinVisible(ids: string[]): void {
     this.visible = new Set(ids);
@@ -253,6 +259,7 @@ export class Desktop {
       this.currentSessionTitle = '';
       this.connection = 'ready';
       this.messages = [];
+      this.toolViews = {};
       this.accessed.clear();
       this.visible.clear();
       this.run = connected.snapshot.isStreaming ? 'running' : 'idle';
@@ -482,10 +489,43 @@ export class Desktop {
     )
       return;
     const text = this.draft;
+    const delivery = mode ?? (this.run !== 'idle' ? 'steer' : undefined);
+    const pendingId = delivery
+      ? `pending-${++this.submissionSerial}`
+      : undefined;
+    if (pendingId && delivery) {
+      // 用新数组使 reducer 的 ID 索引同步包含本地占位。
+      this.messages = [
+        ...this.messages,
+        {
+          id: pendingId,
+          role: 'user',
+          text,
+          thinking: '',
+          contentRef: null,
+          status: 'done',
+          name: null,
+          delivery: { mode: delivery, state: 'sending' },
+        },
+      ];
+    }
     this.submitting = true;
     try {
-      await this.action({ type: 'prompt', message: text, mode });
+      await this.action({ type: 'prompt', message: text, mode: delivery });
+      const pending = this.messages.find((message) => message.id === pendingId);
+      if (pending?.delivery) pending.delivery.state = 'queued';
       if (this.draft === text) this.draft = '';
+      if (delivery)
+        this.notice =
+          delivery === 'steer'
+            ? '引导消息已提交'
+            : '后续消息已提交，将在当前任务完成后处理';
+    } catch (error) {
+      if (pendingId)
+        this.messages = this.messages.filter(
+          (message) => message.id !== pendingId,
+        );
+      throw error;
     } finally {
       this.submitting = false;
     }
@@ -505,6 +545,8 @@ export class Desktop {
       ...(cleared.steering ?? []),
       ...(cleared.followUp ?? []),
     );
+    this.messages = this.messages.filter((message) => !message.delivery);
+    this.queued = [];
     // abort 返回代表 Pi 空闲；刷新状态同时允许已到达的 settled 被归并。
     await this.syncState();
     if (!this.snapshot.isStreaming) this.run = 'idle';
@@ -525,6 +567,7 @@ export class Desktop {
       return;
     }
     this.currentSessionTitle = title;
+    this.toolViews = {};
     await this.drain();
     this.accessed.clear();
     this.visible.clear();
@@ -573,8 +616,18 @@ export class Desktop {
     this.trimCache();
   }
   /** 分块正文查询保留明确的 runtime 所有权。 */
-  readContent(id: string, offset: number) {
-    return this.api.content(this.runtimeId, id, offset);
+  async readContent(id: string, offset: number) {
+    const generation = this.generation;
+    const session = this.snapshot.sessionFile;
+    const runtime = this.runtimeId;
+    const page = await this.api.content(runtime, id, offset);
+    if (
+      generation !== this.generation ||
+      runtime !== this.runtimeId ||
+      session !== this.snapshot.sessionFile
+    )
+      throw new Error('会话已切换，正文读取已取消');
+    return page;
   }
   /** 配置更新原子持久化，运行时配置需重新连接才生效。 */
   async saveSettings(settings: Settings): Promise<void> {

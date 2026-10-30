@@ -18,6 +18,11 @@
   --accent-soft: #e9f1ec;
   --error: #a33a36;
   --shadow: 0 8px 40px #0000000c;
+  --diff-added: #245b37;
+  --diff-added-bg: #e8f3e9;
+  --diff-removed: #a52b32;
+  --diff-removed-bg: #fbeaec;
+  --diff-mark: #0002;
   color-scheme: light;
 }
 :root[data-theme='dark'] {
@@ -32,6 +37,11 @@
   --accent-soft: #2b3b30;
   --error: #f1948b;
   --shadow: 0 8px 40px #0004;
+  --diff-added: #a6ddb4;
+  --diff-added-bg: #263b2d;
+  --diff-removed: #ffb0b5;
+  --diff-removed-bg: #492d33;
+  --diff-mark: #fff2;
   color-scheme: dark;
 }
 * {
@@ -704,6 +714,13 @@ button svg {
   border: 0;
   padding: 0;
 }
+.send-button.steer-button {
+  width: auto;
+  padding: 0 10px;
+  gap: 5px;
+  border-radius: 9px;
+  font-size: 12px;
+}
 .send-button:hover:not(:disabled) {
   background: var(--accent);
 }
@@ -834,6 +851,11 @@ button svg {
 .message.user .markdown p {
   margin: 0;
 }
+.delivery-status {
+  color: var(--muted);
+  font-size: 11px;
+  margin-bottom: 5px;
+}
 .message-actions {
   height: 25px;
   display: flex;
@@ -937,6 +959,134 @@ button svg {
 }
 .tool {
   padding: 5px 0 15px;
+}
+.tool-step {
+  border: 1px solid var(--border);
+  border-radius: 11px;
+  /* clip 保留圆角裁切，同时让标题相对外层对话吸顶。 */
+  overflow: clip;
+  font-size: 12px;
+}
+.tool-step.tool-failed {
+  border-color: var(--error);
+}
+.tool-heading {
+  position: relative;
+  z-index: 3;
+  background: var(--bg);
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  text-align: left;
+  width: 100%;
+  border: 0;
+  border-radius: 0;
+  padding: 10px 12px;
+}
+.tool-step:has(.tool-code-line:nth-child(20))
+  .tool-heading[aria-expanded='true'] {
+  position: sticky;
+  top: 0;
+}
+.tool-name {
+  color: var(--accent);
+  font-weight: 600;
+}
+.tool-command,
+.tool-path {
+  font-family: Consolas, monospace;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+  flex: 1;
+}
+.tool-range {
+  color: var(--muted);
+}
+.tool-state {
+  margin-left: auto;
+  color: var(--muted);
+  white-space: nowrap;
+}
+.tool-failed .tool-state {
+  color: var(--error);
+}
+.tool-toggle-label {
+  color: var(--muted);
+  white-space: nowrap;
+}
+.tool-chevron-open {
+  transform: rotate(180deg);
+}
+.tool-expanded > button,
+.tool-expanded .tool-code {
+  scroll-margin-top: 60px;
+}
+.tool-expanded,
+.tool-preview {
+  border-top: 1px solid var(--border);
+}
+.tool-code {
+  overflow: auto;
+  background: var(--sidebar);
+  overscroll-behavior: auto;
+  max-width: 100%;
+}
+.tool-code.virtual-code {
+  height: min(420px, 60dvh);
+}
+.tool-code-lines {
+  font:
+    12px/21px Consolas,
+    'Microsoft YaHei',
+    monospace;
+  margin: 0;
+  padding: 0 10px;
+  width: max-content;
+  min-width: 100%;
+  white-space: pre;
+}
+.tool-code-line {
+  display: block;
+  height: 21px;
+  min-width: 100%;
+}
+.diff-added {
+  color: var(--diff-added);
+  background: var(--diff-added-bg);
+}
+.diff-removed {
+  color: var(--diff-removed);
+  background: var(--diff-removed-bg);
+}
+.diff-context {
+  color: var(--muted);
+}
+.tool-code mark {
+  background: var(--diff-mark);
+  color: inherit;
+  font-weight: 600;
+}
+.tool-empty,
+.tool-warning,
+.tool-load-status,
+.tool-load-error {
+  margin: 0;
+  padding: 7px 12px;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+.tool-warning,
+.tool-load-error {
+  color: var(--error);
+}
+.tool-load-status {
+  font-size: 11px;
+}
+.tool-expand-hint,
+.tool-load-more {
+  margin: 3px 5px;
 }
 .tool details {
   border: 1px solid var(--border);

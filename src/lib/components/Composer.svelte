@@ -3,7 +3,7 @@
   import Icon from './Icon.svelte';
   import { shouldSend } from '../state/reducer';
   import type { Command } from '../types';
-  /** running 时主按钮停止；回车通过显式模式菜单选择 steer/followUp，绝不隐式猜测。 */
+  /** 运行中 Enter/发送直接引导当前任务，后续消息与停止使用独立按钮。 */
   let {
     value = $bindable(''),
     disabled = false,
@@ -23,7 +23,6 @@
   } = $props();
   let textarea: HTMLTextAreaElement;
   let composing = false;
-  let modeMenu = $state(false);
   let matches = $derived(
     value.startsWith('/') && !value.includes('\n')
       ? commands
@@ -40,11 +39,10 @@
       textarea.style.height = `${Math.min(textarea.scrollHeight, 200)}px`;
     }
   });
-  /** 运行中提交先显示选择，不清空草稿。 */
-  function submit(): void {
+  /** 模式在按钮与提示中明确表达；提交期间阻止重复请求。 */
+  function submit(mode?: 'steer' | 'followUp'): void {
     if (!value.trim() || disabled || submitting) return;
-    if (running) modeMenu = true;
-    else onsend();
+    onsend(mode ?? (running ? 'steer' : undefined));
   }
   /** IME 回车由浏览器确认候选；只有非组合输入才 preventDefault 并发送。 */
   function keydown(event: KeyboardEvent): void {
@@ -77,7 +75,11 @@
     bind:this={textarea}
     bind:value
     rows="1"
-    placeholder={disabled ? '先选择项目文件夹，再开始对话' : '向 Pi 发送消息'}
+    placeholder={disabled
+      ? '先选择项目文件夹，再开始对话'
+      : running
+        ? '补充要求或调整方向，引导当前任务'
+        : '向 Pi 发送消息'}
     aria-label="消息输入"
     {disabled}
     onkeydown={keydown}
@@ -90,43 +92,37 @@
   <div class="composer-bottom">
     <span class="composer-hint"
       >{running
-        ? '任务运行中 · 可发送引导或后续消息'
+        ? 'Enter 发送引导 · Shift + Enter 换行'
         : 'Shift + Enter 换行'}</span
     >
     <div class="composer-actions">
-      {#if running && value.trim()}<button
+      {#if running}
+        <button
           class="text-button"
-          onclick={() => {
-            modeMenu = !modeMenu;
-          }}
-          disabled={submitting}>发送消息</button
-        >{/if}
+          title="排在当前任务完成后处理"
+          disabled={disabled || submitting || !value.trim()}
+          onclick={() => submit('followUp')}>完成后发送</button
+        >
+        <button
+          class="send-button stop-button"
+          aria-label="停止任务"
+          title="停止任务"
+          {disabled}
+          onclick={onstop}><Icon name="stop" size={18} /></button
+        >
+      {/if}
       <button
         class="send-button"
-        aria-label={running ? '停止任务' : '发送消息'}
-        title={running ? '停止任务' : '发送消息'}
-        disabled={disabled || (!running && (!value.trim() || submitting))}
-        onclick={() => (running ? onstop() : submit())}
-        ><Icon name={running ? 'stop' : 'arrow'} size={19} /></button
+        class:steer-button={running}
+        aria-label={running ? '发送引导' : '发送消息'}
+        title={running ? '发送引导，在下一个可处理节点生效' : '发送消息'}
+        disabled={disabled || !value.trim() || submitting}
+        onclick={() => submit()}
+        >{#if running}<span>发送引导</span>{/if}<Icon
+          name="arrow"
+          size={19}
+        /></button
       >
     </div>
   </div>
-  {#if modeMenu}<div class="send-menu">
-      <button
-        onclick={() => {
-          modeMenu = false;
-          onsend('steer');
-        }}>引导当前任务<small>在本轮工具执行后处理</small></button
-      ><button
-        onclick={() => {
-          modeMenu = false;
-          onsend('followUp');
-        }}>完成后发送<small>排在当前任务之后</small></button
-      ><button
-        class="muted"
-        onclick={() => {
-          modeMenu = false;
-        }}>取消</button
-      >
-    </div>{/if}
 </div>

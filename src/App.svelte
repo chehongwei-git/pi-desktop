@@ -569,20 +569,23 @@
               }}>连接 Pi</button
             >{/if}
         </div>
-      {:else}<Transcript
-          messages={desktop.messages}
-          hasMore={desktop.hasMore}
-          loading={desktop.loadingHistory}
-          onolder={() => desktop.refreshHistory(desktop.before)}
-          onfull={(message) => {
-            void showFull(message);
-          }}
-          onvisible={(ids) => desktop.pinVisible(ids)}
-          onload={(message) => desktop.loadPreview(message)}
-          onerror={(message) => {
-            desktop.error = message;
-          }}
-        />{/if}
+      {:else}{#key `${desktop.runtimeId}:${desktop.snapshot.sessionFile ?? ''}`}<Transcript
+            messages={desktop.messages}
+            hasMore={desktop.hasMore}
+            loading={desktop.loadingHistory}
+            onolder={() => desktop.refreshHistory(desktop.before)}
+            onfull={(message) => {
+              void showFull(message);
+            }}
+            toolViews={desktop.toolViews}
+            ontoggletool={(id, section) => desktop.toggleTool(id, section)}
+            read={(id, offset) => desktop.readContent(id, offset)}
+            onvisible={(ids) => desktop.pinVisible(ids)}
+            onload={(message) => desktop.loadPreview(message)}
+            onerror={(message) => {
+              desktop.error = message;
+            }}
+          />{/key}{/if}
       <div class="composer-area">
         {#if runLabel}<div class="run-status" role="status">
             <span class="working status-dot"></span>{runLabel}

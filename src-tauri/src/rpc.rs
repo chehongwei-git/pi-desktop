@@ -2,6 +2,7 @@
 use crate::{
     history::{active_branch, text_content},
     storage::{preview, Store},
+    tool::ToolPresentation,
     types::{AppError, Message, Result},
 };
 use serde_json::{json, Value};
@@ -45,6 +46,7 @@ pub struct Projection {
     active_id: Option<String>,
     blocks: BTreeMap<usize, (String, String)>,
     counter: u64,
+    tools: BTreeMap<String, ToolPresentation>,
 }
 impl Projection {
     /// 新会话或恢复成功后才能清空；取消切换不得调用。
@@ -52,9 +54,26 @@ impl Projection {
         self.messages.clear();
         self.blocks.clear();
         self.active_id = None;
+        self.tools.clear();
+    }
+    fn calls(&mut self, value: &Value, store: &mut Store) -> Result<()> {
+        if let Some(blocks) = value["content"].as_array() {
+            for block in blocks.iter().filter(|b| b["type"] == "toolCall") {
+                if let (Some(id), Some(name)) = (block["id"].as_str(), block["name"].as_str()) {
+                    if !self.tools.contains_key(id) {
+                        self.tools.insert(
+                            id.into(),
+                            ToolPresentation::call(id, name, &block["arguments"], store)?,
+                        );
+                    }
+                }
+            }
+        }
+        Ok(())
     }
     /// 全文大于预览阈值时存为私有引用；最终完整消息始终覆盖增量拼接。
     fn message(&mut self, value: &Value, id: String, store: &mut Store) -> Result<Message> {
+        self.calls(value, store)?;
         let role = value["role"].as_str().unwrap_or("unknown").to_string();
         let mut text = if role == "compactionSummary" || role == "branchSummary" {
             value["summary"].as_str().unwrap_or("").into()
@@ -84,6 +103,23 @@ impl Projection {
         } else {
             None
         };
+        let tool = if role == "toolResult" {
+            let call_id = value["toolCallId"].as_str().unwrap_or("unknown");
+            let mut tool = self
+                .tools
+                .get(call_id)
+                .cloned()
+                .unwrap_or_else(|| ToolPresentation {
+                    call_id: call_id.into(),
+                    name: value["toolName"].as_str().unwrap_or("工具").into(),
+                    ..Default::default()
+                });
+            tool.result(&text, &value["details"], store)?;
+            self.tools.insert(call_id.into(), tool.clone());
+            Some(tool)
+        } else {
+            None
+        };
         Ok(Message {
             id,
             role,
@@ -97,7 +133,11 @@ impl Projection {
                 "done"
             }
             .into(),
-            name: value["toolName"].as_str().map(String::from),
+            name: tool
+                .as_ref()
+                .map(|t| t.name.clone())
+                .or_else(|| value["toolName"].as_str().map(String::from)),
+            tool,
         })
     }
     /// 稳定 ID upsert，工具结果与执行结束不会在对话中重复显示。
@@ -130,6 +170,7 @@ impl Projection {
                         truncated: false,
                         status: "streaming".into(),
                         name: None,
+                        tool: None,
                     },
                     store,
                 )?;
@@ -188,15 +229,34 @@ impl Projection {
                         .as_str()
                         .ok_or_else(|| AppError::new("PROTOCOL", "工具事件缺失 ID"))?
                 );
+                let call_id = event["toolCallId"].as_str().unwrap_or("unknown");
+                let name = event["toolName"].as_str().unwrap_or("工具");
+                if kind == "tool_execution_start" {
+                    self.tools.insert(
+                        call_id.into(),
+                        ToolPresentation::call(call_id, name, &event["args"], store)?,
+                    );
+                }
                 let data = match kind {
-                    "tool_execution_start" => &event["args"],
+                    "tool_execution_start" => &Value::Null,
                     "tool_execution_update" => &event["partialResult"],
                     _ => &event["result"],
                 };
                 let mut text = text_content(&data["content"]);
-                if text.is_empty() {
+                if text.is_empty() && !data.is_null() && !data["content"].is_array() {
                     text = serde_json::to_string_pretty(data).unwrap_or_default();
                 }
+                let mut tool =
+                    self.tools
+                        .get(call_id)
+                        .cloned()
+                        .unwrap_or_else(|| ToolPresentation {
+                            call_id: call_id.into(),
+                            name: name.into(),
+                            ..Default::default()
+                        });
+                tool.result(&text, &data["details"], store)?;
+                self.tools.insert(call_id.into(), tool.clone());
                 let content_ref = if !text.is_empty() && kind == "tool_execution_end" {
                     Some(store.body(&text)?)
                 } else {
@@ -218,7 +278,8 @@ impl Projection {
                             "done"
                         }
                         .into(),
-                        name: event["toolName"].as_str().map(String::from),
+                        name: Some(tool.name.clone()),
+                        tool: Some(tool),
                     },
                     store,
                 )?;
@@ -324,6 +385,88 @@ mod tests {
                 message.truncated
             );
         }
+    }
+    #[test]
+    fn tool_metadata_survives_final_messages_and_history_restore() {
+        let mut projection = Projection::default();
+        let mut store = Store::new().unwrap();
+        let args = json!({"path":"src/main.ts","edits":[{"oldText":"old","newText":"new"}]});
+        let result = json!({"content":[{"type":"text","text":"编辑成功"}],"details":{"diff":"-1 old\n+1 new","firstChangedLine":1}});
+        projection.event(json!({"type":"tool_execution_start","toolCallId":"edit-1","toolName":"edit","args":args}), &mut store).unwrap();
+        projection.event(json!({"type":"tool_execution_end","toolCallId":"edit-1","toolName":"edit","result":result}), &mut store).unwrap();
+        // 最后的持久化 toolResult 有可能没有 details，不能覆盖已收到的 diff。
+        let final_message =
+            json!({"role":"toolResult","toolCallId":"edit-1","content":result["content"]});
+        projection
+            .event(
+                json!({"type":"message_end","message":final_message}),
+                &mut store,
+            )
+            .unwrap();
+        assert_eq!(projection.messages.len(), 1);
+        let tool = projection.messages[0].tool.as_ref().unwrap();
+        assert_eq!(tool.name, "edit");
+        assert_eq!(tool.path.as_deref(), Some("src/main.ts"));
+        assert_eq!(tool.diff_preview, "-1 old\n+1 new");
+        assert!(tool.args_ref.is_some());
+        assert_eq!(
+            store.content(tool.diff_ref.as_deref().unwrap(), 0).unwrap()["text"],
+            "-1 old\n+1 new"
+        );
+        let history = json!({"leafId":"b","entries":[
+            {"id":"a","parentId":null,"type":"message","message":{"role":"assistant","content":[{"type":"toolCall","id":"edit-1","name":"edit","arguments":args}]}},
+            {"id":"b","parentId":"a","type":"message","message":{"role":"toolResult","toolCallId":"edit-1","toolName":"edit","content":result["content"],"details":result["details"]}}
+        ]});
+        projection.restore(&history, &mut store).unwrap();
+        let restored = projection.messages.last().unwrap().tool.as_ref().unwrap();
+        assert_eq!(restored.path.as_deref(), Some("src/main.ts"));
+        assert_eq!(restored.diff_preview, "-1 old\n+1 new");
+        assert_eq!(restored.name, "edit");
+        projection.reset();
+        assert!(projection.tools.is_empty());
+    }
+    #[test]
+    fn tool_tail_and_utf8_pages_preserve_output_and_truncation_details() {
+        let mut projection = Projection::default();
+        let mut store = Store::new().unwrap();
+        let text = format!("{}\n真实结尾", "你".repeat(40000));
+        projection.event(json!({"type":"tool_execution_start","toolCallId":"b","toolName":"bash","args":{"command":"echo output"}}), &mut store).unwrap();
+        projection.event(json!({"type":"tool_execution_update","toolCallId":"b","toolName":"bash","partialResult":{"content":[{"type":"text","text":"部分输出"}]}}), &mut store).unwrap();
+        projection.event(json!({"type":"tool_execution_end","toolCallId":"b","toolName":"bash","result":{"content":[{"type":"text","text":text}],"details":{"truncation":{"truncated":true,"truncatedBy":"bytes","maxBytes":120000},"fullOutputPath":"C:/tmp/full.txt"}}}), &mut store).unwrap();
+        let message = projection.messages.last().unwrap();
+        let tool = message.tool.as_ref().unwrap();
+        assert!(message.truncated);
+        assert!(tool.tail.ends_with("真实结尾"));
+        assert!(tool.tail.len() <= 16 * 1024);
+        assert_eq!(tool.command.as_deref(), Some("echo output"));
+        assert_eq!(tool.truncation.as_ref().unwrap()["truncated"], true);
+        assert_eq!(tool.full_output_path.as_deref(), Some("C:/tmp/full.txt"));
+        let mut offset = 0;
+        let mut all = String::new();
+        loop {
+            let page = store
+                .content(message.content_ref.as_deref().unwrap(), offset)
+                .unwrap();
+            all.push_str(page["text"].as_str().unwrap());
+            offset = page["next"].as_u64().unwrap() as usize;
+            if page["done"] == true {
+                break;
+            }
+        }
+        assert_eq!(all, text);
+    }
+    #[test]
+    fn write_parameters_are_references_and_empty_results_stay_empty() {
+        let mut projection = Projection::default();
+        let mut store = Store::new().unwrap();
+        let content = "const written = true;\n".repeat(10000);
+        projection.event(json!({"type":"tool_execution_start","toolCallId":"w","toolName":"write","args":{"path":"new.ts","content":content}}), &mut store).unwrap();
+        let message = projection.messages.last().unwrap();
+        assert!(message.text.is_empty());
+        assert!(message.tool.as_ref().unwrap().write_ref.is_some());
+        assert!(serde_json::to_string(message).unwrap().len() < 2048);
+        projection.event(json!({"type":"tool_execution_end","toolCallId":"w","toolName":"write","result":{"content":[]}}), &mut store).unwrap();
+        assert!(projection.messages.last().unwrap().text.is_empty());
     }
     /// accepted 与 agent_end 不是终点；只有 settled 才发布 idle。
     #[test]

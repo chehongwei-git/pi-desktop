@@ -24,7 +24,17 @@ export function reduceEvents(state: Transcript, events: AppEvent[]): void {
     }
     if (event.type === 'run') state.run = event.state;
     if (event.type === 'message') {
-      const index = indexes.get(event.message.id);
+      let index = indexes.get(event.message.id);
+      if (index === undefined && event.message.role === 'user') {
+        const pending = state.messages.findIndex(
+          (message) => message.delivery && message.text === event.message.text,
+        );
+        if (pending >= 0) {
+          index = pending;
+          indexes.delete(state.messages[pending].id);
+          indexes.set(event.message.id, pending);
+        }
+      }
       if (index === undefined) {
         indexes.set(event.message.id, state.messages.length);
         state.messages.push(event.message);

@@ -30,6 +30,36 @@ describe('conversation projection', () => {
     expect(state.messages).toHaveLength(1);
     expect(state.messages[0].text).toBe('authoritative');
   });
+  it('replaces queued steering one at a time with authoritative user messages without duplicate rows', () => {
+    const pending = (id: string): Message => ({
+      ...message(id, 'same guidance', 'done'),
+      role: 'user',
+      delivery: { mode: 'steer', state: 'queued' },
+    });
+    const state: Transcript = {
+      messages: [pending('p1'), pending('p2')],
+      run: 'running',
+    };
+    const final = {
+      ...message('user1', 'same guidance', 'done'),
+      role: 'user',
+    };
+    reduceEvents(state, [
+      { type: 'message', message: final },
+      { type: 'message', message: final },
+    ]);
+    expect(state.messages).toHaveLength(2);
+    expect(state.messages[0].delivery).toBeUndefined();
+    expect(state.messages[1].delivery?.state).toBe('queued');
+    reduceEvents(state, [
+      { type: 'message', message: { ...final, id: 'user2' } },
+    ]);
+    expect(state.messages.map((message) => message.id)).toEqual([
+      'user1',
+      'user2',
+    ]);
+    expect(state.messages.some((message) => message.delivery)).toBe(false);
+  });
   it('settled idle state is distinct from an accepted prompt', () => {
     const state: Transcript = { messages: [], run: 'running' };
     reduceEvents(state, [{ type: 'run', state: 'retrying' }]);

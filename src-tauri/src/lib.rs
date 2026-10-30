@@ -6,6 +6,7 @@ mod rpc;
 mod runtime;
 mod settings;
 mod storage;
+mod tool;
 mod types;
 
 use serde_json::{json, Value};

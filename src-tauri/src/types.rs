@@ -102,6 +102,8 @@ pub struct Message {
     pub truncated: bool,
     pub status: String,
     pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool: Option<crate::tool::ToolPresentation>,
 }
 
 /// 唯一可调用的 Pi 业务集合。不存在透传任意 RPC 的后门。

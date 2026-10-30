@@ -3,7 +3,8 @@
   import { onMount } from 'svelte';
   import { openUrl } from '@tauri-apps/plugin-opener';
   import { markdown, highlight, safeExternal } from '../markdown';
-  import type { Message } from '../types';
+  import ToolMessage from './ToolMessage.svelte';
+  import type { ContentPage, Message } from '../types';
   import Icon from './Icon.svelte';
   /** onfull 打开分块正文，onload 只读取有界预览；不向组件暴露本地路径。 */
   let {
@@ -11,17 +12,25 @@
     onfull,
     onload,
     onerror,
+    toolViews,
+    ontoggletool,
+    read,
   }: {
     message: Message;
     onfull: (message: Message) => void;
     onload: (message: Message) => Promise<void>;
     onerror: (message: string) => void;
+    toolViews: Record<string, Record<string, boolean>>;
+    ontoggletool: (id: string, section: string) => void;
+    read: (id: string, offset: number) => Promise<ContentPage>;
   } = $props();
   let body = $state<HTMLDivElement>();
   let copied = $state(false);
   let copyTimer: ReturnType<typeof setTimeout>;
   let html = $derived(
-    message.status === 'streaming' ? '' : markdown(message.text),
+    message.role === 'toolResult' || message.status === 'streaming'
+      ? ''
+      : markdown(message.text),
   );
   onMount(() => {
     if (!message.text && message.contentRef)
@@ -87,24 +96,16 @@
   class:summary={message.role === 'compactionSummary'}
 >
   {#if message.role === 'toolResult'}
-    <details>
-      <summary
-        ><span class:working={message.status === 'running'} class="status-dot"
-        ></span><strong>{message.name ?? '工具'}</strong><span class="muted"
-          >{message.status === 'running'
-            ? '执行中'
-            : message.status === 'error'
-              ? '执行失败'
-              : '已完成'}</span
-        ><Icon name="down" size={14} /></summary
-      >
-      <pre class="tool-output">{message.text}</pre>
-      {#if message.contentRef && message.truncated}<button
-          class="text-button"
-          onclick={() => onfull(message)}>分块查看完整输出</button
-        >{/if}
-    </details>
+    <ToolMessage {message} views={toolViews} ontoggle={ontoggletool} {read} />
   {:else}
+    {#if message.delivery}<div class="delivery-status" role="status">
+        {message.delivery.mode === 'steer' ? '引导消息' : '后续消息'} · {message
+          .delivery.state === 'sending'
+          ? '正在提交'
+          : message.delivery.mode === 'steer'
+            ? '等待处理'
+            : '等待当前任务完成'}
+      </div>{/if}
     {#if message.thinking}<details class="thinking">
         <summary>思考过程</summary>
         <pre>{message.thinking}</pre>
