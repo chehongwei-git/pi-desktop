@@ -1,7 +1,7 @@
-<!-- Pi 扩展交互适配：请求独立计时/独立 ID，超时后关闭，迟到响应不会污染下一弹窗。 -->
+<!-- 扩展交互统一呈现在对话底部，独立 ID 与计时器保证响应不会污染下一个请求。 -->
 <script lang="ts">
   import { onMount } from 'svelte';
-  import Modal from './Modal.svelte';
+  import { terminalText } from '../terminal-text';
   import type { ExtensionRequest } from '../types';
   /** value/confirmed/cancelled 与 Pi extension_ui_response 字段一一对应。 */
   let {
@@ -17,7 +17,7 @@
   } = $props();
   let value = $state(initialValue());
   let completed = false;
-  /** keyed 弹层每个 request 只拍摄一次初值，避免输入被外部通知重置。 */
+  /** keyed 交互区每个 request 只拍摄一次初值，避免输入被外部通知重置。 */
   function initialValue(): string {
     return request.prefill ?? request.defaultValue ?? '';
   }
@@ -41,14 +41,12 @@
   });
 </script>
 
-<Modal
-  title={request.title ?? 'Pi 需要你的输入'}
-  onclose={() => respond({ cancelled: true })}
->
+{#snippet content()}
   {#if request.message}<p class="dialog-message">{request.message}</p>{/if}
   {#if request.method === 'select'}<div class="option-list">
       {#each request.options ?? [] as option}<button
-          onclick={() => respond({ value: option })}>{option}</button
+          onclick={() => respond({ value: option })}
+          >{terminalText(option)}</button
         >{/each}
     </div>
   {:else if request.method === 'confirm'}<footer class="modal-actions">
@@ -68,9 +66,37 @@
         />{/if}</label
     >
     <footer class="modal-actions">
-      <button onclick={() => respond({ cancelled: true })}>取消</button><button
-        class="primary"
-        onclick={() => respond({ value })}>提交</button
-      >
+      <button class="primary" onclick={() => respond({ value })}>提交</button>
     </footer>{/if}
-</Modal>
+{/snippet}
+
+<section class="inline-choice" aria-label={request.title ?? 'Pi 需要你的输入'}>
+  <header>
+    <strong>{request.title ?? 'Pi 需要你的输入'}</strong>
+    <button class="text-button" onclick={() => respond({ cancelled: true })}
+      >取消</button
+    >
+  </header>
+  {@render content()}
+</section>
+
+<style>
+  .inline-choice {
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 12px;
+    margin-bottom: 10px;
+    max-height: 30vh;
+    overflow-y: auto;
+  }
+  header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 8px;
+  }
+  strong {
+    font-size: 13px;
+  }
+</style>

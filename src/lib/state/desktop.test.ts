@@ -8,6 +8,89 @@ function fixture(action: Bridge['action']) {
   return new Desktop({ ...bridge, action });
 }
 describe('desktop business behavior', () => {
+  it('cancels pending and newly arriving plan dialogs during stop', async () => {
+    let finish!: (value: unknown) => void;
+    const action = vi.fn().mockImplementation(async (_runtime, command) => {
+      if (command.type === 'stop')
+        return new Promise((resolve) => {
+          finish = resolve;
+        });
+      return command.type === 'state' ? { isStreaming: false } : {};
+    });
+    const desktop = fixture(action);
+    desktop.connection = 'ready';
+    desktop.run = 'running';
+    desktop.extensions = [
+      { type: 'extension_ui_request', id: 'first', method: 'select' },
+    ];
+    const stopping = desktop.stop();
+    await vi.waitFor(() =>
+      expect(action).toHaveBeenCalledWith('', { type: 'stop' }),
+    );
+    // 使用事件处理入口模拟 abort 的 agent_end 钩子新建对话框。
+    (desktop as any).extension({ id: 'late', method: 'select' });
+    await vi.waitFor(() =>
+      expect(action).toHaveBeenCalledWith('', {
+        type: 'extension_response',
+        id: 'late',
+        value: { cancelled: true },
+      }),
+    );
+    expect(action).toHaveBeenCalledWith('', {
+      type: 'extension_response',
+      id: 'first',
+      value: { cancelled: true },
+    });
+    expect(desktop.extensions).toHaveLength(0);
+    finish({});
+    await stopping;
+    expect(desktop.run).toBe('idle');
+  });
+  it.each([false, true])(
+    'reconciles authoritative state after stop timeout (streaming=%s)',
+    async (streaming) => {
+      vi.useFakeTimers();
+      try {
+        const action = vi.fn().mockImplementation(async (_runtime, command) => {
+          if (command.type === 'stop') throw new Error('timeout');
+          return { isStreaming: streaming };
+        });
+        const desktop = fixture(action);
+        desktop.connection = 'ready';
+        desktop.draft = 'keep';
+        await expect(desktop.stop()).rejects.toThrow('timeout');
+        expect(desktop.run).toBe(streaming ? 'aborting' : 'idle');
+        expect(desktop.draft).toBe('keep');
+        expect(vi.getTimerCount()).toBe(0);
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+  it('cleans extension status and widget text without changing select values', () => {
+    const desktop = fixture(vi.fn());
+    const colored = '\x1b[38;2;205;154;34m⏸ plan\x1b[39m';
+    (desktop as any).extension({
+      method: 'setStatus',
+      statusKey: 'plan',
+      statusText: colored,
+    });
+    (desktop as any).extension({
+      method: 'setWidget',
+      widgetKey: 'plan',
+      widgetLines: [colored],
+    });
+    (desktop as any).extension({
+      id: 'choice',
+      method: 'select',
+      title: colored,
+      options: [colored],
+    });
+    expect(desktop.statuses.plan).toBe('⏸ plan');
+    expect(desktop.widgets.plan).toEqual(['⏸ plan']);
+    expect(desktop.extensions[0].title).toBe('⏸ plan');
+    expect(desktop.extensions[0].options).toEqual([colored]);
+  });
   it('handles builtin commands locally and never sends them as prompts or steering', async () => {
     const action = vi.fn().mockResolvedValue({});
     const desktop = fixture(action);

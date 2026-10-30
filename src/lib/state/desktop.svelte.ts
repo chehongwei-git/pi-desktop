@@ -1,6 +1,7 @@
 /** 应用门面：组件只调用用户意图；集中连接状态、草稿、事件确认与切换事务。 */
 import { bridge, errorMessage, type Bridge } from '../client';
 import { parseBuiltin } from '../commands';
+import { terminalText } from '../terminal-text';
 import { reduceEvents } from './reducer';
 import {
   defaultSettings,
@@ -242,6 +243,7 @@ export class Desktop {
     for (const id of ids) this.accessed.set(id, ++this.accessSerial);
   }
   private stopTimer?: ReturnType<typeof setTimeout>;
+  private stopping = false;
   /** 依赖注入仅用在真正需要替换的 IPC 边界，不建立全局 DI 容器。 */
   constructor(private api: Bridge = bridge) {}
   /** 当前会话草稿键；空白新会话也能在项目之间独立恢复。 */
@@ -458,16 +460,38 @@ export class Desktop {
   }
   /** 流式阶段通知与对话框分离，fire-and-forget 不发送多余响应。 */
   private extension(request: ExtensionRequest): void {
+    // 清理呈现字段，选项值保持原样以便扩展精确匹配返回值。
+    request = {
+      ...request,
+      title:
+        request.title === undefined ? undefined : terminalText(request.title),
+      message:
+        request.message === undefined
+          ? undefined
+          : terminalText(request.message),
+    };
     if (['select', 'confirm', 'input', 'editor'].includes(request.method)) {
+      if (this.stopping) {
+        void this.guard(async () => {
+          await this.action({
+            type: 'extension_response',
+            id: request.id,
+            value: { cancelled: true },
+          });
+        });
+        return;
+      }
       if (!this.extensions.some((e) => e.id === request.id))
         this.extensions.push(request);
       return;
     }
     if (request.method === 'notify') this.notice = request.message ?? '';
     if (request.method === 'setStatus' && request.statusKey)
-      this.statuses[request.statusKey] = request.statusText ?? '';
+      this.statuses[request.statusKey] = terminalText(request.statusText ?? '');
     if (request.method === 'setWidget' && request.widgetKey)
-      this.widgets[request.widgetKey] = request.widgetLines ?? [];
+      this.widgets[request.widgetKey] = (request.widgetLines ?? []).map(
+        terminalText,
+      );
     if (request.method === 'setTitle')
       document.title = request.title || 'Pi Desktop';
     if (request.method === 'set_editor_text') {
@@ -683,25 +707,51 @@ export class Desktop {
   }
   /** 停止先清队列再 abort；5 秒后提供强制断开入口，保留草稿和当前消息。 */
   async stop(): Promise<void> {
+    if (this.stopping) return;
+    this.stopping = true;
+    const generation = this.generation;
+    const runtimeId = this.runtimeId;
     this.run = 'aborting';
     this.stopTimer = setTimeout(() => {
       if (this.run === 'aborting')
         this.notice = '停止超过 5 秒，可继续等待或强制关闭 Pi。';
     }, 5000);
-    const cleared = await this.action<{
-      steering?: string[];
-      followUp?: string[];
-    }>({ type: 'stop' });
-    this.recovered.push(
-      ...(cleared.steering ?? []),
-      ...(cleared.followUp ?? []),
-    );
-    this.messages = this.messages.filter((message) => !message.delivery);
-    this.queued = [];
-    // abort 返回代表 Pi 空闲；刷新状态同时允许已到达的 settled 被归并。
-    await this.syncState();
-    if (!this.snapshot.isStreaming) this.run = 'idle';
-    clearTimeout(this.stopTimer);
+    try {
+      // 先释放扩展等待者；abort 可能正在等待 agent_end 钩子完成。
+      await Promise.all(
+        [...this.extensions].map((request) =>
+          this.respond(request, { cancelled: true }),
+        ),
+      );
+      const cleared = await this.api.action<{
+        steering?: string[];
+        followUp?: string[];
+      }>(runtimeId, { type: 'stop' });
+      if (generation !== this.generation) return;
+      this.recovered.push(
+        ...(cleared.steering ?? []),
+        ...(cleared.followUp ?? []),
+      );
+      this.messages = this.messages.filter((message) => !message.delivery);
+      this.queued = [];
+    } finally {
+      clearTimeout(this.stopTimer);
+      this.stopping = false;
+      if (generation === this.generation && this.connection === 'ready') {
+        try {
+          await this.syncState();
+          this.run =
+            this.snapshot.isStreaming || this.snapshot.isCompacting
+              ? 'aborting'
+              : 'idle';
+          if (this.run === 'aborting')
+            this.notice = 'Pi 仍未停止，可继续等待或强制关闭 Pi。';
+        } catch {
+          this.notice =
+            '无法确认停止状态，可继续等待或强制关闭 Pi；草稿已保留。';
+        }
+      }
+    }
   }
   /** 新建/切换只在成功且未被扩展取消后提交 UI 状态。 */
   async switchSession(path?: string, project = this.project): Promise<void> {

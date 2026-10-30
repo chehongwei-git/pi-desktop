@@ -154,6 +154,32 @@ async function mock(
           }
           if (command === 'perform') {
             switch (args.action.type) {
+              case 'extension_response':
+                if (
+                  args.action.id === 'plan-stop' &&
+                  args.action.value.cancelled
+                )
+                  host.finishPlanStop?.({});
+                return {};
+              case 'stop':
+                if (host.planStop) {
+                  return new Promise((resolve) => {
+                    host.finishPlanStop = resolve;
+                    host.emitEvents([
+                      {
+                        type: 'extension',
+                        request: {
+                          type: 'extension_ui_request',
+                          id: 'plan-stop',
+                          method: 'select',
+                          title: 'Plan mode - what next?',
+                          options: ['Execute the plan', 'Stay in plan mode'],
+                        },
+                      },
+                    ]);
+                  });
+                }
+                return {};
               case 'new_session':
                 sessionFile = 'new.jsonl';
                 return { cancelled: false };
@@ -381,6 +407,205 @@ test('fatal tree protocol failure still allows draft editing after clicking retu
   await expect(
     page.getByRole('button', { name: '发送消息', exact: true }),
   ).toBeDisabled();
+});
+
+test('closing an inline plan choice sends cancellation with its original ID', async ({
+  page,
+}) => {
+  await mock(page);
+  await page.goto('/');
+  await expect(page.getByRole('textbox', { name: '消息输入' })).toBeEnabled();
+  await page.evaluate(() =>
+    (window as any).emitEvents([
+      {
+        type: 'extension',
+        request: {
+          type: 'extension_ui_request',
+          id: 'original-plan-choice',
+          method: 'select',
+          title: 'Plan mode - what next?',
+          options: ['Execute the plan', 'Stay in plan mode'],
+        },
+      },
+    ]),
+  );
+  const choice = page.getByRole('region', { name: 'Plan mode - what next?' });
+  await expect(choice).toBeVisible();
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  await expect(page.getByRole('textbox', { name: '消息输入' })).toBeEnabled();
+  await choice.getByRole('button', { name: '取消', exact: true }).click();
+  await expect(choice).toHaveCount(0);
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () =>
+          (window as any).ipcCalls.filter(
+            (call: any) =>
+              call.action?.type === 'extension_response' &&
+              call.action.id === 'original-plan-choice' &&
+              call.action.value.cancelled,
+          ).length,
+      ),
+    )
+    .toBe(1);
+});
+
+test('inline plan execution preserves the original selection value', async ({
+  page,
+}) => {
+  await mock(page);
+  await page.goto('/');
+  await expect(page.getByRole('textbox', { name: '消息输入' })).toBeEnabled();
+  await page.evaluate(() =>
+    (window as any).emitEvents([
+      {
+        type: 'extension',
+        request: {
+          type: 'extension_ui_request',
+          id: 'plan-execute',
+          method: 'select',
+          title: 'Plan mode - what next?',
+          options: [
+            'Execute the plan (track progress)',
+            'Stay in plan mode',
+            'Refine the plan',
+          ],
+        },
+      },
+    ]),
+  );
+  const choice = page.getByRole('region', { name: 'Plan mode - what next?' });
+  await expect(choice).toBeVisible();
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  await choice
+    .getByRole('button', {
+      name: 'Execute the plan (track progress)',
+      exact: true,
+    })
+    .click();
+  await expect(choice).toHaveCount(0);
+  await expect
+    .poll(() =>
+      page.evaluate(() =>
+        (window as any).ipcCalls.some(
+          (call: any) =>
+            call.action?.type === 'extension_response' &&
+            call.action.id === 'plan-execute' &&
+            call.action.value.value === 'Execute the plan (track progress)',
+        ),
+      ),
+    )
+    .toBe(true);
+});
+
+for (const method of ['input', 'editor', 'confirm', 'select']) {
+  test(`extension ${method} questions stay inline and preserve the chat draft`, async ({
+    page,
+  }) => {
+    await mock(page);
+    await page.goto('/');
+    const draft = page.getByRole('textbox', { name: '消息输入' });
+    await expect(draft).toBeEnabled();
+    await draft.fill('保留消息草稿');
+    await page.evaluate(
+      (method) =>
+        (window as any).emitEvents([
+          {
+            type: 'extension',
+            request: {
+              type: 'extension_ui_request',
+              id: `question-${method}`,
+              method,
+              title: '补充方案细节',
+              message: '请提供你的偏好',
+              prefill: '初始内容',
+              options: ['选项一', '选项二'],
+            },
+          },
+        ]),
+      method,
+    );
+    const question = page.getByRole('region', { name: '补充方案细节' });
+    await expect(question).toBeVisible();
+    await expect(page.getByRole('dialog')).toHaveCount(0);
+    await expect(draft).toHaveValue('保留消息草稿');
+    if (method === 'input' || method === 'editor') {
+      const answer = question.getByRole('textbox', { name: '输入内容' });
+      await expect(answer).toHaveValue('初始内容');
+      await answer.fill('补充回答');
+      await question.getByRole('button', { name: '提交', exact: true }).click();
+    } else if (method === 'confirm') {
+      await question.getByRole('button', { name: '确认', exact: true }).click();
+    } else {
+      await question
+        .getByRole('button', { name: '选项二', exact: true })
+        .click();
+    }
+    await expect(question).toHaveCount(0);
+    await expect(draft).toHaveValue('保留消息草稿');
+    await expect
+      .poll(() =>
+        page.evaluate(
+          ({ method }) =>
+            (window as any).ipcCalls.some(
+              (call: any) =>
+                call.action?.type === 'extension_response' &&
+                call.action.id === `question-${method}` &&
+                (method === 'confirm'
+                  ? call.action.value.confirmed === true
+                  : call.action.value.value ===
+                    (method === 'select' ? '选项二' : '补充回答')),
+            ),
+          { method },
+        ),
+      )
+      .toBe(true);
+  });
+}
+
+test('plan status is readable and stop cancels the extension choice without hanging', async ({
+  page,
+}) => {
+  await mock(page);
+  await page.goto('/');
+  const input = page.getByRole('textbox', { name: '消息输入' });
+  await expect(input).toBeEnabled();
+  await page.evaluate(() => {
+    const host = window as any;
+    host.planStop = true;
+    host.holdRun = true;
+    host.emitEvents([
+      {
+        type: 'extension',
+        request: {
+          type: 'extension_ui_request',
+          method: 'setStatus',
+          statusKey: 'plan-mode',
+          statusText: '\x1b[38;2;205;154;34m⏸ plan\x1b[39m',
+        },
+      },
+    ]);
+  });
+  await expect(page.locator('.extension-status')).toHaveText('⏸ plan');
+  await input.fill('检查方案');
+  await input.press('Enter');
+  await page.getByRole('button', { name: '停止任务', exact: true }).click();
+  await expect(
+    page.getByRole('button', { name: '发送消息', exact: true }),
+  ).toBeVisible();
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  await expect
+    .poll(() =>
+      page.evaluate(() =>
+        (window as any).ipcCalls.some(
+          (call: any) =>
+            call.action?.type === 'extension_response' &&
+            call.action.id === 'plan-stop' &&
+            call.action.value.cancelled,
+        ),
+      ),
+    )
+    .toBe(true);
 });
 
 test('settings use native nested menus and remain inside the viewport', async ({

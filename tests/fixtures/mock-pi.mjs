@@ -6,6 +6,7 @@ if (process.argv.includes('--version')) {
 }
 let name = 'mock';
 let streaming = false;
+let pendingAbort;
 const emit = (value) => process.stdout.write(JSON.stringify(value) + '\n');
 const reply = (request, data) =>
   emit({
@@ -118,6 +119,17 @@ for await (const line of readline.createInterface({
       reply(request, { steering: ['queued draft'], followUp: [] });
       break;
     case 'abort':
+      if (name === 'plan-dialog') {
+        pendingAbort = request;
+        emit({
+          type: 'extension_ui_request',
+          id: 'pi-plan-choice',
+          method: 'select',
+          title: 'Plan mode - what next?',
+          options: ['Execute', 'Stay'],
+        });
+        break;
+      }
       streaming = false;
       reply(request, {});
       emit({ type: 'agent_settled' });
@@ -127,6 +139,16 @@ for await (const line of readline.createInterface({
       reply(request, { cancelled: request.sessionPath === 'cancel' });
       break;
     case 'extension_ui_response':
+      if (
+        request.id === 'pi-plan-choice' &&
+        pendingAbort &&
+        request.cancelled
+      ) {
+        streaming = false;
+        reply(pendingAbort, {});
+        pendingAbort = undefined;
+        emit({ type: 'agent_settled' });
+      }
       break;
     case 'prompt':
       if (request.message.startsWith('/pi-desktop-')) {

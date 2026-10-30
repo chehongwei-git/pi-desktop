@@ -422,7 +422,9 @@ async fn actor(
                     if matches!(kind, Kind::Restore) && restored {
                         let before = command["_before"].as_u64().map(|v| v as usize); let _ = reply.send(Ok(projection.page(before))); continue;
                     }
-                    serial += 1; let request_id = format!("req-{serial}"); command["id"] = request_id.clone().into();
+                    serial += 1; let request_id = format!("req-{serial}");
+                    // 扩展交互以 Pi 分配的 ID 关联等待者，且不产生普通 RPC 响应。
+                    if !matches!(kind, Kind::Extension) { command["id"] = request_id.clone().into(); }
                     if let Some(object) = command.as_object_mut() { object.remove("_before"); }
                     let mut bytes = match serde_json::to_vec(&command) { Ok(b) => b, Err(_) => { let _ = reply.send(Err(AppError::new("SERIALIZE", "请求编码失败"))); continue; } }; bytes.push(b'\n');
                     // 写管道也设上限，防止子进程不读 stdin 时 actor 永久卡死。
@@ -492,6 +494,27 @@ async fn actor(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn extension_response_preserves_pi_id_and_releases_abort() {
+        let project = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        let settings = Settings { pi_path: project.join("tests/fixtures/mock-pi.mjs").to_string_lossy().into(), ..Settings::default() };
+        let handle = start(&settings, project.to_string_lossy().into(), Channel::new(|_| Ok(()))).await.unwrap();
+        handle.action(Action::Rename { name: "plan-dialog".into() }).await.unwrap();
+        let stopping = { let handle = handle.clone(); tokio::spawn(async move { handle.action(Action::Stop).await }) };
+        tokio::time::timeout(Duration::from_secs(3), async {
+            let mut ack = 0;
+            loop {
+                let batch = handle.events(ack).await.unwrap();
+                ack = batch["sequence"].as_u64().unwrap();
+                if batch["events"].as_array().unwrap().iter().any(|event| event["request"]["id"] == "pi-plan-choice") { break; }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            handle.action(Action::ExtensionResponse { id: "pi-plan-choice".into(), value: json!({"cancelled":true}) }).await.unwrap();
+            stopping.await.unwrap().unwrap();
+        }).await.unwrap();
+        assert_eq!(handle.action(Action::State).await.unwrap()["isStreaming"], false);
+        handle.shutdown().await.unwrap();
+    }
     /// 真实 Node 子进程经过平台启动器与 Job guard，重复 20 轮验证资源回收和协议投影。
     #[tokio::test]
     async fn mock_rpc_twenty_lifecycles() {

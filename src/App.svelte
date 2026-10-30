@@ -695,6 +695,17 @@
             }}
           />{/key}{/if}
       <div class="composer-area">
+        {#if desktop.extensions[0]}
+          {@const request = desktop.extensions[0]}
+          {#key request.id}
+            <ExtensionDialog
+              {request}
+              onrespond={(value) => {
+                void desktop.guard(() => desktop.respond(request, value));
+              }}
+            />
+          {/key}
+        {/if}
         {#if runLabel}<div class="run-status" role="status">
             <span class="working status-dot"></span>{runLabel}
           </div>{/if}
@@ -831,13 +842,6 @@
         >{/if}
     </footer></Modal
   >{/if}
-{#if desktop.extensions[0]}{#key desktop.extensions[0].id}<ExtensionDialog
-      request={desktop.extensions[0]}
-      onrespond={(value) => {
-        const request = desktop.extensions[0];
-        void desktop.guard(() => desktop.respond(request, value));
-      }}
-    />{/key}{/if}
 {#if full}<Modal
     title="完整正文 · 分块查看"
     wide
