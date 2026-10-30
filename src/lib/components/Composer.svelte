@@ -1,8 +1,15 @@
 <!-- 输入器只有草稿与提交意图，不知道 RPC；组合输入、自动高度和发送模式在此收敛。 -->
 <script lang="ts">
+  import { tick } from 'svelte';
   import Icon from './Icon.svelte';
   import { shouldSend } from '../state/reducer';
-  import { mergeCommands } from '../commands';
+  import {
+    categorizedCommands,
+    commandCategories,
+    commandCategory,
+    commandSupport,
+    type CommandCategory,
+  } from '../commands';
   import type { Command } from '../types';
   /** 运行中 Enter/发送直接引导当前任务，后续消息与停止使用独立按钮。 */
   let {
@@ -11,6 +18,11 @@
     running = false,
     submitting = false,
     commands = [],
+    unavailableCommands = [],
+    menu,
+    onchoose,
+    onback,
+    oncommand,
     onsend,
     onstop,
   }: {
@@ -19,6 +31,17 @@
     running?: boolean;
     submitting?: boolean;
     commands?: Command[];
+    unavailableCommands?: string[];
+    menu?: {
+      title: string;
+      items: { name: string; description?: string }[];
+      busy?: boolean;
+      canBack?: boolean;
+      error?: string;
+    };
+    onchoose?: (name: string) => void;
+    onback?: () => void;
+    oncommand?: (name: string) => boolean;
     onsend: (mode?: 'steer' | 'followUp') => void;
     onstop: () => void;
   } = $props();
@@ -26,30 +49,79 @@
   let composing = false;
   let selected = $state(0);
   let dismissed = $state('');
+  let query = $state('');
   const menuId = $props.id();
+  let category = $state<CommandCategory | '全部'>('全部');
+  let catalog = $derived(
+    categorizedCommands(commands).filter(
+      (command) => !unavailableCommands.includes(command.name),
+    ),
+  );
+  let availableCategories = $derived(
+    commandCategories.filter((group) =>
+      catalog.some((command) => commandCategory(command) === group),
+    ),
+  );
+  let searching = $derived(value.length > 1);
+  function selectCategory(group: CommandCategory | '全部'): void {
+    category = group;
+    selected = 0;
+    textarea.focus();
+  }
   let matches = $derived(
-    !disabled &&
-      value.startsWith('/') &&
-      !/\s/.test(value) &&
-      dismissed !== value
-      ? mergeCommands(commands).filter((command) =>
-          command.name.toLowerCase().includes(value.slice(1).toLowerCase()),
+    menu
+      ? menu.items.filter((item) =>
+          `${item.name} ${item.description ?? ''}`
+            .toLowerCase()
+            .includes(query.toLowerCase()),
         )
-      : [],
+      : !disabled &&
+          value.startsWith('/') &&
+          !/\s/.test(value) &&
+          dismissed !== value
+        ? catalog.filter(
+            (command) =>
+              (searching ||
+                category === '全部' ||
+                commandCategory(command) === category) &&
+              `${command.name} ${command.description ?? ''} ${commandCategory(command)}`
+                .toLowerCase()
+                .includes(value.slice(1).toLowerCase()),
+          )
+        : [],
   );
   $effect(() => {
     value;
     selected = 0;
+    if (value === '/') category = '全部';
   });
+  $effect(() => {
+    menu?.title;
+    query = '';
+    selected = 0;
+  });
+  $effect(() => {
+    query;
+    selected = 0;
+  });
+  let windowStart = $derived(Math.max(0, selected - 20));
   $effect(() => {
     if (matches[selected])
       document
         .getElementById(`${menuId}-${selected}`)
         ?.scrollIntoView?.({ block: 'nearest' });
   });
-  function complete(index: number): void {
+  function complete(index: number, enter = false): void {
     const command = matches[index];
-    if (!command) return;
+    if (!command || menu?.busy) return;
+    if (menu) {
+      onchoose?.(command.name);
+      return;
+    }
+    if (enter && oncommand?.(command.name)) {
+      textarea.focus();
+      return;
+    }
     value = `/${command.name} `;
     dismissed = '';
     textarea.focus();
@@ -61,14 +133,34 @@
       textarea.style.height = `${Math.min(textarea.scrollHeight, 200)}px`;
     }
   });
+  async function back(): Promise<void> {
+    if (menu?.canBack === false) return;
+    onback?.();
+    await tick();
+    dismissed = value;
+    textarea?.focus();
+  }
   /** 模式在按钮与提示中明确表达；提交期间阻止重复请求。 */
   function submit(mode?: 'steer' | 'followUp'): void {
+    if (menu) {
+      complete(selected, true);
+      return;
+    }
     if (!value.trim() || disabled || submitting) return;
     onsend(mode ?? (running ? 'steer' : undefined));
   }
   /** IME 回车由浏览器确认候选；只有非组合输入才 preventDefault 并发送。 */
   function keydown(event: KeyboardEvent): void {
     if (composing || event.isComposing || event.keyCode === 229) return;
+    if (menu && event.key === 'Escape') {
+      event.preventDefault();
+      void back();
+      return;
+    }
+    if (menu?.busy) {
+      if (['Enter', 'Tab'].includes(event.key)) event.preventDefault();
+      return;
+    }
     if (
       matches.length &&
       !event.shiftKey &&
@@ -90,9 +182,13 @@
       }
       if (event.key === 'Tab' || event.key === 'Enter') {
         event.preventDefault();
-        complete(selected);
+        complete(selected, event.key === 'Enter');
         return;
       }
+    }
+    if (menu) {
+      if (event.key === 'Enter' || event.key === 'Tab') event.preventDefault();
+      return;
     }
     if (shouldSend(event, composing)) {
       event.preventDefault();
@@ -102,13 +198,54 @@
 </script>
 
 <div class="composer" class:disabled>
-  {#if matches.length}<div
+  {#if matches.length || menu}<div
       class="slash-menu"
       role="listbox"
       id={menuId}
-      aria-label="Pi 命令"
+      aria-label={menu?.title ?? 'Pi 命令'}
     >
-      {#each matches as command, index}<button
+      {#if !menu}<div
+          class="command-categories"
+          role="group"
+          aria-label="命令分类"
+        >
+          {#each ['全部', ...availableCategories] as group}<button
+              type="button"
+              class:chosen={category === group}
+              aria-pressed={category === group}
+              onmousedown={(event) => event.preventDefault()}
+              onclick={() => selectCategory(group as CommandCategory | '全部')}
+              >{group}</button
+            >{/each}
+        </div>{/if}
+      {#if menu}<div class="inline-command-header">
+          <button
+            type="button"
+            onkeydown={(event) => {
+              if (event.key === 'Escape') {
+                event.preventDefault();
+                void back();
+              }
+            }}
+            onclick={() => {
+              void back();
+            }}
+            disabled={menu.canBack === false}>← 返回</button
+          ><strong>{menu.title}</strong>
+        </div>
+        {#if menu.error}<p role="alert">{menu.error}</p>{/if}
+        {#if menu.busy}<p role="status">正在执行…</p>{/if}
+      {/if}
+      {#if menu && !matches.length}<p role="status">没有匹配项</p>{/if}
+      {#each matches.slice(windowStart, windowStart + 40) as command, offset}
+        {@const index = windowStart + offset}
+        {#if !menu && 'source' in command && (offset === 0 || !('source' in matches[index - 1]) || commandCategory(command as Command) !== commandCategory(matches[index - 1] as Command))}<div
+            class="command-group-label"
+            role="presentation"
+          >
+            {commandCategory(command as Command)}
+          </div>{/if}
+        <button
           id={`${menuId}-${index}`}
           role="option"
           aria-selected={selected === index}
@@ -118,27 +255,45 @@
             selected = index;
           }}
           onmousedown={(event) => event.preventDefault()}
-          onclick={() => complete(index)}
-          ><strong>/{command.name}</strong><small
-            >{command.argumentHint
+          disabled={menu?.busy}
+          onclick={() => complete(index, true)}
+          ><strong
+            >{menu
+              ? ''
+              : '/'}{command.name}{#if !menu && 'source' in command && commandSupport(command as Command)}
+              <span class="support-hint"
+                >{commandSupport(command as Command)}</span
+              >{/if}</strong
+          ><small
+            >{'argumentHint' in command && command.argumentHint
               ? `${command.argumentHint} · `
-              : ''}{command.description ?? command.source}</small
+              : ''}{command.description ??
+              ('source' in command ? command.source : '')}</small
           ></button
         >{/each}
+      {#if windowStart + 40 < matches.length}<button
+          type="button"
+          disabled={menu?.busy}
+          onclick={() => {
+            selected = Math.min(matches.length - 1, windowStart + 40);
+          }}>更多选项（共 {matches.length} 项）</button
+        >{/if}
     </div>{/if}
   <textarea
     bind:this={textarea}
-    bind:value
+    value={menu ? query : value}
     rows="1"
     placeholder={disabled
       ? '先选择项目文件夹，再开始对话'
       : running
         ? '补充要求或调整方向，引导当前任务'
         : '向 Pi 发送消息'}
-    aria-label="消息输入"
+    aria-label={menu ? '搜索菜单' : '消息输入'}
     aria-controls={matches.length ? menuId : undefined}
     aria-activedescendant={matches.length ? `${menuId}-${selected}` : undefined}
-    oninput={() => {
+    oninput={(event) => {
+      if (menu) query = event.currentTarget.value;
+      else value = event.currentTarget.value;
       dismissed = '';
     }}
     {disabled}
@@ -151,9 +306,11 @@
     }}></textarea>
   <div class="composer-bottom">
     <span class="composer-hint"
-      >{running
-        ? 'Enter 发送引导 · Shift + Enter 换行'
-        : 'Shift + Enter 换行'}</span
+      >{!menu && /^\/compact(?:\s|$)/.test(value)
+        ? '语法：/compact [可选压缩要求] · Enter 直接执行压缩'
+        : running
+          ? 'Enter 发送引导 · Shift + Enter 换行'
+          : 'Shift + Enter 换行'}</span
     >
     <div class="composer-actions">
       {#if running}
@@ -176,7 +333,10 @@
         class:steer-button={running}
         aria-label={running ? '发送引导' : '发送消息'}
         title={running ? '发送引导，在下一个可处理节点生效' : '发送消息'}
-        disabled={disabled || !value.trim() || submitting}
+        disabled={disabled ||
+          (!menu && !value.trim()) ||
+          submitting ||
+          (!!menu && !matches.length)}
         onclick={() => submit()}
         >{#if running}<span>发送引导</span>{/if}<Icon
           name="arrow"
@@ -186,3 +346,38 @@
     </div>
   </div>
 </div>
+
+<style>
+  .command-categories {
+    display: flex;
+    gap: 4px;
+    flex-wrap: wrap;
+    padding: 6px;
+    border-bottom: 1px solid var(--border, #8883);
+  }
+  .command-categories button {
+    width: auto;
+    padding: 5px 9px;
+    font-size: 12px;
+    border-radius: 6px;
+  }
+  .command-categories button.chosen {
+    background: var(--hover, #8882);
+    font-weight: 600;
+  }
+  .command-group-label {
+    padding: 10px 10px 4px;
+    font-size: 11px;
+    opacity: 0.65;
+    font-weight: 600;
+  }
+  .inline-command-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px;
+  }
+  .inline-command-header button {
+    width: auto;
+  }
+</style>

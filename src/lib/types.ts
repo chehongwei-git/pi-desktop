@@ -72,8 +72,12 @@ export interface Snapshot {
   sessionId?: string;
   sessionName?: string;
   isStreaming?: boolean;
+  isCompacting?: boolean;
   model?: Model;
   thinkingLevel?: string;
+  autoCompactionEnabled?: boolean;
+  steeringMode?: 'all' | 'one-at-a-time';
+  followUpMode?: 'all' | 'one-at-a-time';
 }
 export interface Command {
   name: string;
@@ -147,6 +151,7 @@ export type Action =
   | {
       type:
         | 'stop'
+        | 'reload'
         | 'new_session'
         | 'models'
         | 'thinking_levels'
@@ -157,9 +162,15 @@ export type Action =
   | { type: 'rename'; name: string }
   | { type: 'set_model'; provider: string; model: string }
   | { type: 'set_thinking'; level: string }
+  | { type: 'set_auto_compaction' | 'set_auto_retry'; enabled: boolean }
+  | {
+      type: 'set_steering_mode' | 'set_follow_up_mode';
+      mode: 'all' | 'one-at-a-time';
+    }
   | { type: 'compact'; instructions?: string }
   | { type: 'export'; path?: string }
   | { type: 'fork'; entryId: string }
+  | { type: 'navigate_tree'; entryId: string; summarize: boolean }
   | {
       type:
         | 'clone'

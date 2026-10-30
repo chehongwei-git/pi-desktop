@@ -573,6 +573,52 @@ export class Desktop {
       if (this.run !== 'idle') {
         throw new Error('请等待当前任务完成或停止任务后再执行内置命令。');
       }
+      if (builtin.name === 'compact') {
+        const generation = this.generation;
+        const session = this.snapshot.sessionFile;
+        this.submitting = true;
+        this.run = 'compacting';
+        this.notice = '正在压缩会话上下文…';
+        try {
+          await this.action({
+            type: 'compact',
+            instructions: builtin.args || undefined,
+          });
+          if (
+            generation !== this.generation ||
+            session !== this.snapshot.sessionFile
+          )
+            return;
+          if (this.draft === text) this.draft = '';
+          await this.refreshCommandSession();
+          this.notice = '会话上下文已压缩。';
+        } catch (error) {
+          if (generation === this.generation) this.notice = '';
+          throw error;
+        } finally {
+          if (generation === this.generation) {
+            // 手动 compact 是独立 RPC 操作，完成后不会保证收到 agent_settled。
+            try {
+              await this.drain();
+              await this.syncState();
+              this.run = this.snapshot.isCompacting
+                ? 'compacting'
+                : this.snapshot.isStreaming
+                  ? 'running'
+                  : 'idle';
+            } catch (error) {
+              this.notice =
+                '压缩状态查询失败，请检查连接后确认结果；不要自动重复执行。';
+              throw error;
+            } finally {
+              this.submitting = false;
+            }
+          } else {
+            this.submitting = false;
+          }
+        }
+        return;
+      }
       this.builtinRequest = builtin;
       if (this.draft === text) this.draft = '';
       return;

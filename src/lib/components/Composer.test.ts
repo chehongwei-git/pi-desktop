@@ -5,7 +5,7 @@ import { afterEach, describe, it, expect, vi } from 'vitest';
 import Composer from './Composer.svelte';
 afterEach(cleanup);
 describe('composer', () => {
-  it('shows all builtins and discovered commands, with keyboard completion and dismissal', async () => {
+  it('shows executable builtins and discovered commands, with keyboard completion and dismissal', async () => {
     const onsend = vi.fn();
     const view = render(Composer, {
       value: '/',
@@ -14,7 +14,17 @@ describe('composer', () => {
       commands: [{ name: 'skill:review', source: 'skill' }],
     });
     const input = view.getByRole('textbox');
-    expect(view.getAllByRole('option')).toHaveLength(25);
+    expect(view.getAllByRole('option')).toHaveLength(16);
+    expect(
+      view.queryByRole('option', { name: /\/hotkeys/ }),
+    ).not.toBeInTheDocument();
+    expect(view.getByRole('button', { name: '导出' })).toBeInTheDocument();
+    expect(
+      view.queryByRole('option', { name: /\/login/ }),
+    ).not.toBeInTheDocument();
+    expect(
+      view.queryByRole('option', { name: /\/share/ }),
+    ).not.toBeInTheDocument();
     expect(view.getByRole('option', { name: /\/quit/ })).toBeInTheDocument();
     await fireEvent.keyDown(input, { key: 'ArrowUp' });
     expect(
@@ -36,6 +46,27 @@ describe('composer', () => {
     await fireEvent.input(input, { target: { value: '/m' } });
     expect(view.getByRole('listbox')).toBeInTheDocument();
   });
+  it('filters categories and searches across categories in Chinese', async () => {
+    const view = render(Composer, {
+      value: '/',
+      onsend: vi.fn(),
+      onstop: vi.fn(),
+      commands: [{ name: 'review', description: '检查代码', source: 'prompt' }],
+    });
+    await fireEvent.click(view.getByRole('button', { name: '模型与思考' }));
+    expect(view.getAllByRole('option')).toHaveLength(2);
+    expect(
+      view.queryByRole('option', { name: /\/new / }),
+    ).not.toBeInTheDocument();
+    await fireEvent.input(view.getByRole('textbox'), {
+      target: { value: '/检查' },
+    });
+    expect(view.getByRole('option', { name: /review/ })).toBeInTheDocument();
+    await fireEvent.input(view.getByRole('textbox'), {
+      target: { value: '/' },
+    });
+    expect(view.getAllByRole('option')).toHaveLength(16);
+  });
   it('ignores slash completion during IME and hides the menu for arguments or disabled input', async () => {
     const view = render(Composer, {
       value: '/model',
@@ -51,6 +82,18 @@ describe('composer', () => {
     expect(view.queryByRole('listbox')).not.toBeInTheDocument();
     await view.rerender({ value: '/', disabled: true });
     expect(view.queryByRole('listbox')).not.toBeInTheDocument();
+  });
+  it('shows compact syntax while submitting the command through the composer', async () => {
+    const onsend = vi.fn();
+    const view = render(Composer, {
+      value: '/compact 保留代码',
+      onsend,
+      onstop: vi.fn(),
+    });
+    expect(view.getByText(/语法：\/compact/)).toBeInTheDocument();
+    expect(view.queryByRole('dialog')).not.toBeInTheDocument();
+    await fireEvent.keyDown(view.getByRole('textbox'), { key: 'Enter' });
+    expect(onsend).toHaveBeenCalledOnce();
   });
   it('does not submit IME confirmation but submits ordinary Enter', async () => {
     const onsend = vi.fn();

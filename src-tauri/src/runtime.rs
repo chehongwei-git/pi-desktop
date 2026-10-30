@@ -57,11 +57,15 @@ enum Kind {
     Refresh,
     LongRefresh,
     Extension,
+    Bridge,
+    BridgeRefresh,
 }
 struct Pending {
     reply: oneshot::Sender<Result<Value>>,
     deadline: Instant,
     kind: Kind,
+    bridge_command: Option<String>,
+    bridge_error: Option<String>,
 }
 
 impl Handle {
@@ -79,6 +83,33 @@ impl Handle {
         rx.await
             .map_err(|_| AppError::new("DISCONNECTED", "Pi 已退出"))?
     }
+    /// 内部命令必须先确认注册，避免缺失时被当作提示词发给模型。
+    async fn bridge(&self, name: &str, args: Value, kind: Kind) -> Result<Value> {
+        let state = self.rpc(json!({"type":"get_state"}), Kind::Query).await?;
+        if state["isStreaming"] == true || state["isCompacting"] == true {
+            return Err(AppError::new("BUSY", "请等待 Pi 空闲后执行命令"));
+        }
+        let data = self
+            .rpc(json!({"type":"get_commands"}), Kind::Query)
+            .await?;
+        if !data["commands"].as_array().is_some_and(|commands| {
+            commands
+                .iter()
+                .any(|c| c["name"] == name && c["source"] == "extension")
+        }) {
+            return Err(AppError::new(
+                "BRIDGE_UNAVAILABLE",
+                "Pi 桌面桥接未加载或版本不兼容",
+            ));
+        }
+        let message = if args.is_null() {
+            format!("/{name}")
+        } else {
+            format!("/{name} {args}")
+        };
+        self.rpc(json!({"type":"prompt","message":message}), kind)
+            .await
+    }
     /// 业务动作转换为白名单命令；停止必须先清队列，避免 abort 继续排队任务。
     pub async fn action(&self, action: Action) -> Result<Value> {
         match action {
@@ -94,6 +125,47 @@ impl Handle {
                     cmd["streamingBehavior"] = mode.into();
                 }
                 self.rpc(cmd, Kind::Mutate).await
+            }
+            Action::SetAutoCompaction { enabled } => {
+                self.rpc(
+                    json!({"type":"set_auto_compaction","enabled":enabled}),
+                    Kind::Mutate,
+                )
+                .await
+            }
+            Action::SetAutoRetry { enabled } => {
+                self.rpc(
+                    json!({"type":"set_auto_retry","enabled":enabled}),
+                    Kind::Mutate,
+                )
+                .await
+            }
+            Action::SetSteeringMode { mode } => {
+                if !["all", "one-at-a-time"].contains(&mode.as_str()) {
+                    return Err(AppError::new("MODE", "无效队列模式"));
+                }
+                self.rpc(
+                    json!({"type":"set_steering_mode","mode":mode}),
+                    Kind::Mutate,
+                )
+                .await
+            }
+            Action::SetFollowUpMode { mode } => {
+                if !["all", "one-at-a-time"].contains(&mode.as_str()) {
+                    return Err(AppError::new("MODE", "无效队列模式"));
+                }
+                self.rpc(
+                    json!({"type":"set_follow_up_mode","mode":mode}),
+                    Kind::Mutate,
+                )
+                .await
+            }
+            Action::Reload => {
+                // 两阶段调用使用重新加载后的扩展上下文；失败不重发、不退回重启。
+                for name in ["pi-desktop-reload-v1", "pi-desktop-models-v1"] {
+                    self.bridge(name, Value::Null, Kind::Bridge).await?;
+                }
+                Ok(json!({"reloaded":true}))
             }
             Action::Stop => {
                 let cleared = self
@@ -164,7 +236,23 @@ impl Handle {
                 self.rpc(json!({"type":"get_fork_messages"}), Kind::Query)
                     .await
             }
-            Action::SessionTree => self.rpc(json!({"type":"get_tree"}), Kind::Query).await,
+            // get_tree 为每条消息再嵌套 children，长会话会超过 JSON 解析深度。
+            // 使用同一 Pi 的平铺记录，宿主只向界面传递节点摘要。
+            Action::SessionTree => {
+                let data = self.rpc(json!({"type":"get_entries"}), Kind::Query).await?;
+                rpc::tree_entries(&data)
+            }
+            Action::NavigateTree {
+                entry_id,
+                summarize,
+            } => {
+                self.bridge(
+                    "pi-desktop-navigate-v1",
+                    json!({"entryId":entry_id,"summarize":summarize}),
+                    Kind::BridgeRefresh,
+                )
+                .await
+            }
             Action::Commands => self.rpc(json!({"type":"get_commands"}), Kind::Query).await,
             Action::State => self.rpc(json!({"type":"get_state"}), Kind::Query).await,
             Action::History { before } => {
@@ -242,6 +330,13 @@ pub async fn start(
     if !settings.session_dir.is_empty() {
         command.args(["--session-dir", &settings.session_dir]);
     }
+    // 源码嵌入 Rust 产物，释放到私有临时目录；无需额外资源定位或 JS 运行时。
+    let bridge_dir = tempfile::Builder::new()
+        .prefix("pi-desktop-bridge-")
+        .tempdir()?;
+    let bridge_path = bridge_dir.path().join("desktop.mjs");
+    std::fs::write(&bridge_path, include_str!("../bridge/desktop.mjs"))?;
+    command.arg("--extension").arg(&bridge_path);
     let mut child = command.spawn()?;
     let tree = match ProcessTree::attach(&child) {
         Ok(t) => t,
@@ -292,6 +387,7 @@ pub async fn start(
         actor(id, child, stdin, tree, store, rx, output_rx, channel).await;
         reader.abort();
         diagnostics.abort();
+        drop(bridge_dir);
     });
     Ok(handle)
 }
@@ -319,6 +415,10 @@ async fn actor(
         tokio::select! {
             request = requests.recv() => match request {
                 Some(Request::Rpc { mut command, kind, reply }) => {
+                    // 桥接期间只接受查询与扩展交互响应，禁止命令错误关联和会话并发修改。
+                    if !matches!(kind, Kind::Query | Kind::Restore | Kind::Extension) && pending.values().any(|p| p.bridge_command.is_some()) {
+                        let _ = reply.send(Err(AppError::new("BUSY", "Pi 桥接操作仍在执行，请稍后再试"))); continue;
+                    }
                     if matches!(kind, Kind::Restore) && restored {
                         let before = command["_before"].as_u64().map(|v| v as usize); let _ = reply.send(Ok(projection.page(before))); continue;
                     }
@@ -331,8 +431,9 @@ async fn actor(
                     }
                     if matches!(kind, Kind::Extension) { let _ = reply.send(Ok(Value::Null)); }
                     else {
-                        let seconds = if matches!(kind, Kind::LongRefresh) { 600 } else if matches!(kind, Kind::Reset | Kind::Restore | Kind::Refresh) { 30 } else if matches!(kind, Kind::Mutate) { 15 } else { 10 };
-                        pending.insert(request_id, Pending { reply, kind, deadline: Instant::now()+Duration::from_secs(seconds) });
+                        let seconds = if matches!(kind, Kind::Bridge | Kind::BridgeRefresh) { 120 } else if matches!(kind, Kind::LongRefresh) { 600 } else if matches!(kind, Kind::Reset | Kind::Restore | Kind::Refresh) { 30 } else if matches!(kind, Kind::Mutate) { 15 } else { 10 };
+                        let bridge_command = if matches!(kind, Kind::Bridge | Kind::BridgeRefresh) { command["message"].as_str().and_then(|message| message.split_whitespace().next()).map(|message| format!("command:{}", message.trim_start_matches('/'))) } else { None };
+                        pending.insert(request_id, Pending { reply, kind, bridge_command, bridge_error: None, deadline: Instant::now()+Duration::from_secs(seconds) });
                     }
                 }
                 Some(Request::Events { ack, reply }) => { let result = store.batch(&id, ack).and_then(|batch| serde_json::to_value(batch).map_err(|_| AppError::new("SERIALIZE", "批次编码失败"))); let _ = reply.send(result); }
@@ -350,11 +451,18 @@ async fn actor(
                     if let Some(request_id) = event["id"].as_str() {
                         if let Some(request) = pending.remove(request_id) {
                             let result = if event["success"] != true { Err(AppError::new("PI_COMMAND", event["error"].as_str().unwrap_or("Pi 拒绝了请求"))) }
+                            else if let Some(error) = request.bridge_error { Err(AppError::new("BRIDGE_FAILED", error)) }
+                            else if matches!(request.kind, Kind::Bridge | Kind::BridgeRefresh) && event["data"]["disposition"] != "handled" { Err(AppError::new("BRIDGE_PROTOCOL", "桥接命令未被扩展处理，请检查 Pi 版本")) }
                             else if matches!(request.kind, Kind::Restore) {
                                 projection.restore(&event["data"], &mut store).map(|()| { restored=true; projection.page(None) })
-                            } else { if matches!(request.kind, Kind::Reset | Kind::Refresh | Kind::LongRefresh) && event["data"]["cancelled"] != true { if matches!(request.kind, Kind::Reset) { projection.reset(); let _ = store.push(json!({"type":"reset"})); } restored=false; } Ok(event["data"].clone()) };
+                            } else { if matches!(request.kind, Kind::Reset | Kind::Refresh | Kind::LongRefresh | Kind::BridgeRefresh) && event["data"]["cancelled"] != true { if matches!(request.kind, Kind::Reset) { projection.reset(); let _ = store.push(json!({"type":"reset"})); } restored=false; } Ok(event["data"].clone()) };
                             let _ = request.reply.send(result);
                         }
+                    }
+                }
+                Some(Ok(Some(event))) if event["type"] == "extension_error" && pending.values().any(|p| p.bridge_command.as_deref() == event["extensionPath"].as_str()) => {
+                    for request in pending.values_mut().filter(|p| p.bridge_command.as_deref() == event["extensionPath"].as_str()) {
+                        request.bridge_error = Some(event["error"].as_str().unwrap_or("桌面桥接执行失败").to_string());
                     }
                 }
                 Some(Ok(Some(event))) => { if let Err(error) = projection.event(event, &mut store) { failure=Some(error); break; } },
@@ -407,6 +515,26 @@ mod tests {
             .unwrap();
             let state = handle.action(Action::State).await.unwrap();
             assert_eq!(state["sessionFile"], "mock.jsonl");
+            assert_eq!(
+                handle.action(Action::Reload).await.unwrap()["reloaded"],
+                true
+            );
+            handle
+                .action(Action::Rename {
+                    name: "bridge-error".into(),
+                })
+                .await
+                .unwrap();
+            assert_eq!(
+                handle.action(Action::Reload).await.unwrap_err().code,
+                "BRIDGE_FAILED"
+            );
+            handle
+                .action(Action::Rename {
+                    name: "mock".into(),
+                })
+                .await
+                .unwrap();
             let history = handle
                 .action(Action::History { before: None })
                 .await
@@ -451,7 +579,7 @@ mod tests {
             );
             assert_eq!(
                 handle.action(Action::SessionTree).await.unwrap()["leafId"],
-                "a1"
+                "compact-result"
             );
             assert_eq!(
                 handle

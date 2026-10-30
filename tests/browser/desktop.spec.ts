@@ -166,11 +166,36 @@ async function mock(
                 };
               case 'set_model':
               case 'set_thinking':
+              case 'set_auto_compaction':
+              case 'set_steering_mode':
+              case 'set_follow_up_mode':
                 return {};
               case 'thinking_levels':
                 return { levels: ['off'] };
               case 'commands':
-                return { commands: [] };
+                return { commands: host.bridgeCommands ?? [] };
+              case 'session_tree':
+                if (host.fatalTree) {
+                  callbacks.get(channel.id)({
+                    index: index++,
+                    message: {
+                      type: 'failed',
+                      runtimeId: 'mock',
+                      error: {
+                        code: 'PROTOCOL',
+                        message: 'Pi stdout 不是有效 JSONL',
+                        diagnosticId: 'test-tree',
+                      },
+                    },
+                  });
+                  throw new Error('Pi stdout 不是有效 JSONL');
+                }
+                if (host.deferTree)
+                  await new Promise<void>((resolve) => {
+                    host.releaseTree = resolve;
+                  });
+                if (host.treeError) throw new Error('模拟树加载失败');
+                return { nodes: [] };
               case 'history':
                 if (host.slowSession === sessionFile)
                   await new Promise<void>((resolve) => {
@@ -246,7 +271,7 @@ async function mock(
     { count, workspaces, projectCount },
   );
 }
-test('slash commands list every builtin, complete with keyboard and execute locally in both themes', async ({
+test('slash commands list executable commands, complete with keyboard and execute locally in both themes', async ({
   page,
 }) => {
   await page.addInitScript(() => {
@@ -259,9 +284,11 @@ test('slash commands list every builtin, complete with keyboard and execute loca
   await expect(input).toBeEnabled();
   await input.fill('/');
   const menu = page.getByRole('listbox', { name: 'Pi 命令' });
-  await expect(menu.getByRole('option')).toHaveCount(24);
+  await expect(menu.getByRole('option')).toHaveCount(13);
+  await expect(menu.getByRole('option', { name: /\/hotkeys/ })).toHaveCount(0);
+  await expect(menu.getByRole('option', { name: /\/login/ })).toHaveCount(0);
   await input.press('ArrowUp');
-  await expect(menu.getByRole('option', { name: /\/quit/ })).toHaveAttribute(
+  await expect(menu.getByRole('option', { name: /\/export/ })).toHaveAttribute(
     'aria-selected',
     'true',
   );
@@ -274,12 +301,11 @@ test('slash commands list every builtin, complete with keyboard and execute loca
   await expect(input).toHaveValue('/model ');
   await expect(menu).toHaveCount(0);
   await input.press('Enter');
+  const models = page.getByRole('listbox', { name: '/model · 选择模型' });
+  await expect(models).toBeVisible();
+  await models.getByRole('option', { name: /mock\/model/ }).click();
+  await expect(models).toHaveCount(0);
   const dialog = page.getByRole('dialog');
-  await expect(dialog).toBeVisible();
-  await expect(dialog.getByRole('combobox')).toHaveValue('mock/model');
-  await dialog.getByRole('button', { name: '执行', exact: true }).click();
-  await expect(dialog.getByText('已选择模型：mock/model')).toBeVisible();
-  await dialog.getByRole('button', { name: '关闭', exact: true }).click();
   await input.fill('/login anthropic');
   await input.press('Enter');
   await expect(dialog.getByText(/\/login anthropic/)).toBeVisible();
@@ -290,6 +316,104 @@ test('slash commands list every builtin, complete with keyboard and execute loca
   );
   expect(actions.some((action: any) => action.type === 'set_model')).toBe(true);
   expect(actions.some((action: any) => action.type === 'prompt')).toBe(false);
+});
+
+test('tree Esc restores input during pending loading and after an error', async ({
+  page,
+}) => {
+  await mock(page);
+  await page.addInitScript(() => {
+    const host = window as any;
+    host.bridgeCommands = [
+      { name: 'pi-desktop-navigate-v1', source: 'extension' },
+    ];
+    host.deferTree = true;
+  });
+  await page.goto('/');
+  let input = page.getByRole('textbox', { name: '消息输入' });
+  await expect(input).toBeEnabled();
+  await input.fill('/tree');
+  await input.press('Enter');
+  await expect(page.getByRole('textbox', { name: '搜索菜单' })).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(input).toBeFocused();
+  await input.fill('/thinking');
+  await page.evaluate(() => {
+    const host = window as any;
+    host.deferTree = false;
+    host.releaseTree();
+    host.treeError = true;
+  });
+  await input.fill('/tree');
+  await input.press('Enter');
+  await expect(page.getByRole('alert')).toHaveText('模拟树加载失败');
+  const back = page.getByRole('button', { name: '← 返回' });
+  await back.focus();
+  await page.keyboard.press('Escape');
+  await expect(input).toBeFocused();
+  await input.fill('继续工作');
+  await input.press('Enter');
+  await expect(page.getByText('这是模拟回答。', { exact: true })).toBeVisible();
+});
+
+test('fatal tree protocol failure still allows draft editing after clicking return', async ({
+  page,
+}) => {
+  await mock(page);
+  await page.addInitScript(() => {
+    const host = window as any;
+    host.bridgeCommands = [
+      { name: 'pi-desktop-navigate-v1', source: 'extension' },
+    ];
+    host.fatalTree = true;
+  });
+  await page.goto('/');
+  const input = page.getByRole('textbox', { name: '消息输入' });
+  await expect(input).toBeEnabled();
+  await input.fill('/tree');
+  await input.press('Enter');
+  await expect(page.getByRole('listbox')).toContainText('不是有效 JSONL');
+  await page.getByRole('button', { name: '← 返回' }).click();
+  await expect(input).toBeEnabled();
+  await expect(input).toBeFocused();
+  await input.fill('连接失败后仍能编辑');
+  await expect(input).toHaveValue('连接失败后仍能编辑');
+  await expect(
+    page.getByRole('button', { name: '发送消息', exact: true }),
+  ).toBeDisabled();
+});
+
+test('settings use native nested menus and remain inside the viewport', async ({
+  page,
+}) => {
+  await mock(page);
+  await page.goto('/');
+  const input = page.getByRole('textbox', { name: '消息输入' });
+  await expect(input).toBeEnabled();
+  await input.fill('/settings');
+  await input.press('Enter');
+  await page.getByRole('option', { name: /自动压缩/ }).click();
+  const menu = page.getByRole('listbox', { name: 'Pi 设置 / 自动压缩' });
+  await expect(menu).toBeVisible();
+  const bounds = await menu.boundingBox();
+  expect(bounds!.y).toBeGreaterThanOrEqual(0);
+  expect(bounds!.y + bounds!.height).toBeLessThanOrEqual(800);
+  await page.screenshot({ path: 'test-results/inline-settings.png' });
+  await menu.getByRole('option', { name: '关闭', exact: true }).click();
+  await expect(
+    page.getByRole('listbox', { name: '/settings · Pi 设置' }),
+  ).toBeVisible();
+  await page.getByRole('textbox', { name: '搜索菜单' }).press('Escape');
+  await expect(input).toHaveValue('/settings');
+  expect(
+    await page.evaluate(() =>
+      (window as any).ipcCalls.some(
+        (call: any) =>
+          call.action?.type === 'set_auto_compaction' &&
+          call.action.enabled === false,
+      ),
+    ),
+  ).toBe(true);
 });
 
 test('desktop zoom shortcuts invoke native WebView scaling', async ({

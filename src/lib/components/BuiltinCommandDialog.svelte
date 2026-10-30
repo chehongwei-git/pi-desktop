@@ -46,6 +46,7 @@
       'compact',
       'resume',
       'fork',
+      'tree',
     ].includes(name),
   );
 
@@ -161,22 +162,23 @@
           );
           break;
         case 'tree':
-          output =
-            '当前会话树（切换树节点请使用 Pi 终端 /tree；桌面端可用 /fork 创建分支）：\n\n' +
-            JSON.stringify(
-              await desktop.action({ type: 'session_tree' }),
-              null,
-              2,
-            );
+          if (!input) throw new Error('请选择树节点。');
+          await desktop.action({
+            type: 'navigate_tree',
+            entryId: input,
+            summarize: false,
+          });
+          await desktop.refreshCommandSession();
+          output = '已切换到所选会话树节点。';
           break;
         case 'reload': {
-          const project = desktop.project;
-          const path = desktop.snapshot.sessionFile;
-          await desktop.connect(project);
-          if (desktop.connection !== 'ready')
-            throw new Error(desktop.error || '重新连接失败');
-          if (path) await desktop.switchSession(path, project);
-          output = '已重新连接 Pi，重新加载项目资源并恢复会话。';
+          try {
+            await desktop.action({ type: 'reload' });
+          } finally {
+            // 部分失败也可能更新模型列表；刷新展示，但不重读完整历史或重启 Pi。
+            await Promise.all([desktop.syncState(), desktop.refreshMetadata()]);
+          }
+          output = '已重载项目资源和本地模型配置，并重新应用当前模型。';
           break;
         }
         case 'hotkeys':
@@ -208,6 +210,32 @@
           value: session.path,
           label: `${session.name || session.preview || session.timestamp} · ${session.cwd}`,
         }));
+      if (name === 'tree') {
+        type Node = {
+          entry: {
+            id: string;
+            type: string;
+            message?: { role?: string; content?: { text?: string }[] };
+          };
+          children: Node[];
+        };
+        const result = await desktop.action<{ tree: Node[] }>({
+          type: 'session_tree',
+        });
+        const stack = [...(result.tree ?? [])]
+          .reverse()
+          .map((node) => ({ node, depth: 0 }));
+        while (stack.length) {
+          const { node, depth } = stack.pop()!;
+          choices.push({
+            value: node.entry.id,
+            label: `${'· '.repeat(Math.min(depth, 8))}${node.entry.message?.role ?? node.entry.type} · ${node.entry.message?.content?.find((block) => block.text)?.text?.slice(0, 120) ?? node.entry.id}`,
+          });
+          for (let i = node.children.length - 1; i >= 0; i--)
+            stack.push({ node: node.children[i], depth: depth + 1 });
+        }
+        if (!choices.length) output = '当前会话树为空。';
+      }
       if (name === 'fork') {
         const result = await desktop.action<{
           messages: { entryId: string; text: string }[];
@@ -226,7 +254,8 @@
         !terminalOnly[name] &&
         !error &&
         (!needsInput ||
-          (args && !['compact', 'export', 'resume', 'fork'].includes(name)))
+          (args &&
+            !['compact', 'export', 'resume', 'fork', 'tree'].includes(name)))
       )
         void execute();
     });

@@ -103,7 +103,12 @@ for await (const line of readline.createInterface({
       });
       break;
     case 'get_commands':
-      reply(request, { commands: [] });
+      reply(request, {
+        commands: [
+          { name: 'pi-desktop-reload-v1', source: 'extension' },
+          { name: 'pi-desktop-models-v1', source: 'extension' },
+        ],
+      });
       break;
     case 'set_session_name':
       name = request.name;
@@ -124,6 +129,17 @@ for await (const line of readline.createInterface({
     case 'extension_ui_response':
       break;
     case 'prompt':
+      if (request.message.startsWith('/pi-desktop-')) {
+        if (name === 'bridge-error')
+          emit({
+            type: 'extension_error',
+            extensionPath: `command:${request.message.slice(1)}`,
+            event: 'command',
+            error: 'bridge refresh failed',
+          });
+        reply(request, { disposition: 'handled' });
+        break;
+      }
       reply(request, {});
       streaming = true;
       emit({ type: 'agent_start' });

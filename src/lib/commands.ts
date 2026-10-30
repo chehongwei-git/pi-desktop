@@ -22,7 +22,7 @@ export const builtinCommands: Command[] = [
   ['login', '配置提供商身份验证', '[provider]'],
   ['logout', '移除提供商身份验证'],
   ['new', '开始新会话'],
-  ['compact', '压缩会话上下文', '[instructions]'],
+  ['compact', '压缩会话上下文', '[可选压缩要求]'],
   ['resume', '恢复历史会话', '[path.jsonl]'],
   ['reload', '重新加载扩展、技能和模板'],
   ['quit', '断开当前 Pi 进程'],
@@ -44,6 +44,95 @@ export function mergeCommands(commands: Command[]): Command[] {
       return true;
     }),
   ];
+}
+
+/** 分类顺序固定；内置按用途分组，动态资源按来源分组。 */
+export const commandCategories = [
+  '会话',
+  '模型与思考',
+  '设置与资源',
+  '导出',
+  '帮助',
+  '扩展',
+  '模板',
+  '技能',
+  '其他',
+] as const;
+export type CommandCategory = (typeof commandCategories)[number];
+const builtinCategories: Record<string, CommandCategory> = {
+  new: '会话',
+  resume: '会话',
+  name: '会话',
+  session: '会话',
+  tree: '会话',
+  fork: '会话',
+  clone: '会话',
+  compact: '会话',
+  copy: '会话',
+  model: '模型与思考',
+  thinking: '模型与思考',
+  'scoped-models': '模型与思考',
+  settings: '设置与资源',
+  reload: '设置与资源',
+  trust: '设置与资源',
+  login: '设置与资源',
+  logout: '设置与资源',
+  quit: '设置与资源',
+  export: '导出',
+  import: '导出',
+  share: '导出',
+  bug: '帮助',
+  changelog: '帮助',
+  hotkeys: '帮助',
+};
+export function commandCategory(
+  command: Pick<Command, 'name' | 'source'>,
+): CommandCategory {
+  if (command.source === 'builtin')
+    return builtinCategories[command.name] ?? '其他';
+  return (
+    ({ extension: '扩展', prompt: '模板', skill: '技能' } as const)[
+      command.source as 'extension' | 'prompt' | 'skill'
+    ] ?? '其他'
+  );
+}
+/** 仅在命令元数据变化时调用；同分类内保持原顺序。 */
+export function categorizedCommands(commands: Command[]): Command[] {
+  return mergeCommands(commands)
+    .filter(
+      (command) =>
+        !command.name.startsWith('pi-desktop-') &&
+        !(
+          command.source === 'builtin' &&
+          (unsupportedBuiltins[command.name] || command.name === 'hotkeys')
+        ),
+    )
+    .sort(
+      (a, b) =>
+        commandCategories.indexOf(commandCategory(a)) -
+        commandCategories.indexOf(commandCategory(b)),
+    );
+}
+
+/** 明确显示当前实现边界；分类不代表功能已实现。 */
+export const unsupportedBuiltins: Readonly<Record<string, string>> = {
+  'scoped-models': '尚未适配模型轮换范围配置',
+  import: '尚未适配 JSONL 导入',
+  share: '尚未适配分享流程',
+  bug: '尚未适配问题报告上传',
+  trust: '尚未适配项目信任写入',
+  login: '尚未适配认证流程',
+  logout: '尚未适配凭据移除',
+  changelog: '尚未适配 Pi 更新日志读取',
+};
+export function commandSupport(
+  command: Pick<Command, 'name' | 'source'>,
+): string {
+  if (command.source !== 'builtin') return '';
+  if (unsupportedBuiltins[command.name]) return '未支持';
+  if (command.name === 'settings') return '部分设置';
+  if (command.name === 'export') return '仅 HTML';
+  return '';
 }
 
 export function parseBuiltin(

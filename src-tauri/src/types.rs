@@ -120,6 +120,19 @@ pub enum Action {
         mode: Option<String>,
     },
     Stop,
+    Reload,
+    SetAutoCompaction {
+        enabled: bool,
+    },
+    SetAutoRetry {
+        enabled: bool,
+    },
+    SetSteeringMode {
+        mode: String,
+    },
+    SetFollowUpMode {
+        mode: String,
+    },
     NewSession,
     SwitchSession {
         path: String,
@@ -152,6 +165,11 @@ pub enum Action {
     LastAssistant,
     ForkMessages,
     SessionTree,
+    NavigateTree {
+        #[serde(rename = "entryId")]
+        entry_id: String,
+        summarize: bool,
+    },
     State,
     History {
         before: Option<usize>,

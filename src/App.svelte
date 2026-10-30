@@ -8,7 +8,7 @@
   import { errorMessage } from './lib/client';
   import type { Message, SessionSummary } from './lib/types';
   import ProjectPicker from './lib/components/ProjectPicker.svelte';
-  import Composer from './lib/components/Composer.svelte';
+  import CommandComposer from './lib/components/CommandComposer.svelte';
   import Icon from './lib/components/Icon.svelte';
   import Transcript from './lib/components/Transcript.svelte';
   import Modal from './lib/components/Modal.svelte';
@@ -735,20 +735,13 @@
             }}
           />
         {/if}
-        <Composer
-          bind:value={desktop.draft}
-          disabled={!!desktop.openingSession || desktop.connection !== 'ready'}
-          running={desktop.run !== 'idle'}
-          submitting={desktop.submitting}
-          commands={desktop.commands}
+        <CommandComposer
+          {desktop}
           onsend={(mode) => {
             void desktop.guard(async () => {
               await desktop.send(mode);
               if (!desktop.draft.trim()) newChatMode = false;
             });
-          }}
-          onstop={() => {
-            void desktop.guard(() => desktop.stop());
           }}
         />
         <p class="composer-footnote">

@@ -39,6 +39,21 @@ pub async fn record<R: AsyncBufRead + Unpin>(reader: &mut R) -> Result<Option<Va
     }
 }
 
+/// 树菜单使用平铺节点摘要，避免随会话长度增长的 JSON 嵌套与完整正文 IPC。
+pub fn tree_entries(data: &Value) -> Result<Value> {
+    let entries = data["entries"].as_array()
+        .ok_or_else(|| AppError::new("PROTOCOL", "Pi 树查询缺失 entries"))?;
+    let nodes: Vec<Value> = entries.iter().map(|entry| {
+        let text = if entry["message"]["content"].is_null() {
+            entry["summary"].as_str().unwrap_or("").to_string()
+        } else { text_content(&entry["message"]["content"]) };
+        json!({"id":entry["id"], "parentId":entry["parentId"],
+            "label":entry["message"]["role"].as_str().or(entry["type"].as_str()).unwrap_or("entry"),
+            "text":preview(&text, 720)})
+    }).collect();
+    Ok(json!({"nodes":nodes,"leafId":data["leafId"]}))
+}
+
 /// 展示投影只维护当前分支；正文结束时卸载大文本。running 块仅在流式期间保留。
 #[derive(Default)]
 pub struct Projection {
@@ -288,6 +303,9 @@ impl Projection {
             "agent_settled" => store.push(json!({"type":"run","state":"idle"}))?,
             "auto_retry_start" => store.push(json!({"type":"run","state":"retrying"}))?,
             "compaction_start" => store.push(json!({"type":"run","state":"compacting"}))?,
+            "compaction_end" if event["reason"] == "manual" => {
+                store.push(json!({"type":"run","state":"idle"}))?
+            }
             "compaction_end" | "auto_retry_end" => {
                 store.push(json!({"type":"run","state":"running"}))?
             }
@@ -357,6 +375,28 @@ mod tests {
         assert!(record(&mut input).await.unwrap().is_none());
         let mut bad = tokio::io::BufReader::new(&b"not-json\n"[..]);
         assert!(record(&mut bad).await.is_err());
+    }
+    /// 旧 get_tree 在约 40 个线性节点后便可能达到 serde_json 默认深度限制。
+    #[tokio::test]
+    async fn long_tree_uses_flat_entries_without_exceeding_json_depth() {
+        let mut nested = "[]".to_string();
+        for i in 0..100 {
+            nested = format!(r#"[{{"entry":{{"id":"{i}"}},"children":{nested}}}]"#);
+        }
+        let wire = format!("{{\"type\":\"response\",\"data\":{{\"tree\":{nested}}}}}\n");
+        let mut input = tokio::io::BufReader::new(wire.as_bytes());
+        assert!(record(&mut input).await.is_err());
+        let entries: Vec<Value> = (0..2000).map(|i| json!({
+            "id":i.to_string(),"parentId":if i == 0 { None } else { Some((i-1).to_string()) },
+            "type":"message","message":{"role":"user","content":"hello"}
+        })).collect();
+        let wire = format!("{}\n", json!({"entries":entries,"leafId":"1999"}));
+        let mut input = tokio::io::BufReader::new(wire.as_bytes());
+        let parsed = record(&mut input).await.unwrap().unwrap();
+        let flat = tree_entries(&parsed).unwrap();
+        assert_eq!(flat["nodes"].as_array().unwrap().len(), 2000);
+        assert_eq!(flat["nodes"][1999]["parentId"], "1998");
+        assert_eq!(flat["leafId"], "1999");
     }
     /// 正文引用用于缓存重载；只有超出 UTF-8 预览上限才需要显示全文入口。
     #[test]
@@ -469,6 +509,37 @@ mod tests {
         assert!(projection.messages.last().unwrap().text.is_empty());
     }
     /// accepted 与 agent_end 不是终点；只有 settled 才发布 idle。
+    #[test]
+    fn manual_compaction_finishes_without_agent_settled() {
+        let mut projection = Projection::default();
+        let mut store = Store::new().unwrap();
+        projection
+            .event(
+                json!({"type":"compaction_start","reason":"manual"}),
+                &mut store,
+            )
+            .unwrap();
+        projection
+            .event(
+                json!({"type":"compaction_end","reason":"manual","willRetry":false}),
+                &mut store,
+            )
+            .unwrap();
+        assert_eq!(
+            store.batch("r", 0).unwrap().events.last().unwrap()["state"],
+            "idle"
+        );
+        projection
+            .event(
+                json!({"type":"compaction_end","reason":"threshold","willRetry":true}),
+                &mut store,
+            )
+            .unwrap();
+        assert_eq!(
+            store.batch("r", 0).unwrap().events.last().unwrap()["state"],
+            "running"
+        );
+    }
     #[test]
     fn only_settled_ends_run() {
         let mut projection = Projection::default();

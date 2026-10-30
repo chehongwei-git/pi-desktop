@@ -12,10 +12,10 @@ describe('desktop business behavior', () => {
     const action = vi.fn().mockResolvedValue({});
     const desktop = fixture(action);
     desktop.connection = 'ready';
-    desktop.draft = '/compact focus on tests';
+    desktop.draft = '/name focus on tests';
     await desktop.send();
     expect(desktop.builtinRequest).toEqual({
-      name: 'compact',
+      name: 'name',
       args: 'focus on tests',
     });
     expect(desktop.draft).toBe('');
@@ -33,6 +33,34 @@ describe('desktop business behavior', () => {
       message: '/skill:review code',
       mode: 'steer',
     });
+  });
+  it('compacts directly without a dialog or prompt and settles without agent_settled', async () => {
+    const action = vi.fn().mockResolvedValue({});
+    const desktop = fixture(action);
+    desktop.connection = 'ready';
+    desktop.draft = '/compact 保留代码';
+    vi.spyOn(desktop, 'refreshCommandSession').mockResolvedValue();
+    vi.spyOn(desktop, 'syncState').mockResolvedValue();
+    await desktop.send();
+    expect(action).toHaveBeenCalledWith('', {
+      type: 'compact',
+      instructions: '保留代码',
+    });
+    expect(desktop.builtinRequest).toBeNull();
+    expect(desktop.run).toBe('idle');
+    expect(desktop.submitting).toBe(false);
+    expect(desktop.draft).toBe('');
+  });
+  it('retains the compact command and clears busy state when compaction fails', async () => {
+    const action = vi.fn().mockRejectedValue(new Error('compact failed'));
+    const desktop = fixture(action);
+    desktop.connection = 'ready';
+    desktop.draft = '/compact';
+    vi.spyOn(desktop, 'syncState').mockResolvedValue();
+    await expect(desktop.send()).rejects.toThrow('compact failed');
+    expect(desktop.draft).toBe('/compact');
+    expect(desktop.run).toBe('idle');
+    expect(desktop.submitting).toBe(false);
   });
   it('defaults running messages to steering and retains edited drafts and failure drafts', async () => {
     let finish!: (result: unknown) => void;

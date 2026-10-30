@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { builtinCommands, mergeCommands, parseBuiltin } from './commands';
+import {
+  builtinCommands,
+  mergeCommands,
+  parseBuiltin,
+  categorizedCommands,
+  commandCategory,
+} from './commands';
 
 describe('Pi slash commands', () => {
   it('includes all 24 Pi builtins and preserves discovered resources without duplicate names', () => {
@@ -43,6 +49,33 @@ describe('Pi slash commands', () => {
       'review',
       'skill:test',
     ]);
+  });
+  it('groups every builtin and hides internal bridge commands', () => {
+    expect(
+      builtinCommands.every((command) => commandCategory(command) !== '其他'),
+    ).toBe(true);
+    const commands = categorizedCommands([
+      { name: 'pi-desktop-reload-v1', source: 'extension' },
+      { name: 'review', source: 'prompt' },
+    ]);
+    expect(commands[0].name).toBe('tree');
+    expect(commands).toHaveLength(16);
+    for (const name of [
+      'login',
+      'logout',
+      'share',
+      'import',
+      'bug',
+      'trust',
+      'changelog',
+      'scoped-models',
+      'hotkeys',
+    ])
+      expect(commands.some((command) => command.name === name)).toBe(false);
+    expect(
+      commands.some((command) => command.name.startsWith('pi-desktop-')),
+    ).toBe(false);
+    expect(commandCategory(commands.at(-1)!)).toBe('模板');
   });
   it('parses exact builtin tokens and preserves multiline arguments', () => {
     expect(parseBuiltin('/compact focus on code\nand tests')).toEqual({
