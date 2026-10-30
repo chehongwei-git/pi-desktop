@@ -48,6 +48,7 @@ pub struct Settings {
     pub extra_path: Vec<String>,
     pub session_dir: String,
     pub recent_projects: Vec<String>,
+    pub pinned_sessions: Vec<String>,
     pub theme: String,
 }
 impl Default for Settings {
@@ -60,6 +61,7 @@ impl Default for Settings {
             extra_path: vec![],
             session_dir: String::new(),
             recent_projects: vec![],
+            pinned_sessions: vec![],
             theme: "system".into(),
         }
     }
@@ -96,6 +98,8 @@ pub struct Message {
     pub text: String,
     pub thinking: String,
     pub content_ref: Option<String>,
+    #[serde(default)]
+    pub truncated: bool,
     pub status: String,
     pub name: Option<String>,
 }

@@ -90,6 +90,7 @@ impl Projection {
             text: preview(&text, 64 * 1024),
             thinking: preview(&thinking, 64 * 1024),
             content_ref,
+            truncated: text.len() > 64 * 1024,
             status: if value["isError"] == true || value["stopReason"] == "error" {
                 "error"
             } else {
@@ -126,6 +127,7 @@ impl Projection {
                         text: String::new(),
                         thinking: String::new(),
                         content_ref: None,
+                        truncated: false,
                         status: "streaming".into(),
                         name: None,
                     },
@@ -207,6 +209,7 @@ impl Projection {
                         text: preview(&text, 64 * 1024),
                         thinking: String::new(),
                         content_ref,
+                        truncated: text.len() > 64 * 1024,
                         status: if kind != "tool_execution_end" {
                             "running"
                         } else if event["isError"] == true {
@@ -293,6 +296,34 @@ mod tests {
         assert!(record(&mut input).await.unwrap().is_none());
         let mut bad = tokio::io::BufReader::new(&b"not-json\n"[..]);
         assert!(record(&mut bad).await.is_err());
+    }
+    /// 正文引用用于缓存重载；只有超出 UTF-8 预览上限才需要显示全文入口。
+    #[test]
+    fn full_content_action_requires_truncated_body() {
+        let mut projection = Projection::default();
+        let mut store = Store::new().unwrap();
+        for text in [
+            "普通正文".to_string(),
+            "a".repeat(64 * 1024),
+            "你".repeat(64 * 1024 / 3 + 1),
+        ] {
+            let value = json!({"role":"assistant","content":[{"type":"text","text":text}]});
+            let message = projection
+                .message(&value, "message".into(), &mut store)
+                .unwrap();
+            assert!(message.content_ref.is_some());
+            assert_eq!(message.truncated, text.len() > 64 * 1024);
+            let page = store
+                .content(message.content_ref.as_deref().unwrap(), 0)
+                .unwrap();
+            assert_eq!(page["done"], !message.truncated);
+            assert_eq!(message.text, page["text"].as_str().unwrap());
+            projection.event(json!({"type":"tool_execution_end","toolCallId":"tool","result":{"content":[{"type":"text","text":text}]}}), &mut store).unwrap();
+            assert_eq!(
+                projection.messages.last().unwrap().truncated,
+                message.truncated
+            );
+        }
     }
     /// accepted 与 agent_end 不是终点；只有 settled 才发布 idle。
     #[test]

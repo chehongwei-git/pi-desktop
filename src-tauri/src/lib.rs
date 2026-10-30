@@ -63,10 +63,21 @@ async fn detect_pi(state: State<'_, AppState>, settings: Option<Settings>) -> Re
 /// 跨项目先等待回收旧进程，再启动新进程；初始化失败同样回收。
 #[tauri::command]
 async fn connect_pi(
+    app: tauri::AppHandle,
     state: State<'_, AppState>,
     project: String,
     channel: Channel<Value>,
 ) -> Result<Value> {
+    // 未指定项目时使用系统用户目录，绝不继承应用安装目录。
+    let project = if project.is_empty() {
+        app.path()
+            .home_dir()
+            .map_err(|error| AppError::new("HOME", error.to_string()))?
+            .to_string_lossy()
+            .into_owned()
+    } else {
+        project
+    };
     let _gate = state.lifecycle.lock().await;
     if let Some(old) = state.runtime.lock().await.take() {
         let _ = old.shutdown().await;

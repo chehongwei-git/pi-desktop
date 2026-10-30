@@ -37,6 +37,8 @@
   let total = $state(0);
   let follow = $state(true);
   let frame = 0;
+  let lastScrollTop = 0;
+  let touchY = 0;
   let mounted = $state(false);
   /** 高度变化只请求一次帧更新；resize/Markdown 完成后也遵循用户的 follow 状态。 */
   function update(): void {
@@ -51,11 +53,12 @@
     total = virtual.getTotalSize();
     if (follow) {
       cancelAnimationFrame(frame);
-      frame = requestAnimationFrame(() =>
-        virtual?.scrollToIndex(Math.max(0, messages.length - 1), {
-          align: 'end',
-        }),
-      );
+      frame = requestAnimationFrame(() => {
+        if (follow)
+          virtual?.scrollToIndex(Math.max(0, messages.length - 1), {
+            align: 'end',
+          });
+      });
     }
   }
   onMount(() => {
@@ -102,7 +105,7 @@
   /** 加载旧页时保留首个可见消息与内部偏移，不用新增条数猜测高度。 */
   async function older(): Promise<void> {
     if (!virtual || loading) return;
-    follow = false;
+    pauseFollow();
     const anchor = virtual.getVirtualItems()[0];
     const id = anchor ? messages[anchor.index]?.id : undefined;
     const offset = anchor ? viewport.scrollTop - anchor.start : 0;
@@ -117,13 +120,23 @@
     }
     update();
   }
-  /** 用户滚回底部才重新启用跟随；上滚/触摸操作可立即取消。 */
+  /** 用户操作立即取消队列和虚拟列表中尚未完成的定位，避免争夺滚动位置。 */
+  function pauseFollow(): void {
+    follow = false;
+    cancelAnimationFrame(frame);
+    virtual?.cancelScroll();
+    lastScrollTop = viewport.scrollTop;
+  }
+  /** 只有向下真正滚到底部才恢复跟随；上滚后仍靠近底部不能触发。 */
   function scroll(): void {
+    const top = viewport.scrollTop;
     if (
-      viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight <=
-      80
+      !follow &&
+      top > lastScrollTop &&
+      viewport.scrollHeight - top - viewport.clientHeight <= 2
     )
       follow = true;
+    lastScrollTop = top;
   }
 </script>
 
@@ -133,13 +146,22 @@
   bind:this={viewport}
   onscroll={scroll}
   onwheel={(event) => {
-    if (event.deltaY < 0) follow = false;
+    if (event.deltaY < 0) pauseFollow();
   }}
-  ontouchmove={() => {
-    follow = false;
+  ontouchstart={(event) => {
+    touchY = event.touches[0]?.clientY ?? 0;
+  }}
+  ontouchmove={(event) => {
+    const nextY = event.touches[0]?.clientY ?? touchY;
+    if (nextY > touchY) pauseFollow();
+    touchY = nextY;
+  }}
+  onpointerdown={(event) => {
+    // 原生滚动条拖动也需要中止正在执行的底部定位。
+    if (event.target === viewport) pauseFollow();
   }}
   onkeydown={(event) => {
-    if (['PageUp', 'Home', 'ArrowUp'].includes(event.key)) follow = false;
+    if (['PageUp', 'Home', 'ArrowUp'].includes(event.key)) pauseFollow();
   }}
   tabindex="0"
   role="region"

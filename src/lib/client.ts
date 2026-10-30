@@ -58,7 +58,7 @@ export const bridge = {
   }> {
     return invoke('detect_pi', { settings });
   },
-  /** 历史只搜索元数据，文件读取与摘要留在宿主。 */
+  /** 历史只搜索元数据；project 为空时列出全部工作区，文件读取与摘要留在宿主。 */
   sessions(project: string, search = ''): Promise<SessionSummary[]> {
     return invoke('list_sessions', { project, search });
   },

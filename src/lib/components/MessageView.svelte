@@ -99,7 +99,7 @@
         ><Icon name="down" size={14} /></summary
       >
       <pre class="tool-output">{message.text}</pre>
-      {#if message.contentRef}<button
+      {#if message.contentRef && message.truncated}<button
           class="text-button"
           onclick={() => onfull(message)}>分块查看完整输出</button
         >{/if}
@@ -135,7 +135,7 @@
           aria-label="复制消息"
           onclick={() => copy(message.text)}
           ><Icon name={copied ? 'check' : 'copy'} size={15} /></button
-        >{#if message.contentRef}<button
+        >{#if message.contentRef && message.truncated}<button
             class="text-button"
             onclick={() => onfull(message)}>查看完整正文</button
           >{/if}

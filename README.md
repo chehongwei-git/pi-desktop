@@ -18,11 +18,11 @@ npm run desktop
 
 开发还需要 Rust stable 和平台构建工具。Windows 使用 Visual Studio C++ Build Tools 与 Windows SDK；macOS 使用 Xcode Command Line Tools；Linux 需要 GTK3、WebKitGTK 4.1、AppIndicator 等 Tauri 系统依赖。
 
-打开后选择项目文件夹，客户端才启动 Pi。设置里可以指定 Pi 入口、Node/Bun、额外 PATH 或会话目录。标准 npm `pi.cmd` 会被解析成 Node + CLI JS，未知自定义 cmd 请改填 JS 入口和运行时。所有相对工具操作都以所选项目为工作目录。
+打开后左侧按“置顶、工作项目、最近”展示会话入口，三个区块均可展开收起。工作项目默认展示前 5 个，可展开全部；点击项目展开会话。未选项目时点击“新对话”会直接在系统用户目录启动 Pi，已选项目则在当前项目新建。点击会话旁的图钉可置顶，重启后保留。设置里可以指定 Pi 入口、Node/Bun、额外 PATH 或会话目录。标准 npm `pi.cmd` 会被解析成 Node + CLI JS，未知自定义 cmd 请改填 JS 入口和运行时。所有相对工具操作都以所选项目为工作目录。
 
 ## 已实现
 
-- 单窗口、单活动 Pi：项目与最近项目、当前项目历史摘要搜索、新建/恢复/重命名。
+- 单窗口、单活动 Pi：启动自动发现工作区、按项目展开会话、最近会话与持久化置顶、跨项目历史摘要搜索、新建/恢复/重命名。
 - 流式正文、折叠思考与工具、停止并恢复排队草稿、运行中 steer/followUp。
 - 模型与思考等级、命令提示、扩展 select/confirm/input/editor 及基础通知。
 - 明暗主题、Markdown 清洗、代码复制、延迟高亮、动态高度虚拟列表、大正文分块。

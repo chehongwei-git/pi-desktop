@@ -21,6 +21,7 @@ export class Desktop {
   settings = $state<Settings>({
     ...defaultSettings,
     recentProjects: [],
+    pinnedSessions: [],
     extraPath: [],
   });
   connection = $state<ConnectionState>('disconnected');
@@ -30,6 +31,82 @@ export class Desktop {
   version = $state('');
   messages = $state<Message[]>([]);
   sessions = $state<SessionSummary[]>([]);
+  loadingSessions = $state(false);
+  pinSaving = $state(false);
+  get pinnedSessions(): SessionSummary[] {
+    const sessions = new Map(
+      this.sessions.map((session) => [session.path, session]),
+    );
+    return this.settings.pinnedSessions.flatMap((path) => {
+      const session = sessions.get(path);
+      return session ? [session] : [];
+    });
+  }
+  isPinned(path: string): boolean {
+    return this.settings.pinnedSessions.includes(path);
+  }
+  /** 先持久化再更新界面；保存失败保留原置顶状态。 */
+  async togglePin(path: string): Promise<void> {
+    if (this.pinSaving) return;
+    this.pinSaving = true;
+    try {
+      const pinnedSessions = this.isPinned(path)
+        ? this.settings.pinnedSessions.filter((item) => item !== path)
+        : [...this.settings.pinnedSessions, path];
+      await this.api.save({
+        ...$state.snapshot(this.settings),
+        pinnedSessions,
+      });
+      this.settings.pinnedSessions = pinnedSessions;
+    } finally {
+      this.pinSaving = false;
+    }
+  }
+  expandedProjects = $state<string[]>([]);
+  /** 与 Pi header.cwd 分组；Windows 路径忽略大小写与分隔符差异。 */
+  projectKey(path: string): string {
+    const normalized = path.replace(/\\/g, '/').replace(/\/$/, '');
+    return /^[a-z]:\//i.test(normalized)
+      ? normalized.toLowerCase()
+      : normalized;
+  }
+  get projects(): { path: string; sessions: SessionSummary[] }[] {
+    const groups = new Map<
+      string,
+      { path: string; sessions: SessionSummary[] }
+    >();
+    for (const session of this.sessions) {
+      if (!session.cwd) continue;
+      const key = this.projectKey(session.cwd);
+      if (!groups.has(key))
+        groups.set(key, { path: session.cwd, sessions: [] });
+      groups.get(key)!.sessions.push(session);
+    }
+    for (const path of [this.project, ...this.settings.recentProjects]) {
+      if (path && !groups.has(this.projectKey(path)))
+        groups.set(this.projectKey(path), { path, sessions: [] });
+    }
+    return [...groups.values()].sort((a, b) =>
+      this.projectKey(a.path).localeCompare(this.projectKey(b.path)),
+    );
+  }
+  isExpanded(project: string): boolean {
+    return this.expandedProjects.includes(this.projectKey(project));
+  }
+  expandProject(project: string): void {
+    if (!this.isExpanded(project))
+      this.expandedProjects = [
+        ...this.expandedProjects,
+        this.projectKey(project),
+      ];
+  }
+  toggleProject(project: string): void {
+    if (this.isExpanded(project))
+      this.expandedProjects = this.expandedProjects.filter(
+        (key) => key !== this.projectKey(project),
+      );
+    else this.expandProject(project);
+  }
   snapshot = $state<Snapshot>({});
   models = $state<Model[]>([]);
   levels = $state<string[]>([]);
@@ -39,6 +116,38 @@ export class Desktop {
   error = $state('');
   submitting = $state(false);
   loadingHistory = $state(false);
+  openingSession = $state<{ path: string; title: string } | null>(null);
+  private currentSessionTitle = $state('');
+  /** 当前标题不依赖索引刷新是否暂时缺项；Pi 返回名称时仍以其为准。 */
+  get sessionTitle(): string {
+    if (this.openingSession) return this.openingSession.title;
+    const session = this.sessions.find(
+      (item) =>
+        this.sessionKey(item.path) ===
+        this.sessionKey(this.snapshot.sessionFile ?? ''),
+    );
+    return (
+      this.snapshot.sessionName ||
+      session?.name ||
+      this.currentSessionTitle ||
+      session?.preview ||
+      session?.timestamp ||
+      '新对话'
+    );
+  }
+  /** Windows RPC 与磁盘索引可使用不同分隔符、大小写和长路径前缀。 */
+  private sessionKey(path: string): string {
+    const normalized = path.replace(/\\/g, '/').replace(/^\/\/\?\//, '');
+    return /^[a-z]:\//i.test(normalized) || normalized.startsWith('//')
+      ? normalized.toLowerCase()
+      : normalized;
+  }
+  private sessionLabel(path: string): string {
+    const session = this.sessions.find(
+      (item) => this.sessionKey(item.path) === this.sessionKey(path),
+    );
+    return session?.name || session?.preview || session?.timestamp || '';
+  }
   before = $state(0);
   hasMore = $state(false);
   extensions = $state<ExtensionRequest[]>([]);
@@ -74,7 +183,13 @@ export class Desktop {
   /** 配置初始化失败仍可进入设置修复；普通浏览器预览给出明确桌面环境说明。 */
   async init(): Promise<void> {
     try {
-      this.settings = await this.api.settings();
+      const settings = await this.api.settings();
+      this.settings = {
+        ...defaultSettings,
+        ...settings,
+        pinnedSessions: settings.pinnedSessions ?? [],
+      };
+      await this.refreshSessions();
     } catch (error) {
       this.error = errorMessage(error);
     }
@@ -94,6 +209,7 @@ export class Desktop {
   }
   /** 项目/历史切换通过此事务入口；运行时由弹层明确选择停止、等待或取消。 */
   requestSwitch(label: string, execute: () => Promise<void>): void {
+    if (this.openingSession) return;
     if (this.run !== 'idle') {
       this.pendingSwitch = { label, execute, waiting: false };
       return;
@@ -130,9 +246,11 @@ export class Desktop {
       );
       if (generation !== this.generation) return;
       this.runtimeId = connected.runtimeId;
-      this.project = project;
+      this.project = connected.project;
+      this.expandProject(this.project);
       this.version = connected.version;
       this.snapshot = connected.snapshot;
+      this.currentSessionTitle = '';
       this.connection = 'ready';
       this.messages = [];
       this.accessed.clear();
@@ -140,8 +258,10 @@ export class Desktop {
       this.run = connected.snapshot.isStreaming ? 'running' : 'idle';
       this.draft = this.drafts.get(this.draftKey()) ?? '';
       this.settings.recentProjects = [
-        project,
-        ...this.settings.recentProjects.filter((p) => p !== project),
+        this.project,
+        ...this.settings.recentProjects.filter(
+          (p) => this.projectKey(p) !== this.projectKey(this.project),
+        ),
       ].slice(0, 20);
       await this.api.save($state.snapshot(this.settings));
       if (!connected.verified)
@@ -292,12 +412,48 @@ export class Desktop {
     const snapshot = await this.action<Snapshot>({ type: 'state' });
     if (generation === this.generation) this.snapshot = snapshot;
   }
-  /** 最新搜索覆盖旧请求，防止慢磁盘造成结果回跳。 */
-  async refreshSessions(search = ''): Promise<void> {
-    if (!this.project) return;
+  /** 全局索引支持启动时浏览全部项目；搜索在摘要上本地进行。 */
+  async refreshSessions(): Promise<void> {
     const generation = ++this.searchGeneration;
-    const sessions = await this.api.sessions(this.project, search);
-    if (generation === this.searchGeneration) this.sessions = sessions;
+    this.loadingSessions = true;
+    try {
+      const sessions = await this.api.sessions('', '');
+      if (generation === this.searchGeneration) this.sessions = sessions;
+    } finally {
+      if (generation === this.searchGeneration) this.loadingSessions = false;
+    }
+  }
+  /** 展开不创建进程；选择会话才连接该会话所属项目。 */
+  async openSession(project: string, path: string): Promise<void> {
+    if (this.openingSession) return;
+    this.openingSession = {
+      path,
+      title: this.sessionLabel(path) || '新会话',
+    };
+    try {
+      if (
+        this.connection !== 'ready' ||
+        this.projectKey(this.project) !== this.projectKey(project)
+      )
+        await this.connect(project);
+      if (
+        this.connection !== 'ready' ||
+        this.projectKey(this.project) !== this.projectKey(project)
+      )
+        return;
+      await this.switchSession(path);
+    } finally {
+      this.openingSession = null;
+    }
+  }
+  /** 空项目由宿主解析为系统用户目录；已有连接时继续在当前项目新建。 */
+  async newSession(project = this.project): Promise<void> {
+    if (
+      this.connection !== 'ready' ||
+      this.projectKey(this.project) !== this.projectKey(project)
+    )
+      await this.connect(project);
+    else await this.switchSession();
   }
   /** 历史恢复由宿主投影与分页；首次只接收最后 50 条。 */
   async refreshHistory(before?: number): Promise<void> {
@@ -318,7 +474,12 @@ export class Desktop {
   }
   /** 发送接受前保留原草稿，超时绝不自动重发；用户消息由 Pi 权威事件插入。 */
   async send(mode?: 'steer' | 'followUp'): Promise<void> {
-    if (!this.draft.trim() || this.submitting || this.connection !== 'ready')
+    if (
+      !this.draft.trim() ||
+      this.submitting ||
+      this.openingSession ||
+      this.connection !== 'ready'
+    )
       return;
     const text = this.draft;
     this.submitting = true;
@@ -352,6 +513,9 @@ export class Desktop {
   /** 新建/切换只在成功且未被扩展取消后提交 UI 状态。 */
   async switchSession(path?: string): Promise<void> {
     if (!this.project) return;
+    const title = path
+      ? this.sessionLabel(path) || this.openingSession?.title || ''
+      : '';
     this.drafts.set(this.draftKey(), this.draft);
     const result = await this.action<{ cancelled: boolean }>(
       path ? { type: 'switch_session', path } : { type: 'new_session' },
@@ -360,6 +524,7 @@ export class Desktop {
       this.notice = '切换已被 Pi 扩展取消';
       return;
     }
+    this.currentSessionTitle = title;
     await this.drain();
     this.accessed.clear();
     this.visible.clear();
@@ -382,6 +547,7 @@ export class Desktop {
   async rename(name: string): Promise<void> {
     if (!name.trim()) return;
     await this.action({ type: 'rename', name: name.trim() });
+    this.currentSessionTitle = name.trim();
     await this.syncState();
     await this.refreshSessions();
   }
@@ -402,6 +568,7 @@ export class Desktop {
     if (!message.contentRef || message.text) return;
     const page = await this.api.content(this.runtimeId, message.contentRef, 0);
     message.text = page.text;
+    message.truncated = !page.done;
     this.accessed.set(message.id, ++this.accessSerial);
     this.trimCache();
   }
@@ -413,6 +580,7 @@ export class Desktop {
   async saveSettings(settings: Settings): Promise<void> {
     await this.api.save(settings);
     this.settings = settings;
+    await this.refreshSessions();
   }
   /** 连接诊断只返回版本与路径，不读凭据。 */
   detect(settings: Settings) {

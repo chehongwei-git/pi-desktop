@@ -3,19 +3,34 @@
   import { onMount } from 'svelte';
   import { open } from '@tauri-apps/plugin-dialog';
   import { Desktop } from './lib/state/desktop.svelte';
-  import { dateGroup } from './lib/state/reducer';
   import { errorMessage } from './lib/client';
-  import type { Message } from './lib/types';
+  import type { Message, SessionSummary } from './lib/types';
+  import ProjectPicker from './lib/components/ProjectPicker.svelte';
   import Composer from './lib/components/Composer.svelte';
   import Icon from './lib/components/Icon.svelte';
   import Transcript from './lib/components/Transcript.svelte';
   import Modal from './lib/components/Modal.svelte';
   import SettingsDialog from './lib/components/SettingsDialog.svelte';
   import ExtensionDialog from './lib/components/ExtensionDialog.svelte';
+  import SidebarSession from './lib/components/SidebarSession.svelte';
   const desktop = new Desktop();
+  let newChatMode = $state(false);
+  let projectSelection = $state<string | null>(null);
   let sidebar = $state(true);
   let settingsOpen = $state(false);
   let search = $state('');
+  let pinnedOpen = $state(true);
+  let projectsOpen = $state(true);
+  let recentOpen = $state(true);
+  let showAllProjects = $state(false);
+  let searching = $derived(!!search.trim());
+  function matchesSession(session: SessionSummary): boolean {
+    return `${session.name} ${session.preview}`
+      .toLowerCase()
+      .includes(search.trim().toLowerCase());
+  }
+  let pinnedSessions = $derived(desktop.pinnedSessions.filter(matchesSession));
+  let recentSessions = $derived(desktop.sessions.filter(matchesSession));
   let searchInput: HTMLInputElement;
   let renameOpen = $state(false);
   let renameValue = $state('');
@@ -28,9 +43,28 @@
   } | null>(null);
   let contentLoading = $state(false);
   let themeDark = $state(false);
-  let searchTimer: ReturnType<typeof setTimeout>;
+  let projects = $derived.by(() => {
+    const query = search.trim().toLowerCase();
+    return desktop.projects
+      .map((project) => ({
+        ...project,
+        sessions: query
+          ? project.sessions.filter((session) =>
+              `${session.name} ${session.preview}`
+                .toLowerCase()
+                .includes(query),
+            )
+          : project.sessions,
+      }))
+      .filter((project) => !query || project.sessions.length > 0);
+  });
+  let visibleProjects = $derived(
+    searching || showAllProjects ? projects : projects.slice(0, 5),
+  );
   let lastFocus = 0;
-  let empty = $derived(desktop.messages.length === 0);
+  let empty = $derived(
+    !desktop.openingSession && desktop.messages.length === 0,
+  );
   let modelKey = $derived(
     desktop.snapshot.model
       ? `${desktop.snapshot.model.provider}/${desktop.snapshot.model.id}`
@@ -55,7 +89,6 @@
     media.addEventListener('change', change);
     return () => {
       media.removeEventListener('change', change);
-      clearTimeout(searchTimer);
     };
   });
   $effect(() => {
@@ -65,14 +98,6 @@
           ? 'dark'
           : 'light'
         : desktop.settings.theme;
-  });
-  /** 搜索只查摘要；150ms 防抖，门面另用代数抑制过期响应。 */
-  $effect(() => {
-    const query = search;
-    clearTimeout(searchTimer);
-    searchTimer = setTimeout(() => {
-      void desktop.guard(() => desktop.refreshSessions(query));
-    }, 150);
   });
   /** 项目由原生目录选择器授权，不默认使用应用安装目录。 */
   async function chooseProject(): Promise<void> {
@@ -86,21 +111,43 @@
         desktop.requestSwitch('切换项目', () => desktop.connect(path));
     });
   }
-  /** 新对话保留项目；未连接时先连接，不发起无效 RPC。 */
-  function newChat(): void {
+  /** 新对话可在输入框上方重新选择工作目录。 */
+  function newChat(project = desktop.project): void {
     desktop.requestSwitch('开始新对话', async () => {
-      if (!desktop.project) return;
-      if (desktop.connection !== 'ready')
-        await desktop.connect(desktop.project);
-      else await desktop.switchSession();
+      await desktop.newSession(project);
+      if (desktop.connection === 'ready') {
+        newChatMode = true;
+        projectSelection = project;
+      }
+    });
+  }
+  function selectNewProject(project: string): void {
+    desktop.requestSwitch('选择新对话项目', async () => {
+      const draft = desktop.draft;
+      await desktop.newSession(project);
+      if (desktop.connection === 'ready') {
+        projectSelection = project;
+        desktop.draft = draft;
+        newChatMode = true;
+      }
+    });
+  }
+  async function createNewProject(): Promise<void> {
+    await desktop.guard(async () => {
+      const path = await open({
+        directory: true,
+        multiple: false,
+        title: '选择 Pi 工作项目',
+      });
+      if (typeof path === 'string') selectNewProject(path);
     });
   }
   /** 恢复历史时先建立该项目连接；被扩展取消时门面保持原状态。 */
-  function selectSession(path: string): void {
+  function selectSession(project: string, path: string): void {
     desktop.requestSwitch('打开历史会话', async () => {
-      if (desktop.connection !== 'ready')
-        await desktop.connect(desktop.project);
-      await desktop.switchSession(path);
+      await desktop.openSession(project, path);
+      newChatMode = false;
+      projectSelection = null;
       sidebar = window.innerWidth > 900;
     });
   }
@@ -128,7 +175,7 @@
   function focus(): void {
     if (Date.now() - lastFocus < 5000) return;
     lastFocus = Date.now();
-    void desktop.guard(() => desktop.refreshSessions(search));
+    void desktop.guard(() => desktop.refreshSessions());
   }
   /** 正文弹层每次只持有一个 64KiB 分块，不把大输出全部搬进 WebView。 */
   async function showFull(message: Message): Promise<void> {
@@ -165,6 +212,20 @@
 </script>
 
 <svelte:window onkeydown={keydown} onfocus={focus} />
+{#snippet sessionItem(session: SessionSummary, showProject = false)}
+  <SidebarSession
+    {session}
+    {showProject}
+    active={session.path === desktop.snapshot.sessionFile}
+    pinned={desktop.isPinned(session.path)}
+    busy={desktop.pinSaving}
+    disabled={!!desktop.openingSession}
+    onopen={() => selectSession(session.cwd, session.path)}
+    onpin={() => {
+      void desktop.guard(() => desktop.togglePin(session.path));
+    }}
+  />
+{/snippet}
 <div class="app-shell" class:sidebar-hidden={!sidebar}>
   {#if sidebar}<button
       class="sidebar-backdrop"
@@ -185,7 +246,7 @@
         }}><Icon name="panel" /></button
       >
     </div>
-    <button class="nav-new" onclick={newChat}
+    <button class="nav-new" onclick={() => newChat()}
       ><Icon name="plus" size={19} /><span>新对话</span><kbd>⌘ / Ctrl N</kbd
       ></button
     >
@@ -197,60 +258,144 @@
         aria-label="搜索历史会话"
       />
     </div>
-    <div class="project-section">
-      <div class="section-label">
-        工作项目<button
-          class="icon-button"
-          aria-label="选择项目文件夹"
-          onclick={chooseProject}><Icon name="plus" size={15} /></button
-        >
-      </div>
-      <button
-        class="project-current"
-        title={desktop.project || '选择本地项目'}
-        onclick={chooseProject}
-        ><Icon name="folder" size={17} /><span
-          >{desktop.project.split(/[\\/]/).filter(Boolean).pop() ||
-            '选择项目文件夹'}</span
-        ><Icon name="down" size={13} /></button
-      >
-      {#if desktop.settings.recentProjects.length}<select
-          class="recent-select"
-          aria-label="最近项目"
-          value={desktop.project}
-          onchange={(event) => {
-            const project = event.currentTarget.value;
-            if (project)
-              desktop.requestSwitch('切换项目', () => desktop.connect(project));
-          }}
-          ><option value="">最近项目</option
-          >{#each desktop.settings.recentProjects as project}<option
-              value={project}>{project}</option
-            >{/each}</select
-        >{/if}
-    </div>
-    <nav class="history-list" aria-label="历史会话">
-      {#each desktop.sessions as session, index (session.path)}
-        {#if index === 0 || dateGroup(session.modified) !== dateGroup(desktop.sessions[index - 1].modified)}<h3
+    <nav
+      class="history-list"
+      aria-label="项目与历史会话"
+      aria-busy={desktop.loadingSessions}
+    >
+      <section class="sidebar-section" aria-label="置顶">
+        <div class="section-label">
+          <button
+            class="section-toggle"
+            aria-expanded={pinnedOpen || searching}
+            onclick={() => {
+              pinnedOpen = !pinnedOpen;
+            }}
           >
-            {dateGroup(session.modified)}
-          </h3>{/if}
-        <button
-          class="history-item"
-          class:active={session.path === desktop.snapshot.sessionFile}
-          title={session.warning ?? session.name ?? session.preview}
-          onclick={() => selectSession(session.path)}
-          ><span>{session.name || session.preview || session.timestamp}</span
-          >{#if session.warning}<span title={session.warning}>!</span
-            >{/if}</button
-        >
-      {:else}<div class="history-empty">
-          {search
-            ? '没有匹配的会话'
-            : desktop.project
-              ? '在这里继续你的对话'
-              : '选择项目后显示历史会话'}
-        </div>{/each}
+            <span
+              class="project-chevron"
+              class:collapsed={!(pinnedOpen || searching)}
+              ><Icon name="down" size={13} /></span
+            >
+            <span>置顶</span><small>{pinnedSessions.length}</small>
+          </button>
+        </div>
+        {#if pinnedOpen || searching}
+          {#each pinnedSessions as session (session.path)}
+            {@render sessionItem(session, true)}
+          {:else}<div class="history-empty">
+              {searching ? '没有匹配的置顶会话' : '点击会话旁的图钉置顶'}
+            </div>{/each}
+        {/if}
+      </section>
+      <section class="sidebar-section" aria-label="工作项目">
+        <div class="section-label">
+          <button
+            class="section-toggle"
+            aria-expanded={projectsOpen || searching}
+            onclick={() => {
+              projectsOpen = !projectsOpen;
+              showAllProjects = false;
+            }}
+          >
+            <span
+              class="project-chevron"
+              class:collapsed={!(projectsOpen || searching)}
+              ><Icon name="down" size={13} /></span
+            >
+            <span>工作项目</span><small>{projects.length}</small>
+          </button>
+          <button
+            class="icon-button"
+            aria-label="选择项目文件夹"
+            onclick={chooseProject}><Icon name="plus" size={15} /></button
+          >
+        </div>
+        {#if projectsOpen || searching}
+          {#each visibleProjects as project (desktop.projectKey(project.path))}
+            {@const expanded = desktop.isExpanded(project.path) || searching}
+            <div class="project-group">
+              <div class="project-row">
+                <button
+                  class="project-current"
+                  class:active={desktop.projectKey(project.path) ===
+                    desktop.projectKey(desktop.project)}
+                  title={project.path}
+                  aria-expanded={expanded}
+                  onclick={() => desktop.toggleProject(project.path)}
+                >
+                  <span class="project-chevron" class:collapsed={!expanded}
+                    ><Icon name="down" size={13} /></span
+                  >
+                  <Icon name="folder" size={17} /><span class="project-name"
+                    >{project.path.split(/[\\/]/).filter(Boolean).pop() ||
+                      project.path}</span
+                  >
+                  <small>{project.sessions.length}</small>
+                </button>
+                <button
+                  class="icon-button project-new"
+                  aria-label={`在 ${project.path} 中新建会话`}
+                  onclick={() => newChat(project.path)}
+                  ><Icon name="plus" size={15} /></button
+                >
+              </div>
+              {#if expanded}
+                <div class="project-sessions">
+                  {#each project.sessions as session (session.path)}
+                    {@render sessionItem(session)}
+                  {:else}<div class="history-empty">
+                      暂无会话，点击 + 开始对话
+                    </div>{/each}
+                </div>
+              {/if}
+            </div>
+          {:else}<div class="history-empty" role="status">
+              {desktop.loadingSessions
+                ? '正在加载工作区…'
+                : searching
+                  ? '没有匹配的会话'
+                  : '还没有 Pi 工作区，可直接新建对话'}
+            </div>{/each}
+          {#if !searching && projects.length > 5}
+            <button
+              class="text-button show-more"
+              onclick={() => {
+                showAllProjects = !showAllProjects;
+              }}
+            >
+              {showAllProjects
+                ? '收起更多项目'
+                : `显示全部 ${projects.length} 个项目`}
+            </button>
+          {/if}
+        {/if}
+      </section>
+      <section class="sidebar-section" aria-label="最近">
+        <div class="section-label">
+          <button
+            class="section-toggle"
+            aria-expanded={recentOpen || searching}
+            onclick={() => {
+              recentOpen = !recentOpen;
+            }}
+          >
+            <span
+              class="project-chevron"
+              class:collapsed={!(recentOpen || searching)}
+              ><Icon name="down" size={13} /></span
+            >
+            <span>最近</span><small>{recentSessions.length}</small>
+          </button>
+        </div>
+        {#if recentOpen || searching}
+          {#each recentSessions as session (session.path)}
+            {@render sessionItem(session, true)}
+          {:else}<div class="history-empty">
+              {searching ? '没有匹配的会话' : '暂无最近会话'}
+            </div>{/each}
+        {/if}
+      </section>
     </nav>
     <button
       class="sidebar-settings"
@@ -275,7 +420,9 @@
           class="model-select"
           aria-label="模型"
           value={modelKey}
-          disabled={desktop.connection !== 'ready' || desktop.run !== 'idle'}
+          disabled={!!desktop.openingSession ||
+            desktop.connection !== 'ready' ||
+            desktop.run !== 'idle'}
           onchange={(event) => {
             void desktop.guard(() =>
               desktop.setModel(event.currentTarget.value),
@@ -293,7 +440,7 @@
             class="thinking-select"
             aria-label="思考级别"
             value={desktop.snapshot.thinkingLevel ?? 'off'}
-            disabled={desktop.run !== 'idle'}
+            disabled={!!desktop.openingSession || desktop.run !== 'idle'}
             onchange={(event) => {
               const level = event.currentTarget.value;
               void desktop.guard(async () => {
@@ -327,12 +474,14 @@
             }}><Icon name="more" /></button
           >{#if sessionMenu}<div class="session-menu">
               <button
-                disabled={!desktop.snapshot.sessionFile}
+                disabled={!!desktop.openingSession ||
+                  !desktop.snapshot.sessionFile}
                 onclick={() => {
                   void desktop.guard(copyPath);
                 }}>复制会话路径</button
               ><button
-                disabled={desktop.run !== 'idle' ||
+                disabled={!!desktop.openingSession ||
+                  desktop.run !== 'idle' ||
                   !desktop.snapshot.sessionFile}
                 onclick={() => {
                   renameValue = desktop.snapshot.sessionName ?? '';
@@ -340,7 +489,8 @@
                   sessionMenu = false;
                 }}>重命名当前会话</button
               ><button
-                disabled={desktop.connection === 'disconnected'}
+                disabled={!!desktop.openingSession ||
+                  desktop.connection === 'disconnected'}
                 onclick={() => {
                   sessionMenu = false;
                   void desktop.guard(() => desktop.disconnect());
@@ -350,6 +500,13 @@
         </div>
       </div>
     </header>
+    {#if desktop.project || desktop.openingSession}
+      <div class="conversation-heading">
+        <h1 class="session-title" title={desktop.sessionTitle}>
+          {desktop.sessionTitle}
+        </h1>
+      </div>
+    {/if}
     {#if desktop.error}<div class="banner error-banner" role="alert">
         <span>{desktop.error}</span><button
           class="text-button"
@@ -384,8 +541,14 @@
           }}><Icon name="close" size={15} /></button
         >
       </div>{/if}
-    <div class="conversation" class:empty>
-      {#if empty}<div class="welcome">
+    <div class="conversation" class:empty aria-busy={!!desktop.openingSession}>
+      {#if desktop.openingSession}
+        <div class="session-loading" role="status" aria-label="正在加载会话">
+          <span class="loading-indicator" aria-hidden="true"
+            ><Icon name="refresh" size={20} /></span
+          >
+        </div>
+      {:else if empty}<div class="welcome">
           <div class="welcome-logo"><Icon name="pi" size={40} /></div>
           <h1>
             {desktop.project ? '今天想做些什么？' : '让 Pi 与你的项目一起工作'}
@@ -393,7 +556,7 @@
           <p>
             {desktop.project
               ? desktop.project
-              : '选择一个本地项目，开始对话、阅读代码与完成任务。'}
+              : '直接新建对话，或选择项目文件夹开始。'}
           </p>
           {#if !desktop.project}<button
               class="choose-project"
@@ -449,14 +612,29 @@
                 }}>草稿 {index + 1}</button
               >{/each}
           </div>{/if}
+        {#if newChatMode || empty}
+          <ProjectPicker
+            projects={desktop.projects}
+            project={projectSelection ?? desktop.project}
+            disabled={!!desktop.openingSession ||
+              desktop.connection === 'starting'}
+            onselect={selectNewProject}
+            oncreate={() => {
+              void createNewProject();
+            }}
+          />
+        {/if}
         <Composer
           bind:value={desktop.draft}
-          disabled={desktop.connection !== 'ready'}
+          disabled={!!desktop.openingSession || desktop.connection !== 'ready'}
           running={desktop.run !== 'idle'}
           submitting={desktop.submitting}
           commands={desktop.commands}
           onsend={(mode) => {
-            void desktop.guard(() => desktop.send(mode));
+            void desktop.guard(async () => {
+              await desktop.send(mode);
+              if (!desktop.draft.trim()) newChatMode = false;
+            });
           }}
           onstop={() => {
             void desktop.guard(() => desktop.stop());

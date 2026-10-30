@@ -46,6 +46,24 @@ pub fn save(dir: &Path, settings: &Settings) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// 旧版配置自动补空置顶列表；新增偏好在原子保存后保留。
+    #[test]
+    fn pinned_sessions_are_backward_compatible_and_persisted() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("settings.json"),
+            r#"{"schemaVersion":1,"theme":"system"}"#,
+        )
+        .unwrap();
+        let mut settings = load(dir.path()).unwrap();
+        assert!(settings.pinned_sessions.is_empty());
+        settings.pinned_sessions = vec!["session.jsonl".into()];
+        save(dir.path(), &settings).unwrap();
+        assert_eq!(
+            load(dir.path()).unwrap().pinned_sessions,
+            vec!["session.jsonl"]
+        );
+    }
     /// 损坏配置不会阻止首次使用，且原文件仍可诊断。
     #[test]
     fn corrupt_settings_are_backed_up() {

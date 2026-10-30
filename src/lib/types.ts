@@ -6,6 +6,7 @@ export interface Settings {
   extraPath: string[];
   sessionDir: string;
   recentProjects: string[];
+  pinnedSessions: string[];
   theme: 'system' | 'light' | 'dark';
 }
 export interface SessionSummary {
@@ -24,6 +25,8 @@ export interface Message {
   text: string;
   thinking: string;
   contentRef: string | null;
+  /** 只有正文超出宿主预览上限时才需要全文入口。 */
+  truncated?: boolean;
   status: string;
   name: string | null;
 }
@@ -134,5 +137,6 @@ export const defaultSettings: Settings = {
   extraPath: [],
   sessionDir: '',
   recentProjects: [],
+  pinnedSessions: [],
   theme: 'system',
 };

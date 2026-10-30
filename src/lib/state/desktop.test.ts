@@ -1,12 +1,208 @@
 /** 门面测试使用可替换 IPC 端口，验证失败保留草稿、取消切换和一次性扩展响应。 */
 import { describe, it, expect, vi } from 'vitest';
 import { Desktop } from './desktop.svelte';
+import { defaultSettings } from '../types';
 import { bridge, type Bridge } from '../client';
 /** 只替换 action；其余桥接函数不应在这些独立场景中被触发。 */
 function fixture(action: Bridge['action']) {
   return new Desktop({ ...bridge, action });
 }
 describe('desktop business behavior', () => {
+  it('keeps the opened title after Windows path normalization and index refresh, then resets it for a new session', async () => {
+    let sessionFile = 'C:\\sessions\\original.jsonl';
+    const action: Bridge['action'] = async <T>(
+      _: string,
+      command: Parameters<Bridge['action']>[1],
+    ) => {
+      if (command.type === 'switch_session')
+        sessionFile = '\\\\?\\C:\\SESSIONS\\TARGET.JSONL';
+      if (command.type === 'new_session')
+        sessionFile = 'C:\\sessions\\new.jsonl';
+      return (
+        command.type === 'state'
+          ? { sessionFile }
+          : command.type === 'history'
+            ? { messages: [], before: 0, hasMore: false }
+            : { cancelled: false }
+      ) as T;
+    };
+    const desktop = new Desktop({
+      ...bridge,
+      action,
+      events: async () => ({ runtimeId: 'r', sequence: 0, events: [] }),
+      sessions: async () => [],
+    });
+    desktop.project = 'project';
+    desktop.runtimeId = 'r';
+    desktop.connection = 'ready';
+    desktop.sessions = [
+      {
+        path: 'C:/sessions/target.jsonl',
+        id: 'target',
+        cwd: 'project',
+        name: '当前会话名称',
+        preview: '',
+        timestamp: '',
+        modified: 0,
+        warning: null,
+      },
+    ];
+    desktop.snapshot = { sessionFile: '\\\\?\\C:\\SESSIONS\\TARGET.JSONL' };
+    expect(desktop.sessionTitle).toBe('当前会话名称');
+    await desktop.openSession('project', 'C:/sessions/target.jsonl');
+    expect(desktop.openingSession).toBeNull();
+    expect(desktop.sessions).toEqual([]);
+    expect(desktop.sessionTitle).toBe('当前会话名称');
+    await desktop.syncState();
+    expect(desktop.sessionTitle).toBe('当前会话名称');
+    await desktop.rename('新的会话名称');
+    expect(desktop.sessionTitle).toBe('新的会话名称');
+    await desktop.newSession();
+    expect(desktop.sessionTitle).toBe('新对话');
+  });
+  it('previews the target title while loading and restores the original title on cancellation or failure', async () => {
+    let finish!: (result: { cancelled: boolean }) => void;
+    const action = vi.fn().mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+    );
+    const desktop = fixture(action);
+    desktop.project = 'project';
+    desktop.connection = 'ready';
+    desktop.snapshot = { sessionFile: 'original' };
+    desktop.sessions = ['original', 'target'].map((path) => ({
+      path,
+      id: path,
+      cwd: 'project',
+      name: path === 'original' ? '原会话' : '目标会话',
+      preview: '',
+      timestamp: '',
+      modified: 0,
+      warning: null,
+    }));
+    desktop.draft = 'keep draft';
+    const pending = desktop.openSession('project', 'target');
+    expect(desktop.sessionTitle).toBe('目标会话');
+    expect(desktop.openingSession?.path).toBe('target');
+    await desktop.send();
+    await desktop.openSession('project', 'another');
+    expect(action).toHaveBeenCalledTimes(1);
+    finish({ cancelled: true });
+    await pending;
+    expect(desktop.openingSession).toBeNull();
+    expect(desktop.sessionTitle).toBe('原会话');
+    expect(desktop.draft).toBe('keep draft');
+    action.mockRejectedValueOnce(new Error('read failed'));
+    await expect(desktop.openSession('project', 'target')).rejects.toThrow(
+      'read failed',
+    );
+    expect(desktop.openingSession).toBeNull();
+    expect(desktop.sessionTitle).toBe('原会话');
+    desktop.snapshot.sessionName = '重命名后的会话';
+    expect(desktop.sessionTitle).toBe('重命名后的会话');
+  });
+  it('uses the host-resolved home directory for a new conversation without a project', async () => {
+    const connect = vi.fn().mockResolvedValue({
+      runtimeId: 'home',
+      project: 'C:/Users/mock',
+      snapshot: {},
+      version: '1.4.0',
+      verified: true,
+    });
+    const save = vi.fn().mockResolvedValue(undefined);
+    const desktop = new Desktop({ ...bridge, connect, save });
+    vi.spyOn(desktop, 'refreshMetadata').mockResolvedValue();
+    vi.spyOn(desktop, 'refreshHistory').mockResolvedValue();
+    vi.spyOn(desktop, 'refreshSessions').mockResolvedValue();
+    await desktop.newSession();
+    expect(connect).toHaveBeenCalledWith('', expect.any(Function));
+    expect(desktop.project).toBe('C:/Users/mock');
+    expect(desktop.connection).toBe('ready');
+    expect(desktop.settings.recentProjects).toEqual(['C:/Users/mock']);
+    expect(desktop.isExpanded('C:/Users/mock')).toBe(true);
+  });
+  it('persists pin changes and retains previous pins on save failure', async () => {
+    const save = vi.fn().mockResolvedValue(undefined);
+    const desktop = new Desktop({ ...bridge, save });
+    await desktop.togglePin('one.jsonl');
+    expect(desktop.isPinned('one.jsonl')).toBe(true);
+    expect(save).toHaveBeenLastCalledWith(
+      expect.objectContaining({ pinnedSessions: ['one.jsonl'] }),
+    );
+    save.mockRejectedValueOnce(new Error('disk full'));
+    await expect(desktop.togglePin('one.jsonl')).rejects.toThrow('disk full');
+    expect(desktop.isPinned('one.jsonl')).toBe(true);
+    expect(desktop.pinSaving).toBe(false);
+    await desktop.togglePin('one.jsonl');
+    expect(desktop.isPinned('one.jsonl')).toBe(false);
+  });
+  it('keeps project order stable across active-project changes and catalog activity updates', () => {
+    const desktop = fixture(vi.fn());
+    desktop.sessions = [
+      { cwd: 'C:/work/beta', path: 'b' },
+      { cwd: 'C:/work/alpha', path: 'a' },
+    ] as typeof desktop.sessions;
+    desktop.settings.recentProjects = ['C:/work/empty', 'C:/work/beta'];
+    const order = desktop.projects.map((project) => project.path);
+    desktop.project = 'C:/work/beta';
+    desktop.settings.recentProjects.reverse();
+    desktop.sessions.reverse();
+    expect(desktop.projects.map((project) => project.path)).toEqual(order);
+    desktop.project = 'C:/work/alpha';
+    expect(desktop.projects.map((project) => project.path)).toEqual(order);
+  });
+  it('discovers all workspaces at startup without connecting and groups Windows aliases', async () => {
+    const sessions = vi.fn().mockResolvedValue([
+      { cwd: 'C:/work/alpha', path: 'a' },
+      { cwd: 'c:\\work\\ALPHA', path: 'b' },
+      { cwd: 'C:/work/beta', path: 'c' },
+    ]);
+    const connect = vi.fn();
+    const desktop = new Desktop({
+      ...bridge,
+      settings: async () => ({
+        ...defaultSettings,
+        recentProjects: ['C:/work/empty'],
+      }),
+      sessions,
+      connect,
+    });
+    await desktop.init();
+    expect(sessions).toHaveBeenCalledWith('', '');
+    expect(connect).not.toHaveBeenCalled();
+    expect(desktop.projects.map((p) => p.sessions.length)).toEqual([2, 1, 0]);
+    desktop.toggleProject('C:/work/alpha');
+    expect(desktop.isExpanded('c:/work/ALPHA')).toBe(true);
+    desktop.toggleProject('c:/work/ALPHA');
+    expect(desktop.isExpanded('C:/work/alpha')).toBe(false);
+  });
+  it('connects to a selected session workspace before restoring it', async () => {
+    const desktop = fixture(vi.fn());
+    desktop.project = 'old-project';
+    desktop.connection = 'ready';
+    const order: string[] = [];
+    vi.spyOn(desktop, 'connect').mockImplementation(async (project) => {
+      order.push(`connect:${project}`);
+      desktop.project = project;
+      desktop.connection = 'ready';
+    });
+    vi.spyOn(desktop, 'switchSession').mockImplementation(async (path) => {
+      order.push(`session:${path}`);
+    });
+    await desktop.openSession('other-project', 'history.jsonl');
+    expect(order).toEqual(['connect:other-project', 'session:history.jsonl']);
+  });
+  it('does not restore a session after connection failure', async () => {
+    const desktop = fixture(vi.fn());
+    vi.spyOn(desktop, 'connect').mockImplementation(async () => {
+      desktop.connection = 'failed';
+    });
+    const restore = vi.spyOn(desktop, 'switchSession');
+    await desktop.openSession('other-project', 'history.jsonl');
+    expect(restore).not.toHaveBeenCalled();
+  });
   it('keeps draft on rejection and never retries automatically', async () => {
     const action = vi
       .fn()

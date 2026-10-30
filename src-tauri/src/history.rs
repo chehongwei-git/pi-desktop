@@ -137,7 +137,9 @@ impl Catalog {
                 Some(c) if c.size == meta.len() && c.modified == modified => {
                     self.cache.insert(file.clone(), c);
                     let summary = &self.cache[&file].summary;
-                    if same_project(&summary.cwd, project) && !summary.preview.is_empty() {
+                    if !summary.cwd.is_empty()
+                        && (project.is_empty() || same_project(&summary.cwd, project))
+                    {
                         results.push(summary.clone());
                     }
                     continue;
@@ -214,7 +216,9 @@ impl Catalog {
             cached.size = meta.len();
             cached.modified = modified;
             cached.summary.modified = modified;
-            if same_project(&cached.summary.cwd, project) && !cached.summary.preview.is_empty() {
+            if !cached.summary.cwd.is_empty()
+                && (project.is_empty() || same_project(&cached.summary.cwd, project))
+            {
                 results.push(cached.summary.clone());
             }
             self.cache.insert(file, cached);
@@ -290,6 +294,39 @@ mod tests {
             active_branch(&entries, Some("c")),
             vec![entries[0].clone(), entries[2].clone()]
         );
+    }
+    /// 启动时列出所有 header.cwd，包括尚无用户消息的工作区；缓存命中结果一致。
+    #[test]
+    fn catalog_lists_all_projects() {
+        let temp = tempfile::tempdir().unwrap();
+        let nested = temp.path().join("encoded-project");
+        fs::create_dir(&nested).unwrap();
+        for (file, cwd, preview) in [
+            (temp.path().join("a.jsonl"), "/alpha", "hello"),
+            (nested.join("b.jsonl"), "/beta", ""),
+        ] {
+            fs::write(
+                file,
+                format!(
+                    "{}\n{}\n",
+                    json!({"type":"session", "id":cwd, "cwd":cwd, "version":3}),
+                    json!({"type":"message", "message":{"role":"user", "content":preview}}),
+                ),
+            )
+            .unwrap();
+        }
+        let settings = Settings {
+            session_dir: temp.path().to_string_lossy().into(),
+            ..Settings::default()
+        };
+        let mut catalog = Catalog::default();
+        for _ in 0..2 {
+            let sessions = catalog.list(&settings, "", "").unwrap();
+            assert_eq!(sessions.len(), 2);
+            assert!(sessions.iter().any(|s| s.cwd == "/beta"));
+            assert_eq!(catalog.list(&settings, "/alpha", "").unwrap().len(), 1);
+            assert_eq!(catalog.list(&settings, "", "hello").unwrap().len(), 1);
+        }
     }
     /// 追加半行稍后补全应只读取一次，摘要与 CLI header.cwd 一致。
     #[test]

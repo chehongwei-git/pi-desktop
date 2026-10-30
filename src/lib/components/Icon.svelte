@@ -10,6 +10,7 @@
     arrow: 'M12 19V5m-6 6 6-6 6 6',
     down: 'm6 9 6 6 6-6',
     close: 'm6 6 12 12M6 18 18 6',
+    pin: 'M9 3h6l-1 6 4 4v2H6v-2l4-4-1-6ZM12 15v7',
     folder: 'M3 7V5h6l2 2h10v13H3V7Z',
     settings:
       'M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8ZM12 2v3m0 14v3M2 12h3m14 0h3M5 5l2 2m10 10 2 2M5 19l2-2M17 7l2-2',
