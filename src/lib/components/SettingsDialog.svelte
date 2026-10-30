@@ -33,6 +33,7 @@
   function value() {
     return {
       ...$state.snapshot(form),
+      zoom: desktop.settings.zoom,
       extraPath: paths
         .split('\n')
         .map((x) => x.trim())

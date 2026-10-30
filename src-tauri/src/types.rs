@@ -50,6 +50,7 @@ pub struct Settings {
     pub recent_projects: Vec<String>,
     pub pinned_sessions: Vec<String>,
     pub theme: String,
+    pub zoom: u32,
 }
 impl Default for Settings {
     /// 未配置时自动发现 Pi，采用系统主题，不创建默认工作项目。
@@ -63,6 +64,7 @@ impl Default for Settings {
             recent_projects: vec![],
             pinned_sessions: vec![],
             theme: "system".into(),
+            zoom: 100,
         }
     }
 }

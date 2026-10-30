@@ -194,6 +194,9 @@ export class Desktop {
         ...defaultSettings,
         ...settings,
         pinnedSessions: settings.pinnedSessions ?? [],
+        zoom: Number.isFinite(settings.zoom)
+          ? Math.max(80, Math.min(150, settings.zoom))
+          : defaultSettings.zoom,
       };
       await this.refreshSessions();
     } catch (error) {

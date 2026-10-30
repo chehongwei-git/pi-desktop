@@ -2,6 +2,8 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { open } from '@tauri-apps/plugin-dialog';
+  import { getCurrentWebview } from '@tauri-apps/api/webview';
+  import { isTauri } from '@tauri-apps/api/core';
   import { Desktop } from './lib/state/desktop.svelte';
   import { errorMessage } from './lib/client';
   import type { Message, SessionSummary } from './lib/types';
@@ -99,6 +101,38 @@
           : 'light'
         : desktop.settings.theme;
   });
+  let zoomSaving = false;
+  function changeZoom(value: number): void {
+    const zoom = Math.max(80, Math.min(150, value));
+    if (zoomSaving || zoom === desktop.settings.zoom) return;
+    zoomSaving = true;
+    void desktop.guard(async () => {
+      try {
+        await desktop.saveSettings({
+          ...$state.snapshot(desktop.settings),
+          zoom,
+        });
+      } finally {
+        zoomSaving = false;
+      }
+    });
+  }
+  $effect(() => {
+    const zoom = desktop.settings.zoom / 100;
+    if (isTauri()) {
+      void getCurrentWebview()
+        .setZoom(zoom)
+        .catch((error) => {
+          desktop.error = errorMessage(error);
+        });
+    } else {
+      document.documentElement.style.zoom = String(zoom);
+      document.documentElement.style.setProperty(
+        '--preview-zoom',
+        String(zoom),
+      );
+    }
+  });
   /** 项目由原生目录选择器授权，不默认使用应用安装目录。 */
   async function chooseProject(): Promise<void> {
     await desktop.guard(async () => {
@@ -153,6 +187,19 @@
   }
   /** 快捷键与普通输入不冲突；原生 dialog 已处理 Escape/焦点约束。 */
   function keydown(event: KeyboardEvent): void {
+    if (
+      (event.ctrlKey || event.metaKey) &&
+      !event.altKey &&
+      ['+', '=', '-', '0'].includes(event.key)
+    ) {
+      event.preventDefault();
+      changeZoom(
+        event.key === '0'
+          ? 100
+          : desktop.settings.zoom + (event.key === '-' ? -10 : 10),
+      );
+      return;
+    }
     if (
       !(event.ctrlKey || event.metaKey) ||
       event.altKey ||

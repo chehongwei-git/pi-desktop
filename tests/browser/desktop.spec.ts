@@ -241,6 +241,81 @@ async function mock(
     { count, workspaces, projectCount },
   );
 }
+test('desktop zoom shortcuts invoke native WebView scaling', async ({
+  page,
+}) => {
+  await mock(page);
+  await page.addInitScript(() => {
+    const host = window as any;
+    host.isTauri = true;
+    host.__TAURI_INTERNALS__.metadata = {
+      currentWindow: { label: 'main' },
+      currentWebview: { label: 'main' },
+    };
+    host.zoomCalls = [];
+    const invoke = host.__TAURI_INTERNALS__.invoke;
+    host.__TAURI_INTERNALS__.invoke = async (command: string, args: any) => {
+      if (command === 'plugin:webview|set_webview_zoom') {
+        host.zoomCalls.push(args);
+        return;
+      }
+      return invoke(command, args);
+    };
+  });
+  await page.goto('/');
+  await expect
+    .poll(() => page.evaluate(() => (window as any).zoomCalls.at(-1)))
+    .toEqual({ label: 'main', value: 1 });
+  await page.keyboard.press('Control+=');
+  await expect
+    .poll(() => page.evaluate(() => (window as any).zoomCalls.at(-1)))
+    .toEqual({ label: 'main', value: 1.1 });
+  await page.keyboard.press('Control+0');
+  await expect
+    .poll(() => page.evaluate(() => (window as any).zoomCalls.at(-1)))
+    .toEqual({ label: 'main', value: 1 });
+});
+
+test('interface zoom shortcuts persist, respect limits and work inside settings', async ({
+  page,
+}) => {
+  await mock(page);
+  await page.goto('/');
+  const zoom = () =>
+    page.evaluate(() => Number(document.documentElement.style.zoom));
+  await expect.poll(zoom).toBe(1);
+  await page.keyboard.press('Control+=');
+  await expect.poll(zoom).toBe(1.1);
+  await page.keyboard.press('Control+Shift+=');
+  await expect.poll(zoom).toBe(1.2);
+  await page.reload();
+  await expect.poll(zoom).toBe(1.2);
+  await page.keyboard.press('Control+,');
+  await expect(page.getByRole('dialog')).toBeVisible();
+  await expect(page.getByRole('combobox', { name: '界面缩放' })).toHaveCount(0);
+  await page.keyboard.press('Control+-');
+  await expect.poll(zoom).toBe(1.1);
+  await page.getByRole('button', { name: '保存设置', exact: true }).click();
+  await expect.poll(zoom).toBe(1.1);
+  for (let i = 0; i < 5; i++) {
+    await page.keyboard.press('Control+-');
+    await expect.poll(zoom).toBe(Math.max(0.8, 1 - i / 10));
+  }
+  for (let i = 0; i < 9; i++) {
+    await page.keyboard.press('Control+=');
+    await expect.poll(zoom).toBe(Math.min(1.5, (90 + i * 10) / 100));
+  }
+  await page.screenshot({ path: 'test-results/interface-zoom-150.png' });
+  const shell = await page.locator('.app-shell').boundingBox();
+  expect(shell!.height).toBeCloseTo(800, 0);
+  await page.keyboard.press('Control+0');
+  await expect.poll(zoom).toBe(1);
+  await page.keyboard.press('Meta+=');
+  await expect.poll(zoom).toBe(1.1);
+  await page.keyboard.press('Meta+0');
+  await expect.poll(zoom).toBe(1);
+});
+
 test('loaded conversation keeps its name when Windows state paths differ and the catalog refresh is empty', async ({
   page,
 }) => {

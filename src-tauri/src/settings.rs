@@ -25,6 +25,12 @@ pub fn load(dir: &Path) -> Result<Settings> {
 
 /// 同目录临时文件持久化，避免中断时留下半个 JSON；仅保留最近 20 项目。
 pub fn save(dir: &Path, settings: &Settings) -> Result<()> {
+    if !(80..=150).contains(&settings.zoom) {
+        return Err(AppError::new(
+            "SETTINGS",
+            "界面缩放比例须在 80% 至 150% 之间",
+        ));
+    }
     if !["system", "light", "dark"].contains(&settings.theme.as_str()) {
         return Err(AppError::new("SETTINGS", "无效主题"));
     }
@@ -57,12 +63,26 @@ mod tests {
         .unwrap();
         let mut settings = load(dir.path()).unwrap();
         assert!(settings.pinned_sessions.is_empty());
+        assert_eq!(settings.zoom, 100);
+        settings.zoom = 120;
         settings.pinned_sessions = vec!["session.jsonl".into()];
         save(dir.path(), &settings).unwrap();
+        assert_eq!(load(dir.path()).unwrap().zoom, 120);
         assert_eq!(
             load(dir.path()).unwrap().pinned_sessions,
             vec!["session.jsonl"]
         );
+    }
+    #[test]
+    fn invalid_zoom_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        for zoom in [0, 79, 151] {
+            let settings = Settings {
+                zoom,
+                ..Settings::default()
+            };
+            assert!(save(dir.path(), &settings).is_err());
+        }
     }
     /// 损坏配置不会阻止首次使用，且原文件仍可诊断。
     #[test]

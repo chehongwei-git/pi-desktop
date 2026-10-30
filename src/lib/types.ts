@@ -8,6 +8,7 @@ export interface Settings {
   recentProjects: string[];
   pinnedSessions: string[];
   theme: 'system' | 'light' | 'dark';
+  zoom: number;
 }
 export interface SessionSummary {
   path: string;
@@ -167,4 +168,5 @@ export const defaultSettings: Settings = {
   recentProjects: [],
   pinnedSessions: [],
   theme: 'system',
+  zoom: 100,
 };

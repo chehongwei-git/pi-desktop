@@ -146,7 +146,7 @@ button svg {
 .app-shell {
   display: grid;
   grid-template-columns: 260px minmax(0, 1fr);
-  height: 100dvh;
+  height: calc(100dvh / var(--preview-zoom, 1));
 }
 .app-shell.sidebar-hidden {
   grid-template-columns: 0 minmax(0, 1fr);
