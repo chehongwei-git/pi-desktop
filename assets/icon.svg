@@ -1,0 +1,2 @@
+<!-- 自有 Pi 图标源；Tauri CLI 从此生成各平台打包资源，不使用第三方品牌素材。 -->
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512"><rect width="512" height="512" rx="112" fill="#285343"/><path d="M126 166h260M188 166v218M320 166v155q0 63 60 63" fill="none" stroke="#f3f4eb" stroke-width="32" stroke-linecap="round" stroke-linejoin="round"/></svg>

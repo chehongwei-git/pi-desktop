@@ -1,0 +1,10 @@
+# 构建产物与本地运行数据不得提交。
+node_modules/
+dist/
+src-tauri/target/
+src-tauri/gen/
+.idea/
+test-results/
+playwright-report/
+*.log
+.DS_Store

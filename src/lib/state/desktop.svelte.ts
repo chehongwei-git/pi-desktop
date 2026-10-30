@@ -1,0 +1,421 @@
+/** 应用门面：组件只调用用户意图；集中连接状态、草稿、事件确认与切换事务。 */
+import { bridge, errorMessage, type Bridge } from '../client';
+import { reduceEvents } from './reducer';
+import {
+  defaultSettings,
+  type Action,
+  type Command,
+  type ConnectionState,
+  type ExtensionRequest,
+  type HistoryPage,
+  type Message,
+  type Model,
+  type RunState,
+  type SessionSummary,
+  type Settings,
+  type Snapshot,
+  type Wakeup,
+} from '../types';
+
+export class Desktop {
+  settings = $state<Settings>({
+    ...defaultSettings,
+    recentProjects: [],
+    extraPath: [],
+  });
+  connection = $state<ConnectionState>('disconnected');
+  run = $state<RunState>('idle');
+  project = $state('');
+  runtimeId = $state('');
+  version = $state('');
+  messages = $state<Message[]>([]);
+  sessions = $state<SessionSummary[]>([]);
+  snapshot = $state<Snapshot>({});
+  models = $state<Model[]>([]);
+  levels = $state<string[]>([]);
+  commands = $state<Command[]>([]);
+  draft = $state('');
+  notice = $state('');
+  error = $state('');
+  submitting = $state(false);
+  loadingHistory = $state(false);
+  before = $state(0);
+  hasMore = $state(false);
+  extensions = $state<ExtensionRequest[]>([]);
+  statuses = $state<Record<string, string>>({});
+  widgets = $state<Record<string, string[]>>({});
+  recovered = $state<string[]>([]);
+  queued = $state<string[]>([]);
+  pendingSwitch = $state<{
+    label: string;
+    execute: () => Promise<void>;
+    waiting: boolean;
+  } | null>(null);
+  private ack = 0;
+  private pumpTask: Promise<void> | null = null;
+  private generation = 0;
+  private searchGeneration = 0;
+  private drafts = new Map<string, string>();
+  private visible = new Set<string>();
+  private accessed = new Map<string, number>();
+  private accessSerial = 0;
+  /** 虚拟列表报告挂载窗口；这些消息不被缓存淘汰，访问顺序用于 LRU。 */
+  pinVisible(ids: string[]): void {
+    this.visible = new Set(ids);
+    for (const id of ids) this.accessed.set(id, ++this.accessSerial);
+  }
+  private stopTimer?: ReturnType<typeof setTimeout>;
+  /** 依赖注入仅用在真正需要替换的 IPC 边界，不建立全局 DI 容器。 */
+  constructor(private api: Bridge = bridge) {}
+  /** 当前会话草稿键；空白新会话也能在项目之间独立恢复。 */
+  private draftKey(): string {
+    return `${this.project}:${this.snapshot.sessionFile ?? 'new'}`;
+  }
+  /** 配置初始化失败仍可进入设置修复；普通浏览器预览给出明确桌面环境说明。 */
+  async init(): Promise<void> {
+    try {
+      this.settings = await this.api.settings();
+    } catch (error) {
+      this.error = errorMessage(error);
+    }
+  }
+  /** 用户可见错误统一入口；不吞掉业务失败，也不自动重发副作用请求。 */
+  async guard(work: () => Promise<void>): Promise<void> {
+    this.error = '';
+    try {
+      await work();
+    } catch (error) {
+      this.error = errorMessage(error);
+    }
+  }
+  /** 所有业务动作自动携带 runtimeId，避免旧窗口请求误入新进程。 */
+  async action<T = unknown>(action: Action): Promise<T> {
+    return this.api.action<T>(this.runtimeId, action);
+  }
+  /** 项目/历史切换通过此事务入口；运行时由弹层明确选择停止、等待或取消。 */
+  requestSwitch(label: string, execute: () => Promise<void>): void {
+    if (this.run !== 'idle') {
+      this.pendingSwitch = { label, execute, waiting: false };
+      return;
+    }
+    void this.guard(execute);
+  }
+  /** 等待模式只登记意图，不提前更改项目、列表选中状态或草稿。 */
+  waitToSwitch(): void {
+    if (this.pendingSwitch) this.pendingSwitch.waiting = true;
+  }
+  /** 必须等待停止成功；错误时保持原会话与待切换意图，供用户恢复。 */
+  async stopAndSwitch(): Promise<void> {
+    await this.stop();
+    if (this.run === 'idle') await this.executePending();
+  }
+  /** 先取走意图避免 settled/按钮重复执行；已取消的意图不会再运行。 */
+  private async executePending(): Promise<void> {
+    const next = this.pendingSwitch;
+    this.pendingSwitch = null;
+    if (next) await this.guard(next.execute);
+  }
+  /** 连接时先安装通知，starting 阶段也处理扩展信任/输入请求。 */
+  async connect(project: string): Promise<void> {
+    this.drafts.set(this.draftKey(), this.draft);
+    const generation = ++this.generation;
+    this.connection = 'starting';
+    this.ack = 0;
+    this.runtimeId = '';
+    this.extensions = [];
+    this.error = '';
+    try {
+      const connected = await this.api.connect(project, (event) =>
+        this.receive(event, generation),
+      );
+      if (generation !== this.generation) return;
+      this.runtimeId = connected.runtimeId;
+      this.project = project;
+      this.version = connected.version;
+      this.snapshot = connected.snapshot;
+      this.connection = 'ready';
+      this.messages = [];
+      this.accessed.clear();
+      this.visible.clear();
+      this.run = connected.snapshot.isStreaming ? 'running' : 'idle';
+      this.draft = this.drafts.get(this.draftKey()) ?? '';
+      this.settings.recentProjects = [
+        project,
+        ...this.settings.recentProjects.filter((p) => p !== project),
+      ].slice(0, 20);
+      await this.api.save($state.snapshot(this.settings));
+      if (!connected.verified)
+        this.notice = `Pi ${connected.version} 未经本版验证，将按 RPC 能力连接。`;
+      await this.refreshMetadata();
+      await this.refreshHistory();
+      await this.refreshSessions();
+    } catch (error) {
+      if (generation === this.generation) {
+        this.connection = 'failed';
+        this.error = errorMessage(error);
+      }
+    }
+  }
+  /** Channel 唤醒只触发一次拉取循环；旧 runtime/generation 的事件全部忽略。 */
+  private receive(event: Wakeup, generation: number): void {
+    if (generation !== this.generation) return;
+    if (!this.runtimeId && this.connection === 'starting')
+      this.runtimeId = event.runtimeId;
+    if (event.runtimeId !== this.runtimeId) return;
+    if (event.type === 'failed') {
+      this.connection = 'failed';
+      this.run = 'idle';
+      this.error = errorMessage(event.error);
+      return;
+    }
+    void this.drain(generation);
+  }
+  /** 共用拉取任务使切换可等待 reset 事件处理完成，避免新历史被迟到 reset 清空。 */
+  private drain(generation = this.generation): Promise<void> {
+    if (!this.pumpTask)
+      this.pumpTask = this.pump(generation).finally(() => {
+        this.pumpTask = null;
+      });
+    return this.pumpTask;
+  }
+  /** 只有 reducer 与扩展处理成功后才推进 ack；失败可重拉，不静默跳过。 */
+  private async pump(generation: number): Promise<void> {
+    try {
+      while (generation === this.generation && this.runtimeId) {
+        const batch = await this.api.events(this.runtimeId, this.ack);
+        if (
+          generation !== this.generation ||
+          batch.runtimeId !== this.runtimeId
+        )
+          break;
+        if (!batch.events.length) break;
+        const previous = this.run;
+        reduceEvents(this, batch.events);
+        for (const event of batch.events) {
+          if (event.type === 'extension') this.extension(event.request);
+          if (event.type === 'notice') this.notice = event.message;
+          if (event.type === 'metadata') {
+            if (event.data.type === 'session_info_changed')
+              this.snapshot.sessionName = event.data.name;
+            if (event.data.type === 'thinking_level_changed')
+              this.snapshot.thinkingLevel = event.data.level;
+            if (event.data.type === 'queue_update')
+              this.queued = [
+                ...(event.data.steering ?? []),
+                ...(event.data.followUp ?? []),
+              ];
+          }
+        }
+        this.ack = batch.sequence;
+        if (batch.events.some((event) => event.type === 'message'))
+          this.trimCache();
+        if (previous !== 'idle' && this.run === 'idle') {
+          clearTimeout(this.stopTimer);
+          void this.guard(async () => {
+            await this.syncState();
+            await this.refreshSessions();
+          });
+          if (this.pendingSwitch?.waiting) void this.executePending();
+        }
+      }
+    } catch (error) {
+      if (generation === this.generation && this.connection !== 'failed')
+        this.error = errorMessage(error);
+    }
+  }
+  /** 正文预算 8MiB，挂载窗口与流式块除外；仅淘汰可由引用重载的文本。 */
+  private trimCache(): void {
+    let bytes = this.messages.reduce(
+      (sum, m) => sum + (m.text.length + m.thinking.length) * 2,
+      0,
+    );
+    const candidates = this.messages.filter(
+      (message) =>
+        message.contentRef &&
+        !this.visible.has(message.id) &&
+        message.status !== 'streaming',
+    );
+    candidates.sort(
+      (a, b) => (this.accessed.get(a.id) ?? 0) - (this.accessed.get(b.id) ?? 0),
+    );
+    for (const message of candidates) {
+      if (bytes <= 8 * 1024 * 1024) break;
+      bytes -= message.text.length * 2;
+      message.text = '';
+    }
+  }
+  /** 流式阶段通知与对话框分离，fire-and-forget 不发送多余响应。 */
+  private extension(request: ExtensionRequest): void {
+    if (['select', 'confirm', 'input', 'editor'].includes(request.method)) {
+      if (!this.extensions.some((e) => e.id === request.id))
+        this.extensions.push(request);
+      return;
+    }
+    if (request.method === 'notify') this.notice = request.message ?? '';
+    if (request.method === 'setStatus' && request.statusKey)
+      this.statuses[request.statusKey] = request.statusText ?? '';
+    if (request.method === 'setWidget' && request.widgetKey)
+      this.widgets[request.widgetKey] = request.widgetLines ?? [];
+    if (request.method === 'setTitle')
+      document.title = request.title || 'Pi Desktop';
+    if (request.method === 'set_editor_text') {
+      if (this.draft) this.recovered.push(this.draft);
+      this.draft = request.text ?? '';
+    }
+  }
+  /** 扩展响应取原 request ID；组件超时/取消竞态只会消费该请求一次。 */
+  async respond(
+    request: ExtensionRequest,
+    value: { value?: string; confirmed?: boolean; cancelled?: boolean },
+  ): Promise<void> {
+    if (!this.extensions.some((e) => e.id === request.id)) return;
+    this.extensions = this.extensions.filter((e) => e.id !== request.id);
+    await this.action({ type: 'extension_response', id: request.id, value });
+  }
+  /** 查询模型/命令可失败降级，不影响已建立的文本会话。 */
+  async refreshMetadata(): Promise<void> {
+    const results = await Promise.allSettled([
+      this.action<{ models: Model[] }>({ type: 'models' }),
+      this.action<{ levels: string[] }>({ type: 'thinking_levels' }),
+      this.action<{ commands: Command[] }>({ type: 'commands' }),
+    ]);
+    if (results[0].status === 'fulfilled')
+      this.models = results[0].value.models ?? [];
+    if (results[1].status === 'fulfilled')
+      this.levels = results[1].value.levels ?? [];
+    if (results[2].status === 'fulfilled')
+      this.commands = results[2].value.commands ?? [];
+  }
+  /** 状态以 Pi 查询结果为准，不能从 accepted 或 agent_end 推断完成。 */
+  async syncState(): Promise<void> {
+    const generation = this.generation;
+    const snapshot = await this.action<Snapshot>({ type: 'state' });
+    if (generation === this.generation) this.snapshot = snapshot;
+  }
+  /** 最新搜索覆盖旧请求，防止慢磁盘造成结果回跳。 */
+  async refreshSessions(search = ''): Promise<void> {
+    if (!this.project) return;
+    const generation = ++this.searchGeneration;
+    const sessions = await this.api.sessions(this.project, search);
+    if (generation === this.searchGeneration) this.sessions = sessions;
+  }
+  /** 历史恢复由宿主投影与分页；首次只接收最后 50 条。 */
+  async refreshHistory(before?: number): Promise<void> {
+    const generation = this.generation;
+    this.loadingHistory = true;
+    try {
+      const page = await this.action<HistoryPage>({ type: 'history', before });
+      if (generation !== this.generation) return;
+      this.messages =
+        before === undefined
+          ? page.messages
+          : [...page.messages, ...this.messages];
+      this.before = page.before;
+      this.hasMore = page.hasMore;
+    } finally {
+      if (generation === this.generation) this.loadingHistory = false;
+    }
+  }
+  /** 发送接受前保留原草稿，超时绝不自动重发；用户消息由 Pi 权威事件插入。 */
+  async send(mode?: 'steer' | 'followUp'): Promise<void> {
+    if (!this.draft.trim() || this.submitting || this.connection !== 'ready')
+      return;
+    const text = this.draft;
+    this.submitting = true;
+    try {
+      await this.action({ type: 'prompt', message: text, mode });
+      if (this.draft === text) this.draft = '';
+    } finally {
+      this.submitting = false;
+    }
+  }
+  /** 停止先清队列再 abort；5 秒后提供强制断开入口，保留草稿和当前消息。 */
+  async stop(): Promise<void> {
+    this.run = 'aborting';
+    this.stopTimer = setTimeout(() => {
+      if (this.run === 'aborting')
+        this.notice = '停止超过 5 秒，可继续等待或强制关闭 Pi。';
+    }, 5000);
+    const cleared = await this.action<{
+      steering?: string[];
+      followUp?: string[];
+    }>({ type: 'stop' });
+    this.recovered.push(
+      ...(cleared.steering ?? []),
+      ...(cleared.followUp ?? []),
+    );
+    // abort 返回代表 Pi 空闲；刷新状态同时允许已到达的 settled 被归并。
+    await this.syncState();
+    if (!this.snapshot.isStreaming) this.run = 'idle';
+    clearTimeout(this.stopTimer);
+  }
+  /** 新建/切换只在成功且未被扩展取消后提交 UI 状态。 */
+  async switchSession(path?: string): Promise<void> {
+    if (!this.project) return;
+    this.drafts.set(this.draftKey(), this.draft);
+    const result = await this.action<{ cancelled: boolean }>(
+      path ? { type: 'switch_session', path } : { type: 'new_session' },
+    );
+    if (result.cancelled) {
+      this.notice = '切换已被 Pi 扩展取消';
+      return;
+    }
+    await this.drain();
+    this.accessed.clear();
+    this.visible.clear();
+    await this.syncState();
+    await this.refreshHistory();
+    this.draft = this.drafts.get(this.draftKey()) ?? '';
+    await this.refreshSessions();
+  }
+  /** 强制断开不是重试，不重发任何提示词。 */
+  async disconnect(force = false): Promise<void> {
+    this.connection = 'stopping';
+    ++this.generation;
+    await this.api.disconnect(force);
+    this.connection = 'disconnected';
+    this.runtimeId = '';
+    this.run = 'idle';
+    this.extensions = [];
+  }
+  /** 重命名只针对已打开会话，并由 Pi 负责写入。 */
+  async rename(name: string): Promise<void> {
+    if (!name.trim()) return;
+    await this.action({ type: 'rename', name: name.trim() });
+    await this.syncState();
+    await this.refreshSessions();
+  }
+  /** 模型切换后重读思考等级，避免沿用新模型不支持的选项。 */
+  async setModel(key: string): Promise<void> {
+    const model = this.models.find((m) => `${m.provider}/${m.id}` === key);
+    if (!model) return;
+    await this.action({
+      type: 'set_model',
+      provider: model.provider,
+      model: model.id,
+    });
+    await this.syncState();
+    await this.refreshMetadata();
+  }
+  /** 读取前 64KiB 用于虚拟列表重新挂载，全文由分块对话框浏览。 */
+  async loadPreview(message: Message): Promise<void> {
+    if (!message.contentRef || message.text) return;
+    const page = await this.api.content(this.runtimeId, message.contentRef, 0);
+    message.text = page.text;
+    this.accessed.set(message.id, ++this.accessSerial);
+    this.trimCache();
+  }
+  /** 分块正文查询保留明确的 runtime 所有权。 */
+  readContent(id: string, offset: number) {
+    return this.api.content(this.runtimeId, id, offset);
+  }
+  /** 配置更新原子持久化，运行时配置需重新连接才生效。 */
+  async saveSettings(settings: Settings): Promise<void> {
+    await this.api.save(settings);
+    this.settings = settings;
+  }
+  /** 连接诊断只返回版本与路径，不读凭据。 */
+  detect(settings: Settings) {
+    return this.api.detect(settings);
+  }
+}

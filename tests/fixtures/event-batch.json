@@ -1,0 +1,18 @@
+{
+  "runtimeId": "contract-runtime",
+  "sequence": 1,
+  "events": [
+    {
+      "type": "message",
+      "message": {
+        "id": "message-1",
+        "role": "assistant",
+        "text": "你好",
+        "thinking": "",
+        "contentRef": "body-1",
+        "status": "done",
+        "name": null
+      }
+    }
+  ]
+}

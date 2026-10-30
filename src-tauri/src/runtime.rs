@@ -1,0 +1,431 @@
+//! PiRuntime Actor：唯一拥有 stdin/投影/临时存储。读任务独立，UI 慢时事件落盘。
+use crate::{
+    platform::{self, ProcessTree},
+    rpc::{self, Projection},
+    storage::Store,
+    types::*,
+};
+use serde_json::{json, Value};
+use std::{
+    collections::HashMap,
+    process::Stdio,
+    sync::atomic::{AtomicU64, Ordering},
+    time::Duration,
+};
+use tauri::ipc::Channel;
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt, BufReader},
+    process::Child,
+    sync::{mpsc, oneshot},
+    time::{Instant, MissedTickBehavior},
+};
+
+static RUNTIME_ID: AtomicU64 = AtomicU64::new(0);
+/// 轻量句柄可克隆；有界邮箱避免快速连点导致无限分配。
+#[derive(Clone)]
+pub struct Handle {
+    pub id: String,
+    tx: mpsc::Sender<Request>,
+}
+/// Actor 内部请求，外部 API 不可直接创建任意协议调用。
+enum Request {
+    Rpc {
+        command: Value,
+        kind: Kind,
+        reply: oneshot::Sender<Result<Value>>,
+    },
+    Events {
+        ack: u64,
+        reply: oneshot::Sender<Result<Value>>,
+    },
+    Content {
+        id: String,
+        offset: usize,
+        reply: oneshot::Sender<Result<Value>>,
+    },
+    Shutdown {
+        force: bool,
+        reply: oneshot::Sender<Result<Value>>,
+    },
+}
+#[derive(Clone, Copy)]
+enum Kind {
+    Query,
+    Mutate,
+    Restore,
+    Reset,
+    Extension,
+}
+struct Pending {
+    reply: oneshot::Sender<Result<Value>>,
+    deadline: Instant,
+    kind: Kind,
+}
+
+impl Handle {
+    /// 发送受控请求并等待关联响应。超时由 actor 负责，不做任何隐式重发。
+    async fn rpc(&self, command: Value, kind: Kind) -> Result<Value> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(Request::Rpc {
+                command,
+                kind,
+                reply,
+            })
+            .await
+            .map_err(|_| AppError::new("DISCONNECTED", "Pi 已断开"))?;
+        rx.await
+            .map_err(|_| AppError::new("DISCONNECTED", "Pi 已退出"))?
+    }
+    /// 业务动作转换为白名单命令；停止必须先清队列，避免 abort 继续排队任务。
+    pub async fn action(&self, action: Action) -> Result<Value> {
+        match action {
+            Action::Prompt { message, mode } => {
+                if message.trim().is_empty() {
+                    return Err(AppError::new("EMPTY", "消息不能为空"));
+                }
+                let mut cmd = json!({"type":"prompt","message":message});
+                if let Some(mode) = mode {
+                    if !["steer", "followUp"].contains(&mode.as_str()) {
+                        return Err(AppError::new("MODE", "无效发送模式"));
+                    }
+                    cmd["streamingBehavior"] = mode.into();
+                }
+                self.rpc(cmd, Kind::Mutate).await
+            }
+            Action::Stop => {
+                let cleared = self
+                    .rpc(json!({"type":"clear_queue"}), Kind::Mutate)
+                    .await?;
+                self.rpc(json!({"type":"abort"}), Kind::Mutate).await?;
+                Ok(cleared)
+            }
+            Action::NewSession => self.rpc(json!({"type":"new_session"}), Kind::Reset).await,
+            Action::SwitchSession { path } => {
+                self.rpc(
+                    json!({"type":"switch_session","sessionPath":path}),
+                    Kind::Reset,
+                )
+                .await
+            }
+            Action::Rename { name } => {
+                self.rpc(json!({"type":"set_session_name","name":name}), Kind::Mutate)
+                    .await
+            }
+            Action::Models => {
+                self.rpc(json!({"type":"get_available_models"}), Kind::Query)
+                    .await
+            }
+            Action::ThinkingLevels => {
+                self.rpc(json!({"type":"get_available_thinking_levels"}), Kind::Query)
+                    .await
+            }
+            Action::SetModel { provider, model } => {
+                self.rpc(
+                    json!({"type":"set_model","provider":provider,"modelId":model}),
+                    Kind::Mutate,
+                )
+                .await
+            }
+            Action::SetThinking { level } => {
+                self.rpc(
+                    json!({"type":"set_thinking_level","level":level}),
+                    Kind::Mutate,
+                )
+                .await
+            }
+            Action::Commands => self.rpc(json!({"type":"get_commands"}), Kind::Query).await,
+            Action::State => self.rpc(json!({"type":"get_state"}), Kind::Query).await,
+            Action::History { before } => {
+                self.rpc(
+                    json!({"type":"get_entries","_before":before}),
+                    Kind::Restore,
+                )
+                .await
+            }
+            Action::ExtensionResponse { id, value } => {
+                let mut response = json!({"type":"extension_ui_response","id":id});
+                for field in ["value", "confirmed", "cancelled"] {
+                    if let Some(value) = value.get(field) {
+                        response[field] = value.clone();
+                    }
+                }
+                self.rpc(response, Kind::Extension).await
+            }
+        }
+    }
+    /// 以确认游标获取有界事件批次；由前端成功归并后提交 ack。
+    pub async fn events(&self, ack: u64) -> Result<Value> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(Request::Events { ack, reply })
+            .await
+            .map_err(|_| AppError::new("DISCONNECTED", "Pi 已退出"))?;
+        rx.await
+            .map_err(|_| AppError::new("DISCONNECTED", "Pi 已退出"))?
+    }
+    /// 正文只按宿主分配的 ID 读取，不能变成通用文件读取接口。
+    pub async fn content(&self, id: String, offset: usize) -> Result<Value> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(Request::Content { id, offset, reply })
+            .await
+            .map_err(|_| AppError::new("DISCONNECTED", "Pi 已退出"))?;
+        rx.await
+            .map_err(|_| AppError::new("DISCONNECTED", "Pi 已退出"))?
+    }
+    /// 正常关闭 stdin 并等待，超时回收树；调用方须等待后再创建另一个实例。
+    pub async fn shutdown(&self) -> Result<()> {
+        self.close(false).await
+    }
+    /// 用户显式强制关闭时跳过 3 秒宽限，Job/进程组仍只影响自有子树。
+    pub async fn close(&self, force: bool) -> Result<()> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(Request::Shutdown { force, reply })
+            .await
+            .map_err(|_| AppError::new("DISCONNECTED", "Pi 已退出"))?;
+        rx.await
+            .map_err(|_| AppError::new("DISCONNECTED", "Pi 已退出"))??;
+        Ok(())
+    }
+}
+
+/// 验证 cwd 后创建一个 Pi；actor 就绪前订阅已存在，避免初始化事件丢失。
+pub async fn start(
+    settings: &Settings,
+    project: String,
+    channel: Channel<Value>,
+) -> Result<Handle> {
+    if !std::path::Path::new(&project).is_dir() {
+        return Err(AppError::new("PROJECT", "项目目录不存在"));
+    }
+    let spec = platform::discover(settings)?;
+    let mut command = platform::command(&spec, settings)?;
+    command
+        .args(["--mode", "rpc"])
+        .current_dir(&project)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    if !settings.session_dir.is_empty() {
+        command.args(["--session-dir", &settings.session_dir]);
+    }
+    let mut child = command.spawn()?;
+    let tree = match ProcessTree::attach(&child) {
+        Ok(t) => t,
+        Err(e) => {
+            let _ = child.kill().await;
+            return Err(e);
+        }
+    };
+    let stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| AppError::new("PIPE", "stdin 创建失败"))?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| AppError::new("PIPE", "stdout 创建失败"))?;
+    let mut stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| AppError::new("PIPE", "stderr 创建失败"))?;
+    let store = Store::new()?;
+    let (tx, rx) = mpsc::channel(64);
+    let (output_tx, output_rx) = mpsc::channel(2);
+    let reader = tokio::spawn(async move {
+        let mut reader = BufReader::new(stdout);
+        loop {
+            let event = rpc::record(&mut reader).await;
+            let finished = !matches!(event, Ok(Some(_)));
+            if output_tx.send(event).await.is_err() || finished {
+                break;
+            }
+        }
+    });
+    // stderr 持续排空但不记原文，扩展可能把密钥/提示词写入诊断。
+    let diagnostics = tokio::spawn(async move {
+        let mut buf = [0u8; 8192];
+        loop {
+            match stderr.read(&mut buf).await {
+                Ok(0) | Err(_) => break,
+                Ok(_) => {}
+            }
+        }
+    });
+    let id = format!("runtime-{}", RUNTIME_ID.fetch_add(1, Ordering::Relaxed) + 1);
+    tracing::info!(runtime_id=%id, "runtime started");
+    let handle = Handle { id: id.clone(), tx };
+    tokio::spawn(async move {
+        actor(id, child, stdin, tree, store, rx, output_rx, channel).await;
+        reader.abort();
+        diagnostics.abort();
+    });
+    Ok(handle)
+}
+
+/// 所有可变运行状态集中于单 actor；UI 通知只唤醒拉取，不携带海量正文。
+#[allow(clippy::too_many_arguments)]
+async fn actor(
+    id: String,
+    mut child: Child,
+    mut stdin: tokio::process::ChildStdin,
+    tree: ProcessTree,
+    mut store: Store,
+    mut requests: mpsc::Receiver<Request>,
+    mut output: mpsc::Receiver<Result<Option<Value>>>,
+    channel: Channel<Value>,
+) {
+    let mut pending: HashMap<String, Pending> = HashMap::new();
+    let mut serial = 0u64;
+    let mut projection = Projection::default();
+    let mut restored = false;
+    let mut tick = tokio::time::interval(Duration::from_millis(33));
+    tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    let mut failure: Option<AppError> = None;
+    loop {
+        tokio::select! {
+            request = requests.recv() => match request {
+                Some(Request::Rpc { mut command, kind, reply }) => {
+                    if matches!(kind, Kind::Restore) && restored {
+                        let before = command["_before"].as_u64().map(|v| v as usize); let _ = reply.send(Ok(projection.page(before))); continue;
+                    }
+                    serial += 1; let request_id = format!("req-{serial}"); command["id"] = request_id.clone().into();
+                    if let Some(object) = command.as_object_mut() { object.remove("_before"); }
+                    let mut bytes = match serde_json::to_vec(&command) { Ok(b) => b, Err(_) => { let _ = reply.send(Err(AppError::new("SERIALIZE", "请求编码失败"))); continue; } }; bytes.push(b'\n');
+                    // 写管道也设上限，防止子进程不读 stdin 时 actor 永久卡死。
+                    match tokio::time::timeout(Duration::from_secs(5), stdin.write_all(&bytes)).await {
+                        Ok(Ok(())) => {}, _ => { let error = AppError::new("PIPE", "Pi 输入管道阻塞或断开，请重新连接"); let _ = reply.send(Err(error.clone())); failure = Some(error); break; }
+                    }
+                    if matches!(kind, Kind::Extension) { let _ = reply.send(Ok(Value::Null)); }
+                    else {
+                        let seconds = if matches!(kind, Kind::Reset | Kind::Restore) { 30 } else if matches!(kind, Kind::Mutate) { 15 } else { 10 };
+                        pending.insert(request_id, Pending { reply, kind, deadline: Instant::now()+Duration::from_secs(seconds) });
+                    }
+                }
+                Some(Request::Events { ack, reply }) => { let result = store.batch(&id, ack).and_then(|batch| serde_json::to_value(batch).map_err(|_| AppError::new("SERIALIZE", "批次编码失败"))); let _ = reply.send(result); }
+                Some(Request::Content { id, offset, reply }) => { let _ = reply.send(store.content(&id, offset)); }
+                Some(Request::Shutdown { force, reply }) => {
+                    // ChildStdin::shutdown 不保证关闭 OS 管道；显式 drop 才能让 Pi 收到 EOF。
+                    drop(stdin);
+                    if force || tokio::time::timeout(Duration::from_secs(3), child.wait()).await.is_err() { tree.terminate(); let _ = child.kill().await; }
+                    let _ = reply.send(Ok(Value::Null)); break;
+                }
+                None => break,
+            },
+            event = output.recv() => match event {
+                Some(Ok(Some(event))) if event["type"] == "response" => {
+                    if let Some(request_id) = event["id"].as_str() {
+                        if let Some(request) = pending.remove(request_id) {
+                            let result = if event["success"] != true { Err(AppError::new("PI_COMMAND", event["error"].as_str().unwrap_or("Pi 拒绝了请求"))) }
+                            else if matches!(request.kind, Kind::Restore) {
+                                projection.restore(&event["data"], &mut store).map(|()| { restored=true; projection.page(None) })
+                            } else { if matches!(request.kind, Kind::Reset) && event["data"]["cancelled"] != true { projection.reset(); restored=false; let _ = store.push(json!({"type":"reset"})); } Ok(event["data"].clone()) };
+                            let _ = request.reply.send(result);
+                        }
+                    }
+                }
+                Some(Ok(Some(event))) => { if let Err(error) = projection.event(event, &mut store) { failure=Some(error); break; } },
+                Some(Err(error)) => { failure=Some(error); break; },
+                _ => { failure=Some(AppError::new("PROCESS_EXIT", "Pi 进程已退出，当前内容与草稿已保留")); break; }
+            },
+            _ = tick.tick() => {
+                let expired: Vec<_> = pending.iter().filter(|(_, p)| p.deadline<=Instant::now()).map(|(id, _)| id.clone()).collect();
+                for request_id in expired { if let Some(p) = pending.remove(&request_id) { let _ = p.reply.send(Err(AppError::new("TIMEOUT", "请求超时，可能已执行；请检查状态，不要自动重发"))); } }
+                if store.has_pending() { let _ = channel.send(json!({"type":"available","runtimeId":id})); }
+            }
+        }
+    }
+    for (_, request) in pending {
+        let _ = request.reply.send(Err(failure
+            .clone()
+            .unwrap_or_else(|| AppError::new("DISCONNECTED", "连接已关闭"))));
+    }
+    if let Some(error) = failure {
+        tracing::warn!(code=%error.code, runtime_id=%id, "runtime stopped");
+        let _ = channel.send(json!({"type":"failed","runtimeId":id,"error":error}));
+    }
+    let _ = child.kill().await;
+    drop(tree);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    /// 真实 Node 子进程经过平台启动器与 Job guard，重复 20 轮验证资源回收和协议投影。
+    #[tokio::test]
+    async fn mock_rpc_twenty_lifecycles() {
+        let project = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap();
+        let settings = Settings {
+            pi_path: project
+                .join("tests/fixtures/mock-pi.mjs")
+                .to_string_lossy()
+                .into(),
+            ..Settings::default()
+        };
+        for _ in 0..20 {
+            let handle = start(
+                &settings,
+                project.to_string_lossy().into(),
+                Channel::new(|_| Ok(())),
+            )
+            .await
+            .unwrap();
+            let state = handle.action(Action::State).await.unwrap();
+            assert_eq!(state["sessionFile"], "mock.jsonl");
+            let history = handle
+                .action(Action::History { before: None })
+                .await
+                .unwrap();
+            assert_eq!(history["messages"].as_array().unwrap().len(), 2);
+            let cancelled = handle
+                .action(Action::SwitchSession {
+                    path: "cancel".into(),
+                })
+                .await
+                .unwrap();
+            assert_eq!(cancelled["cancelled"], true);
+            handle
+                .action(Action::Prompt {
+                    message: "hello".into(),
+                    mode: None,
+                })
+                .await
+                .unwrap();
+            let mut ack = 0;
+            let mut idle = false;
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while !idle {
+                    let batch = handle.events(ack).await.unwrap();
+                    for event in batch["events"].as_array().unwrap() {
+                        if event["type"] == "run" && event["state"] == "idle" {
+                            idle = true;
+                        }
+                    }
+                    ack = batch["sequence"].as_u64().unwrap();
+                    if !idle {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                }
+            })
+            .await
+            .unwrap();
+            let page = handle
+                .action(Action::History { before: None })
+                .await
+                .unwrap();
+            let messages = page["messages"].as_array().unwrap();
+            assert!(messages
+                .iter()
+                .any(|m| m["text"] == "你好\u{2028}RPC final"));
+            assert_eq!(messages.iter().filter(|m| m["id"] == "tool-t1").count(), 1);
+            let queued = handle.action(Action::Stop).await.unwrap();
+            assert_eq!(queued["steering"][0], "queued draft");
+            handle.shutdown().await.unwrap();
+            assert!(handle.action(Action::State).await.is_err());
+        }
+    }
+}
