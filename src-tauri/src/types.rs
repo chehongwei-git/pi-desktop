@@ -137,6 +137,21 @@ pub enum Action {
         level: String,
     },
     Commands,
+    Compact {
+        instructions: Option<String>,
+    },
+    Export {
+        path: Option<String>,
+    },
+    Fork {
+        #[serde(rename = "entryId")]
+        entry_id: String,
+    },
+    Clone,
+    SessionStats,
+    LastAssistant,
+    ForkMessages,
+    SessionTree,
     State,
     History {
         before: Option<usize>,

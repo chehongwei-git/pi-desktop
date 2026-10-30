@@ -8,6 +8,32 @@ function fixture(action: Bridge['action']) {
   return new Desktop({ ...bridge, action });
 }
 describe('desktop business behavior', () => {
+  it('handles builtin commands locally and never sends them as prompts or steering', async () => {
+    const action = vi.fn().mockResolvedValue({});
+    const desktop = fixture(action);
+    desktop.connection = 'ready';
+    desktop.draft = '/compact focus on tests';
+    await desktop.send();
+    expect(desktop.builtinRequest).toEqual({
+      name: 'compact',
+      args: 'focus on tests',
+    });
+    expect(desktop.draft).toBe('');
+    expect(action).not.toHaveBeenCalled();
+    desktop.run = 'running';
+    desktop.draft = '/new';
+    await expect(desktop.send('followUp')).rejects.toThrow('请等待');
+    expect(desktop.draft).toBe('/new');
+    expect(desktop.messages).toHaveLength(0);
+    expect(action).not.toHaveBeenCalled();
+    desktop.draft = '/skill:review code';
+    await desktop.send();
+    expect(action).toHaveBeenCalledWith('', {
+      type: 'prompt',
+      message: '/skill:review code',
+      mode: 'steer',
+    });
+  });
   it('defaults running messages to steering and retains edited drafts and failure drafts', async () => {
     let finish!: (result: unknown) => void;
     const action = vi.fn().mockImplementation(

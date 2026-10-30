@@ -2,6 +2,7 @@
 <script lang="ts">
   import Icon from './Icon.svelte';
   import { shouldSend } from '../state/reducer';
+  import { mergeCommands } from '../commands';
   import type { Command } from '../types';
   /** 运行中 Enter/发送直接引导当前任务，后续消息与停止使用独立按钮。 */
   let {
@@ -23,15 +24,36 @@
   } = $props();
   let textarea: HTMLTextAreaElement;
   let composing = false;
+  let selected = $state(0);
+  let dismissed = $state('');
+  const menuId = $props.id();
   let matches = $derived(
-    value.startsWith('/') && !value.includes('\n')
-      ? commands
-          .filter((c) =>
-            c.name.toLowerCase().includes(value.slice(1).toLowerCase()),
-          )
-          .slice(0, 6)
+    !disabled &&
+      value.startsWith('/') &&
+      !/\s/.test(value) &&
+      dismissed !== value
+      ? mergeCommands(commands).filter((command) =>
+          command.name.toLowerCase().includes(value.slice(1).toLowerCase()),
+        )
       : [],
   );
+  $effect(() => {
+    value;
+    selected = 0;
+  });
+  $effect(() => {
+    if (matches[selected])
+      document
+        .getElementById(`${menuId}-${selected}`)
+        ?.scrollIntoView?.({ block: 'nearest' });
+  });
+  function complete(index: number): void {
+    const command = matches[index];
+    if (!command) return;
+    value = `/${command.name} `;
+    dismissed = '';
+    textarea.focus();
+  }
   $effect(() => {
     value;
     if (textarea) {
@@ -46,6 +68,32 @@
   }
   /** IME 回车由浏览器确认候选；只有非组合输入才 preventDefault 并发送。 */
   function keydown(event: KeyboardEvent): void {
+    if (composing || event.isComposing || event.keyCode === 229) return;
+    if (
+      matches.length &&
+      !event.shiftKey &&
+      !event.ctrlKey &&
+      !event.metaKey &&
+      !event.altKey
+    ) {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        dismissed = value;
+        return;
+      }
+      if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+        event.preventDefault();
+        selected =
+          (selected + (event.key === 'ArrowDown' ? 1 : -1) + matches.length) %
+          matches.length;
+        return;
+      }
+      if (event.key === 'Tab' || event.key === 'Enter') {
+        event.preventDefault();
+        complete(selected);
+        return;
+      }
+    }
     if (shouldSend(event, composing)) {
       event.preventDefault();
       submit();
@@ -57,17 +105,24 @@
   {#if matches.length}<div
       class="slash-menu"
       role="listbox"
+      id={menuId}
       aria-label="Pi 命令"
     >
-      {#each matches as command}<button
+      {#each matches as command, index}<button
+          id={`${menuId}-${index}`}
           role="option"
-          aria-selected="false"
-          onclick={() => {
-            value = `/${command.name} `;
-            textarea.focus();
+          aria-selected={selected === index}
+          class:active={selected === index}
+          tabindex="-1"
+          onpointermove={() => {
+            selected = index;
           }}
+          onmousedown={(event) => event.preventDefault()}
+          onclick={() => complete(index)}
           ><strong>/{command.name}</strong><small
-            >{command.description ?? command.source}</small
+            >{command.argumentHint
+              ? `${command.argumentHint} · `
+              : ''}{command.description ?? command.source}</small
           ></button
         >{/each}
     </div>{/if}
@@ -81,6 +136,11 @@
         ? '补充要求或调整方向，引导当前任务'
         : '向 Pi 发送消息'}
     aria-label="消息输入"
+    aria-controls={matches.length ? menuId : undefined}
+    aria-activedescendant={matches.length ? `${menuId}-${selected}` : undefined}
+    oninput={() => {
+      dismissed = '';
+    }}
     {disabled}
     onkeydown={keydown}
     oncompositionstart={() => {

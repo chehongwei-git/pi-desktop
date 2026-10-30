@@ -79,6 +79,7 @@ export interface Command {
   name: string;
   description?: string;
   source: string;
+  argumentHint?: string;
 }
 export interface HistoryPage {
   messages: Message[];
@@ -156,6 +157,17 @@ export type Action =
   | { type: 'rename'; name: string }
   | { type: 'set_model'; provider: string; model: string }
   | { type: 'set_thinking'; level: string }
+  | { type: 'compact'; instructions?: string }
+  | { type: 'export'; path?: string }
+  | { type: 'fork'; entryId: string }
+  | {
+      type:
+        | 'clone'
+        | 'session_stats'
+        | 'last_assistant'
+        | 'fork_messages'
+        | 'session_tree';
+    }
   | { type: 'history'; before?: number }
   | {
       type: 'extension_response';

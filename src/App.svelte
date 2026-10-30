@@ -14,6 +14,7 @@
   import Modal from './lib/components/Modal.svelte';
   import SettingsDialog from './lib/components/SettingsDialog.svelte';
   import ExtensionDialog from './lib/components/ExtensionDialog.svelte';
+  import BuiltinCommandDialog from './lib/components/BuiltinCommandDialog.svelte';
   import SidebarSession from './lib/components/SidebarSession.svelte';
   const desktop = new Desktop();
   let newChatMode = $state(false);
@@ -765,6 +766,27 @@
       settingsOpen = false;
     }}
   />{/if}
+{#if desktop.builtinRequest}
+  {#if desktop.builtinRequest.name === 'settings'}
+    <SettingsDialog
+      {desktop}
+      onclose={() => {
+        desktop.builtinRequest = null;
+      }}
+    />
+  {:else}
+    {#key desktop.builtinRequest}
+      <BuiltinCommandDialog
+        {desktop}
+        name={desktop.builtinRequest.name}
+        args={desktop.builtinRequest.args}
+        onclose={() => {
+          desktop.builtinRequest = null;
+        }}
+      />
+    {/key}
+  {/if}
+{/if}
 {#if renameOpen}<Modal
     title="重命名会话"
     onclose={() => {

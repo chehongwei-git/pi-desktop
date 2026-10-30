@@ -1,5 +1,6 @@
 /** 应用门面：组件只调用用户意图；集中连接状态、草稿、事件确认与切换事务。 */
 import { bridge, errorMessage, type Bridge } from '../client';
+import { parseBuiltin } from '../commands';
 import { reduceEvents } from './reducer';
 import {
   defaultSettings,
@@ -175,6 +176,7 @@ export class Desktop {
   models = $state<Model[]>([]);
   levels = $state<string[]>([]);
   commands = $state<Command[]>([]);
+  builtinRequest = $state<{ name: string; args: string } | null>(null);
   draft = $state('');
   notice = $state('');
   error = $state('');
@@ -318,6 +320,7 @@ export class Desktop {
     this.ack = 0;
     this.runtimeId = '';
     this.extensions = [];
+    this.commands = [];
     this.error = '';
     try {
       const connected = await this.api.connect(project, (event) =>
@@ -565,6 +568,15 @@ export class Desktop {
     )
       return;
     const text = this.draft;
+    const builtin = parseBuiltin(text);
+    if (builtin) {
+      if (this.run !== 'idle') {
+        throw new Error('请等待当前任务完成或停止任务后再执行内置命令。');
+      }
+      this.builtinRequest = builtin;
+      if (this.draft === text) this.draft = '';
+      return;
+    }
     const sessionFile = this.snapshot.sessionFile;
     const sentAt = new Date().toISOString();
     const delivery = mode ?? (this.run !== 'idle' ? 'steer' : undefined);
@@ -608,6 +620,20 @@ export class Desktop {
     } finally {
       this.submitting = false;
     }
+  }
+  /** 分支与压缩改变 Pi 的历史，先使宿主投影失效，再按权威历史恢复。 */
+  async refreshCommandSession(): Promise<void> {
+    await this.drain();
+    this.toolViews = {};
+    this.accessed.clear();
+    this.visible.clear();
+    await this.syncState();
+    this.project = this.snapshot.cwd || this.project;
+    await Promise.all([
+      this.refreshHistory(),
+      this.refreshMetadata(),
+      this.refreshSessions(),
+    ]);
   }
   /** 停止先清队列再 abort；5 秒后提供强制断开入口，保留草稿和当前消息。 */
   async stop(): Promise<void> {

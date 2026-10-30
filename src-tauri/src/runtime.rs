@@ -54,6 +54,8 @@ enum Kind {
     Mutate,
     Restore,
     Reset,
+    Refresh,
+    LongRefresh,
     Extension,
 }
 struct Pending {
@@ -134,6 +136,35 @@ impl Handle {
                 )
                 .await
             }
+            Action::Compact { instructions } => {
+                self.rpc(
+                    json!({"type":"compact","customInstructions":instructions}),
+                    Kind::LongRefresh,
+                )
+                .await
+            }
+            Action::Export { path } => {
+                self.rpc(json!({"type":"export_html","outputPath":path}), Kind::Query)
+                    .await
+            }
+            Action::Fork { entry_id } => {
+                self.rpc(json!({"type":"fork","entryId":entry_id}), Kind::Refresh)
+                    .await
+            }
+            Action::Clone => self.rpc(json!({"type":"clone"}), Kind::Refresh).await,
+            Action::SessionStats => {
+                self.rpc(json!({"type":"get_session_stats"}), Kind::Query)
+                    .await
+            }
+            Action::LastAssistant => {
+                self.rpc(json!({"type":"get_last_assistant_text"}), Kind::Query)
+                    .await
+            }
+            Action::ForkMessages => {
+                self.rpc(json!({"type":"get_fork_messages"}), Kind::Query)
+                    .await
+            }
+            Action::SessionTree => self.rpc(json!({"type":"get_tree"}), Kind::Query).await,
             Action::Commands => self.rpc(json!({"type":"get_commands"}), Kind::Query).await,
             Action::State => self.rpc(json!({"type":"get_state"}), Kind::Query).await,
             Action::History { before } => {
@@ -300,7 +331,7 @@ async fn actor(
                     }
                     if matches!(kind, Kind::Extension) { let _ = reply.send(Ok(Value::Null)); }
                     else {
-                        let seconds = if matches!(kind, Kind::Reset | Kind::Restore) { 30 } else if matches!(kind, Kind::Mutate) { 15 } else { 10 };
+                        let seconds = if matches!(kind, Kind::LongRefresh) { 600 } else if matches!(kind, Kind::Reset | Kind::Restore | Kind::Refresh) { 30 } else if matches!(kind, Kind::Mutate) { 15 } else { 10 };
                         pending.insert(request_id, Pending { reply, kind, deadline: Instant::now()+Duration::from_secs(seconds) });
                     }
                 }
@@ -321,7 +352,7 @@ async fn actor(
                             let result = if event["success"] != true { Err(AppError::new("PI_COMMAND", event["error"].as_str().unwrap_or("Pi 拒绝了请求"))) }
                             else if matches!(request.kind, Kind::Restore) {
                                 projection.restore(&event["data"], &mut store).map(|()| { restored=true; projection.page(None) })
-                            } else { if matches!(request.kind, Kind::Reset) && event["data"]["cancelled"] != true { projection.reset(); restored=false; let _ = store.push(json!({"type":"reset"})); } Ok(event["data"].clone()) };
+                            } else { if matches!(request.kind, Kind::Reset | Kind::Refresh | Kind::LongRefresh) && event["data"]["cancelled"] != true { if matches!(request.kind, Kind::Reset) { projection.reset(); let _ = store.push(json!({"type":"reset"})); } restored=false; } Ok(event["data"].clone()) };
                             let _ = request.reply.send(result);
                         }
                     }
@@ -381,6 +412,65 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(history["messages"].as_array().unwrap().len(), 2);
+            let compacted = handle
+                .action(Action::Compact {
+                    instructions: Some("keep code".into()),
+                })
+                .await
+                .unwrap();
+            assert_eq!(compacted["summary"], "compacted");
+            let refreshed = handle
+                .action(Action::History { before: None })
+                .await
+                .unwrap();
+            assert!(refreshed["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|message| message["text"] == "keep code"));
+            assert_eq!(
+                handle
+                    .action(Action::Export {
+                        path: Some("session.html".into())
+                    })
+                    .await
+                    .unwrap()["path"],
+                "session.html"
+            );
+            assert_eq!(
+                handle.action(Action::SessionStats).await.unwrap()["totalMessages"],
+                3
+            );
+            assert_eq!(
+                handle.action(Action::LastAssistant).await.unwrap()["text"],
+                "restored"
+            );
+            assert_eq!(
+                handle.action(Action::ForkMessages).await.unwrap()["messages"][0]["entryId"],
+                "u1"
+            );
+            assert_eq!(
+                handle.action(Action::SessionTree).await.unwrap()["leafId"],
+                "a1"
+            );
+            assert_eq!(
+                handle
+                    .action(Action::Fork {
+                        entry_id: "cancel".into()
+                    })
+                    .await
+                    .unwrap()["cancelled"],
+                true
+            );
+            assert_eq!(
+                handle.action(Action::Clone).await.unwrap()["cancelled"],
+                false
+            );
+            let cloned_history = handle
+                .action(Action::History { before: None })
+                .await
+                .unwrap();
+            assert_eq!(cloned_history["messages"].as_array().unwrap().len(), 3);
             let cancelled = handle
                 .action(Action::SwitchSession {
                     path: "cancel".into(),

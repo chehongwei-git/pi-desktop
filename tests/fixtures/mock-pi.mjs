@@ -53,7 +53,7 @@ for await (const line of readline.createInterface({
       });
       break;
     case 'get_entries':
-      reply(request, { entries, leafId: 'a1' });
+      reply(request, { entries, leafId: entries.at(-1).id });
       break;
     case 'get_available_models':
       reply(request, {
@@ -64,6 +64,43 @@ for await (const line of readline.createInterface({
       break;
     case 'get_available_thinking_levels':
       reply(request, { levels: ['off'] });
+      break;
+    case 'compact':
+      entries.push({
+        id: 'compact-result',
+        parentId: 'a1',
+        type: 'message',
+        message: {
+          role: 'assistant',
+          content: [{ type: 'text', text: request.customInstructions }],
+          stopReason: 'stop',
+        },
+      });
+      reply(request, { summary: 'compacted' });
+      break;
+    case 'clone':
+      reply(request, { cancelled: false });
+      break;
+    case 'export_html':
+      reply(request, { path: request.outputPath || 'mock.html' });
+      break;
+    case 'get_session_stats':
+      reply(request, { totalMessages: entries.length });
+      break;
+    case 'get_last_assistant_text':
+      reply(request, { text: 'restored' });
+      break;
+    case 'get_fork_messages':
+      reply(request, { messages: [{ entryId: 'u1', text: 'mock history' }] });
+      break;
+    case 'get_tree':
+      reply(request, { tree: [], leafId: 'a1' });
+      break;
+    case 'fork':
+      reply(request, {
+        cancelled: request.entryId === 'cancel',
+        text: 'mock history',
+      });
       break;
     case 'get_commands':
       reply(request, { commands: [] });

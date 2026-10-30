@@ -164,6 +164,9 @@ async function mock(
                 return {
                   models: [{ provider: 'mock', id: 'model', name: 'Mock' }],
                 };
+              case 'set_model':
+              case 'set_thinking':
+                return {};
               case 'thinking_levels':
                 return { levels: ['off'] };
               case 'commands':
@@ -243,6 +246,52 @@ async function mock(
     { count, workspaces, projectCount },
   );
 }
+test('slash commands list every builtin, complete with keyboard and execute locally in both themes', async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    localStorage.setItem('mock-settings', JSON.stringify({ theme: 'system' }));
+  });
+  await mock(page);
+  await page.emulateMedia({ colorScheme: 'light' });
+  await page.goto('/');
+  const input = page.getByRole('textbox', { name: '消息输入' });
+  await expect(input).toBeEnabled();
+  await input.fill('/');
+  const menu = page.getByRole('listbox', { name: 'Pi 命令' });
+  await expect(menu.getByRole('option')).toHaveCount(24);
+  await input.press('ArrowUp');
+  await expect(menu.getByRole('option', { name: /\/quit/ })).toHaveAttribute(
+    'aria-selected',
+    'true',
+  );
+  await page.screenshot({ path: 'test-results/slash-commands-light.png' });
+  await page.emulateMedia({ colorScheme: 'dark' });
+  await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
+  await page.screenshot({ path: 'test-results/slash-commands-dark.png' });
+  await input.fill('/model');
+  await input.press('Tab');
+  await expect(input).toHaveValue('/model ');
+  await expect(menu).toHaveCount(0);
+  await input.press('Enter');
+  const dialog = page.getByRole('dialog');
+  await expect(dialog).toBeVisible();
+  await expect(dialog.getByRole('combobox')).toHaveValue('mock/model');
+  await dialog.getByRole('button', { name: '执行', exact: true }).click();
+  await expect(dialog.getByText('已选择模型：mock/model')).toBeVisible();
+  await dialog.getByRole('button', { name: '关闭', exact: true }).click();
+  await input.fill('/login anthropic');
+  await input.press('Enter');
+  await expect(dialog.getByText(/\/login anthropic/)).toBeVisible();
+  const actions = await page.evaluate(() =>
+    (window as any).ipcCalls
+      .filter((call: any) => call.command === 'perform')
+      .map((call: any) => call.action),
+  );
+  expect(actions.some((action: any) => action.type === 'set_model')).toBe(true);
+  expect(actions.some((action: any) => action.type === 'prompt')).toBe(false);
+});
+
 test('desktop zoom shortcuts invoke native WebView scaling', async ({
   page,
 }) => {

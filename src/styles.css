@@ -762,6 +762,9 @@ button svg {
   margin-top: 4px;
 }
 .slash-menu {
+  max-height: min(320px, 45vh);
+  overflow-y: auto;
+  z-index: 10;
   position: absolute;
   bottom: 100%;
   left: 0;
@@ -780,6 +783,24 @@ button svg {
   justify-content: space-between;
   text-align: left;
   gap: 15px;
+  font-size: 12px;
+}
+.slash-menu button.active {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+.slash-menu button strong {
+  flex-shrink: 0;
+}
+.command-output {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px;
+  max-height: 50vh;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
   font-size: 12px;
 }
 .slash-menu small {

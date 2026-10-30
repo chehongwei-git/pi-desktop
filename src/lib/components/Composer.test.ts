@@ -5,6 +5,53 @@ import { afterEach, describe, it, expect, vi } from 'vitest';
 import Composer from './Composer.svelte';
 afterEach(cleanup);
 describe('composer', () => {
+  it('shows all builtins and discovered commands, with keyboard completion and dismissal', async () => {
+    const onsend = vi.fn();
+    const view = render(Composer, {
+      value: '/',
+      onsend,
+      onstop: vi.fn(),
+      commands: [{ name: 'skill:review', source: 'skill' }],
+    });
+    const input = view.getByRole('textbox');
+    expect(view.getAllByRole('option')).toHaveLength(25);
+    expect(view.getByRole('option', { name: /\/quit/ })).toBeInTheDocument();
+    await fireEvent.keyDown(input, { key: 'ArrowUp' });
+    expect(
+      view.getByRole('option', { name: /\/skill:review/ }),
+    ).toHaveAttribute('aria-selected', 'true');
+    await fireEvent.keyDown(input, { key: 'Tab' });
+    expect(input).toHaveValue('/skill:review ');
+    expect(onsend).not.toHaveBeenCalled();
+    expect(view.queryByRole('listbox')).not.toBeInTheDocument();
+    await fireEvent.input(input, { target: { value: '/comp' } });
+    await fireEvent.keyDown(input, { key: 'Enter' });
+    expect(input).toHaveValue('/compact ');
+    expect(onsend).not.toHaveBeenCalled();
+    await fireEvent.keyDown(input, { key: 'Enter' });
+    expect(onsend).toHaveBeenCalledOnce();
+    await fireEvent.input(input, { target: { value: '/' } });
+    await fireEvent.keyDown(input, { key: 'Escape' });
+    expect(view.queryByRole('listbox')).not.toBeInTheDocument();
+    await fireEvent.input(input, { target: { value: '/m' } });
+    expect(view.getByRole('listbox')).toBeInTheDocument();
+  });
+  it('ignores slash completion during IME and hides the menu for arguments or disabled input', async () => {
+    const view = render(Composer, {
+      value: '/model',
+      onsend: vi.fn(),
+      onstop: vi.fn(),
+    });
+    const input = view.getByRole('textbox');
+    await fireEvent.compositionStart(input);
+    await fireEvent.keyDown(input, { key: 'Enter' });
+    expect(input).toHaveValue('/model');
+    await fireEvent.compositionEnd(input);
+    await fireEvent.input(input, { target: { value: '/model provider/id' } });
+    expect(view.queryByRole('listbox')).not.toBeInTheDocument();
+    await view.rerender({ value: '/', disabled: true });
+    expect(view.queryByRole('listbox')).not.toBeInTheDocument();
+  });
   it('does not submit IME confirmation but submits ordinary Enter', async () => {
     const onsend = vi.fn();
     const view = render(Composer, { value: '你好', onsend, onstop: vi.fn() });
