@@ -63,11 +63,17 @@ mod tests {
         .unwrap();
         let mut settings = load(dir.path()).unwrap();
         assert!(settings.pinned_sessions.is_empty());
+        assert!(settings.project_order.is_empty());
         assert_eq!(settings.zoom, 100);
         settings.zoom = 120;
         settings.pinned_sessions = vec!["session.jsonl".into()];
+        settings.project_order = vec!["/beta".into(), "/alpha".into()];
         save(dir.path(), &settings).unwrap();
         assert_eq!(load(dir.path()).unwrap().zoom, 120);
+        assert_eq!(
+            load(dir.path()).unwrap().project_order,
+            vec!["/beta", "/alpha"]
+        );
         assert_eq!(
             load(dir.path()).unwrap().pinned_sessions,
             vec!["session.jsonl"]

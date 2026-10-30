@@ -48,6 +48,7 @@ pub struct Settings {
     pub extra_path: Vec<String>,
     pub session_dir: String,
     pub recent_projects: Vec<String>,
+    pub project_order: Vec<String>,
     pub pinned_sessions: Vec<String>,
     pub theme: String,
     pub zoom: u32,
@@ -62,6 +63,7 @@ impl Default for Settings {
             extra_path: vec![],
             session_dir: String::new(),
             recent_projects: vec![],
+            project_order: vec![],
             pinned_sessions: vec![],
             theme: "system".into(),
             zoom: 100,
@@ -88,6 +90,7 @@ pub struct SessionSummary {
     pub preview: String,
     pub timestamp: String,
     pub modified: u64,
+    pub last_prompt_at: String,
     pub warning: Option<String>,
 }
 

@@ -80,6 +80,8 @@ async function mock(
           }
           if (command === 'disconnect_pi') return;
           if (command === 'plugin:dialog|open') return 'C:/mock/project';
+          if (command === 'list_sessions' && host.sessionCatalog)
+            return host.sessionCatalog;
           if (command === 'list_sessions')
             return host.emptyCatalog
               ? []
@@ -369,12 +371,13 @@ test('session title updates before slow cross-project loading completes', async 
   await expect(
     page.getByRole('textbox', { name: '消息输入', exact: true }),
   ).toBeDisabled();
-  await expect
-    .poll(() => page.evaluate(() => typeof (window as any).releaseConnection))
-    .toBe('function');
-  await page.evaluate(() => {
-    (window as any).releaseConnection();
-  });
+  expect(
+    await page.evaluate(
+      () =>
+        (window as any).ipcCalls.filter((c: any) => c.command === 'connect_pi')
+          .length,
+    ),
+  ).toBe(1);
   await expect
     .poll(() => page.evaluate(() => typeof (window as any).releaseHistory))
     .toBe('function');
@@ -418,7 +421,7 @@ test('new conversation without a project starts in the user directory', async ({
           ).length,
       ),
     )
-    .toBe(1);
+    .toBe(2);
   const calls = await page.evaluate(() => (window as any).ipcCalls);
   expect(
     calls
@@ -440,8 +443,8 @@ test('sidebar sections limit projects and persist pinned conversations', async (
   const recent = page.getByRole('region', { name: '最近', exact: true });
   const pinned = page.getByRole('region', { name: '置顶', exact: true });
   await expect(projects.locator('.project-current')).toHaveCount(5);
-  await projects.getByRole('button', { name: '显示全部 8 个项目' }).click();
-  await expect(projects.locator('.project-current')).toHaveCount(8);
+  await projects.getByRole('button', { name: '显示全部 9 个项目' }).click();
+  await expect(projects.locator('.project-current')).toHaveCount(9);
   await projects.locator('.section-toggle').click();
   await expect(projects.locator('.project-current')).toHaveCount(0);
   await projects.locator('.section-toggle').click();
@@ -514,7 +517,7 @@ test('workspace tree discovers, expands, searches and restores across projects',
     await page.evaluate(() =>
       (window as any).ipcCalls.filter((c: any) => c.command === 'connect_pi'),
     ),
-  ).toHaveLength(0);
+  ).toHaveLength(1);
   await page.screenshot({ path: 'test-results/workspaces-light.png' });
   await page.getByRole('textbox', { name: '搜索历史会话' }).fill('覆盖率');
   await expect(alpha).toHaveCount(0);
@@ -539,7 +542,7 @@ test('workspace tree discovers, expands, searches and restores across projects',
       .filter((c: any) => c.command === 'connect_pi')
       .map((c: any) => c.project),
   );
-  expect(calls).toEqual(['C:/work/alpha', 'C:/work/beta']);
+  expect(calls).toEqual(['']);
   expect(await projectTree.locator('.project-name').allTextContents()).toEqual(
     originalOrder,
   );
@@ -559,6 +562,93 @@ test('workspace tree discovers, expands, searches and restores across projects',
   await expect(beta).toHaveAttribute('aria-expanded', 'false');
   expect(errors).toEqual([]);
 });
+test('recent and project sessions advance only after sending a message', async ({
+  page,
+}) => {
+  await mock(page);
+  await page.addInitScript(() => {
+    (window as any).sessionCatalog = [
+      {
+        path: 'older.jsonl',
+        id: 'older',
+        cwd: 'C:/work/alpha',
+        name: '较早发送',
+        preview: '',
+        timestamp: '2025-01-01',
+        lastPromptAt: '2025-01-02T00:00:00.000Z',
+        modified: 999,
+        warning: null,
+      },
+      {
+        path: 'newer.jsonl',
+        id: 'newer',
+        cwd: 'C:/work/alpha',
+        name: '较近发送',
+        preview: '',
+        timestamp: '2025-01-01',
+        lastPromptAt: '2025-02-01T00:00:00.000Z',
+        modified: 1,
+        warning: null,
+      },
+    ];
+  });
+  await page.goto('/');
+  const recent = page.getByRole('region', { name: '最近', exact: true });
+  const projects = page.getByRole('region', { name: '工作项目', exact: true });
+  await projects.getByRole('button', { name: 'alpha 2', exact: true }).click();
+  const recentRows = recent.locator('.history-item');
+  const projectRows = projects.locator('.history-item');
+  await expect(recentRows.first()).toHaveText('较近发送 alpha');
+  await expect(projectRows.first()).toHaveText('较近发送');
+  await projects.getByRole('button', { name: '较早发送', exact: true }).click();
+  await expect(page.locator('.session-title')).toHaveText('较早发送');
+  await expect(recentRows.first()).toHaveText('较近发送 alpha');
+  await expect(projectRows.first()).toHaveText('较近发送');
+  await page
+    .getByRole('textbox', { name: '消息输入', exact: true })
+    .fill('新的消息');
+  await page
+    .getByRole('textbox', { name: '消息输入', exact: true })
+    .press('Enter');
+  await expect(projectRows.first()).toHaveText('较早发送');
+  await expect(recentRows.first()).toHaveText('较早发送 alpha');
+});
+
+test('projects support drag and keyboard reordering and retain order after reload', async ({
+  page,
+}) => {
+  await mock(page, 2, true);
+  await page.goto('/');
+  const tree = page.getByRole('region', { name: '工作项目', exact: true });
+  const alpha = tree.getByRole('button', { name: 'alpha 1', exact: true });
+  const beta = tree.getByRole('button', { name: 'beta 1', exact: true });
+  await expect(alpha).toHaveAttribute('draggable', 'true');
+  const original = await tree.locator('.project-name').allTextContents();
+  await beta.dragTo(alpha, { targetPosition: { x: 40, y: 4 } });
+  await expect
+    .poll(() => tree.locator('.project-name').allTextContents())
+    .toEqual(['mock', 'beta', 'alpha']);
+  await page.reload();
+  await expect
+    .poll(() => tree.locator('.project-name').allTextContents())
+    .toEqual(['mock', 'beta', 'alpha']);
+  await beta.focus();
+  await page.keyboard.press('Alt+ArrowDown');
+  await expect
+    .poll(() => tree.locator('.project-name').allTextContents())
+    .toEqual(original);
+  await expect(beta).toBeFocused();
+  await page.screenshot({ path: 'test-results/project-order-light.png' });
+  await page.evaluate(() => {
+    document.documentElement.dataset.theme = 'dark';
+  });
+  await page.screenshot({ path: 'test-results/project-order-dark.png' });
+  await page.reload();
+  await expect
+    .poll(() => tree.locator('.project-name').allTextContents())
+    .toEqual(original);
+});
+
 test('new conversation project picker searches all projects and supports new directories and home', async ({
   page,
 }) => {
@@ -634,9 +724,7 @@ test('welcome, project, conversation, send and shortcuts', async ({ page }) => {
   page.on('pageerror', (error) => errors.push(error.message));
   await mock(page);
   await page.goto('/');
-  await expect(
-    page.getByRole('heading', { name: '让 Pi 与你的项目一起工作' }),
-  ).toBeVisible();
+  await expect(page.getByText('已连接', { exact: true })).toBeVisible();
   await page
     .getByRole('button', { name: '选择项目文件夹', exact: true })
     .last()

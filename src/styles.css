@@ -310,6 +310,19 @@ button svg {
 .project-current {
   min-width: 0;
 }
+.project-current[draggable='true'] {
+  cursor: grab;
+}
+.project-current.project-dragging {
+  opacity: 0.5;
+  cursor: grabbing;
+}
+.project-current.drop-before {
+  box-shadow: inset 0 2px var(--accent);
+}
+.project-current.drop-after {
+  box-shadow: inset 0 -2px var(--accent);
+}
 .project-current.active {
   color: var(--accent);
 }

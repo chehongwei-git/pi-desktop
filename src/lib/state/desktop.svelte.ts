@@ -21,6 +21,7 @@ export class Desktop {
   settings = $state<Settings>({
     ...defaultSettings,
     recentProjects: [],
+    projectOrder: [],
     pinnedSessions: [],
     extraPath: [],
   });
@@ -67,6 +68,52 @@ export class Desktop {
       this.pinSaving = false;
     }
   }
+  projectOrderSaving = $state(false);
+  private sentAt = $state<Record<string, string>>({});
+  private compareSessions(a: SessionSummary, b: SessionSummary): number {
+    const activity = (session: SessionSummary) => {
+      const stored = session.lastPromptAt || '';
+      const local = this.sentAt[this.sessionKey(session.path)] || '';
+      return local > stored ? local : stored;
+    };
+    return (
+      activity(b).localeCompare(activity(a)) ||
+      (b.timestamp || '').localeCompare(a.timestamp || '') ||
+      this.sessionKey(a.path).localeCompare(this.sessionKey(b.path))
+    );
+  }
+  get recentSessions(): SessionSummary[] {
+    return [...this.sessions].sort((a, b) => this.compareSessions(a, b));
+  }
+  /** 保存完整项目顺序，搜索和折叠只改变可见范围。 */
+  async moveProject(
+    source: string,
+    target: string,
+    after = false,
+  ): Promise<void> {
+    if (this.projectOrderSaving) return;
+    const order = this.projects.map((project) => project.path);
+    const from = order.findIndex(
+      (path) => this.projectKey(path) === this.projectKey(source),
+    );
+    if (from < 0 || this.projectKey(source) === this.projectKey(target)) return;
+    const [path] = order.splice(from, 1);
+    const to = order.findIndex(
+      (item) => this.projectKey(item) === this.projectKey(target),
+    );
+    if (to < 0) return;
+    order.splice(to + (after ? 1 : 0), 0, path);
+    this.projectOrderSaving = true;
+    try {
+      await this.api.save({
+        ...$state.snapshot(this.settings),
+        projectOrder: order,
+      });
+      this.settings.projectOrder = order;
+    } finally {
+      this.projectOrderSaving = false;
+    }
+  }
   expandedProjects = $state<string[]>([]);
   /** 与 Pi header.cwd 分组；Windows 路径忽略大小写与分隔符差异。 */
   projectKey(path: string): string {
@@ -91,8 +138,20 @@ export class Desktop {
       if (path && !groups.has(this.projectKey(path)))
         groups.set(this.projectKey(path), { path, sessions: [] });
     }
-    return [...groups.values()].sort((a, b) =>
-      this.projectKey(a.path).localeCompare(this.projectKey(b.path)),
+    for (const group of groups.values()) {
+      group.sessions.sort((a, b) => this.compareSessions(a, b));
+    }
+    const rank = new Map(
+      this.settings.projectOrder.map((path, index) => [
+        this.projectKey(path),
+        index,
+      ]),
+    );
+    return [...groups.values()].sort(
+      (a, b) =>
+        (rank.get(this.projectKey(a.path)) ?? Infinity) -
+          (rank.get(this.projectKey(b.path)) ?? Infinity) ||
+        this.projectKey(a.path).localeCompare(this.projectKey(b.path)),
     );
   }
   isExpanded(project: string): boolean {
@@ -165,6 +224,7 @@ export class Desktop {
     execute: () => Promise<void>;
     waiting: boolean;
   } | null>(null);
+  private connectionTask: Promise<void> | null = null;
   private ack = 0;
   private pumpTask: Promise<void> | null = null;
   private generation = 0;
@@ -194,11 +254,13 @@ export class Desktop {
         ...defaultSettings,
         ...settings,
         pinnedSessions: settings.pinnedSessions ?? [],
+        projectOrder: settings.projectOrder ?? [],
         zoom: Number.isFinite(settings.zoom)
           ? Math.max(80, Math.min(150, settings.zoom))
           : defaultSettings.zoom,
       };
       await this.refreshSessions();
+      await this.connect(this.settings.recentProjects[0] ?? '');
     } catch (error) {
       this.error = errorMessage(error);
     }
@@ -241,7 +303,15 @@ export class Desktop {
     if (next) await this.guard(next.execute);
   }
   /** 连接时先安装通知，starting 阶段也处理扩展信任/输入请求。 */
-  async connect(project: string): Promise<void> {
+  connect(project: string): Promise<void> {
+    if (this.connectionTask)
+      return this.connectionTask.then(() => this.connect(project));
+    this.connectionTask = this.connectProject(project).finally(() => {
+      this.connectionTask = null;
+    });
+    return this.connectionTask;
+  }
+  private async connectProject(project: string): Promise<void> {
     this.drafts.set(this.draftKey(), this.draft);
     const generation = ++this.generation;
     this.connection = 'starting';
@@ -276,9 +346,11 @@ export class Desktop {
       await this.api.save($state.snapshot(this.settings));
       if (!connected.verified)
         this.notice = `Pi ${connected.version} 未经本版验证，将按 RPC 能力连接。`;
-      await this.refreshMetadata();
-      await this.refreshHistory();
-      await this.refreshSessions();
+      await Promise.all([
+        this.refreshMetadata(),
+        this.refreshHistory(),
+        this.refreshSessions(),
+      ]);
     } catch (error) {
       if (generation === this.generation) {
         this.connection = 'failed';
@@ -339,13 +411,20 @@ export class Desktop {
         this.ack = batch.sequence;
         if (batch.events.some((event) => event.type === 'message'))
           this.trimCache();
-        if (previous !== 'idle' && this.run === 'idle') {
-          clearTimeout(this.stopTimer);
+        if (
+          (previous !== 'idle' && this.run === 'idle') ||
+          batch.events.some(
+            (event) =>
+              event.type === 'message' && event.message.role === 'user',
+          )
+        ) {
+          if (this.run === 'idle') clearTimeout(this.stopTimer);
           void this.guard(async () => {
             await this.syncState();
             await this.refreshSessions();
           });
-          if (this.pendingSwitch?.waiting) void this.executePending();
+          if (this.run === 'idle' && this.pendingSwitch?.waiting)
+            void this.executePending();
         }
       }
     } catch (error) {
@@ -433,7 +512,7 @@ export class Desktop {
       if (generation === this.searchGeneration) this.loadingSessions = false;
     }
   }
-  /** 展开不创建进程；选择会话才连接该会话所属项目。 */
+  /** 已有历史直接交给 Pi 切换，Pi 根据 header.cwd 重建项目服务。 */
   async openSession(project: string, path: string): Promise<void> {
     if (this.openingSession) return;
     this.openingSession = {
@@ -441,23 +520,17 @@ export class Desktop {
       title: this.sessionLabel(path) || '新会话',
     };
     try {
-      if (
-        this.connection !== 'ready' ||
-        this.projectKey(this.project) !== this.projectKey(project)
-      )
-        await this.connect(project);
-      if (
-        this.connection !== 'ready' ||
-        this.projectKey(this.project) !== this.projectKey(project)
-      )
-        return;
-      await this.switchSession(path);
+      if (this.connectionTask) await this.connectionTask;
+      if (this.connection !== 'ready') await this.connect(project);
+      if (this.connection !== 'ready') return;
+      await this.switchSession(path, project);
     } finally {
       this.openingSession = null;
     }
   }
   /** 空项目由宿主解析为系统用户目录；已有连接时继续在当前项目新建。 */
   async newSession(project = this.project): Promise<void> {
+    if (this.connectionTask) await this.connectionTask;
     if (
       this.connection !== 'ready' ||
       this.projectKey(this.project) !== this.projectKey(project)
@@ -492,6 +565,8 @@ export class Desktop {
     )
       return;
     const text = this.draft;
+    const sessionFile = this.snapshot.sessionFile;
+    const sentAt = new Date().toISOString();
     const delivery = mode ?? (this.run !== 'idle' ? 'steer' : undefined);
     const pendingId = delivery
       ? `pending-${++this.submissionSerial}`
@@ -515,6 +590,7 @@ export class Desktop {
     this.submitting = true;
     try {
       await this.action({ type: 'prompt', message: text, mode: delivery });
+      if (sessionFile) this.sentAt[this.sessionKey(sessionFile)] = sentAt;
       const pending = this.messages.find((message) => message.id === pendingId);
       if (pending?.delivery) pending.delivery.state = 'queued';
       if (this.draft === text) this.draft = '';
@@ -556,7 +632,7 @@ export class Desktop {
     clearTimeout(this.stopTimer);
   }
   /** 新建/切换只在成功且未被扩展取消后提交 UI 状态。 */
-  async switchSession(path?: string): Promise<void> {
+  async switchSession(path?: string, project = this.project): Promise<void> {
     if (!this.project) return;
     const title = path
       ? this.sessionLabel(path) || this.openingSession?.title || ''
@@ -575,9 +651,24 @@ export class Desktop {
     this.accessed.clear();
     this.visible.clear();
     await this.syncState();
-    await this.refreshHistory();
+    const previousProject = this.project;
+    this.project = this.snapshot.cwd || project;
+    this.expandProject(this.project);
+    await Promise.all([
+      this.refreshHistory(),
+      this.refreshMetadata(),
+      this.refreshSessions(),
+    ]);
     this.draft = this.drafts.get(this.draftKey()) ?? '';
-    await this.refreshSessions();
+    if (this.projectKey(previousProject) !== this.projectKey(this.project)) {
+      this.settings.recentProjects = [
+        this.project,
+        ...this.settings.recentProjects.filter(
+          (item) => this.projectKey(item) !== this.projectKey(this.project),
+        ),
+      ].slice(0, 20);
+      await this.api.save($state.snapshot(this.settings));
+    }
   }
   /** 强制断开不是重试，不重发任何提示词。 */
   async disconnect(force = false): Promise<void> {

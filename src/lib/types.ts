@@ -6,6 +6,7 @@ export interface Settings {
   extraPath: string[];
   sessionDir: string;
   recentProjects: string[];
+  projectOrder: string[];
   pinnedSessions: string[];
   theme: 'system' | 'light' | 'dark';
   zoom: number;
@@ -18,6 +19,7 @@ export interface SessionSummary {
   preview: string;
   timestamp: string;
   modified: number;
+  lastPromptAt?: string;
   warning: string | null;
 }
 export interface ToolPresentation {
@@ -65,6 +67,7 @@ export interface Model {
   name: string;
 }
 export interface Snapshot {
+  cwd?: string;
   sessionFile?: string;
   sessionId?: string;
   sessionName?: string;
@@ -166,6 +169,7 @@ export const defaultSettings: Settings = {
   extraPath: [],
   sessionDir: '',
   recentProjects: [],
+  projectOrder: [],
   pinnedSessions: [],
   theme: 'system',
   zoom: 100,

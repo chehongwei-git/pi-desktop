@@ -66,7 +66,7 @@ pub fn same_project(a: &str, b: &str) -> bool {
 impl Catalog {
     /// 磁盘仅缓存摘要和已消费位置；损坏缓存直接丢弃，不影响 Pi 原始文件。
     pub fn load(config_dir: &std::path::Path) -> Self {
-        let persistent = config_dir.join("history-index-v1.json");
+        let persistent = config_dir.join("history-index-v2.json");
         let cache = fs::read(&persistent)
             .ok()
             .and_then(|bytes| serde_json::from_slice(&bytes).ok())
@@ -156,6 +156,7 @@ impl Catalog {
                         name: String::new(),
                         preview: String::new(),
                         timestamp: String::new(),
+                        last_prompt_at: String::new(),
                         modified,
                         warning: None,
                     },
@@ -201,14 +202,18 @@ impl Catalog {
                     "session_info" => {
                         cached.summary.name = entry["name"].as_str().unwrap_or("").into()
                     }
-                    "message"
-                        if entry["message"]["role"] == "user"
-                            && cached.summary.preview.is_empty() =>
-                    {
-                        cached.summary.preview = text_content(&entry["message"]["content"])
-                            .chars()
-                            .take(100)
-                            .collect();
+                    "message" if entry["message"]["role"] == "user" => {
+                        if let Some(timestamp) = entry["timestamp"].as_str() {
+                            if timestamp > cached.summary.last_prompt_at.as_str() {
+                                cached.summary.last_prompt_at = timestamp.into();
+                            }
+                        }
+                        if cached.summary.preview.is_empty() {
+                            cached.summary.preview = text_content(&entry["message"]["content"])
+                                .chars()
+                                .take(100)
+                                .collect();
+                        }
                     }
                     _ => {}
                 }
@@ -233,7 +238,12 @@ impl Catalog {
                     .to_lowercase()
                     .contains(&search)
         });
-        results.sort_by_key(|s| std::cmp::Reverse(s.modified));
+        results.sort_by(|a, b| {
+            b.last_prompt_at
+                .cmp(&a.last_prompt_at)
+                .then_with(|| b.timestamp.cmp(&a.timestamp))
+                .then_with(|| a.path.cmp(&b.path))
+        });
         Ok(results)
     }
 }
@@ -327,6 +337,47 @@ mod tests {
             assert_eq!(catalog.list(&settings, "/alpha", "").unwrap().len(), 1);
             assert_eq!(catalog.list(&settings, "", "hello").unwrap().len(), 1);
         }
+    }
+    /// 文件变动和助手回复不能提升会话；只有新的用户消息改变活跃时间。
+    #[test]
+    fn catalog_orders_by_last_user_message_and_persists_activity() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let sessions = dir.path().join("sessions");
+        fs::create_dir(&sessions).unwrap();
+        let settings = Settings {
+            session_dir: sessions.to_string_lossy().into(),
+            ..Settings::default()
+        };
+        for (id, timestamp) in [
+            ("a", "2026-01-02T00:00:00.000Z"),
+            ("b", "2026-01-01T00:00:00.000Z"),
+        ] {
+            fs::write(sessions.join(format!("{id}.jsonl")), format!("{}\n{}\n",
+                json!({"type":"session", "id":id, "cwd":"/project", "timestamp":"2025-01-01T00:00:00.000Z"}),
+                json!({"type":"message", "timestamp":timestamp, "message":{"role":"user", "content":id}})
+            )).unwrap();
+        }
+        let mut catalog = Catalog::load(dir.path());
+        assert_eq!(catalog.list(&settings, "", "").unwrap()[0].id, "a");
+        let mut file = fs::OpenOptions::new()
+            .append(true)
+            .open(sessions.join("b.jsonl"))
+            .unwrap();
+        for entry in [
+            json!({"type":"session_info", "name":"renamed", "timestamp":"2026-02-01T00:00:00.000Z"}),
+            json!({"type":"message", "timestamp":"2026-02-01T00:00:00.000Z", "message":{"role":"assistant", "content":"reply"}}),
+        ] {
+            writeln!(file, "{entry}").unwrap();
+            assert_eq!(catalog.list(&settings, "", "").unwrap()[0].id, "a");
+        }
+        writeln!(file, "{}", json!({"type":"message", "timestamp":"2026-03-01T00:00:00.000Z", "message":{"role":"user", "content":"next"}})).unwrap();
+        assert_eq!(catalog.list(&settings, "", "").unwrap()[0].id, "b");
+        let mut reloaded = Catalog::load(dir.path());
+        let results = reloaded.list(&settings, "", "").unwrap();
+        assert_eq!(results[0].id, "b");
+        assert_eq!(results[0].last_prompt_at, "2026-03-01T00:00:00.000Z");
+        assert_eq!(results[0].preview, "b");
     }
     /// 追加半行稍后补全应只读取一次，摘要与 CLI header.cwd 一致。
     #[test]

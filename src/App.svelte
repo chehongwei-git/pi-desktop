@@ -1,6 +1,6 @@
-<!-- ChatGPT 风格主工作区：侧栏/欢迎页/底部输入/状态，所有业务副作用经过 Desktop 门面。 -->
+<!-- 主工作区：可排序项目侧栏、会话、输入与状态；业务副作用经过 Desktop 门面。 -->
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, tick } from 'svelte';
   import { open } from '@tauri-apps/plugin-dialog';
   import { getCurrentWebview } from '@tauri-apps/api/webview';
   import { isTauri } from '@tauri-apps/api/core';
@@ -25,6 +25,41 @@
   let projectsOpen = $state(true);
   let recentOpen = $state(true);
   let showAllProjects = $state(false);
+  let draggingProject = $state('');
+  let dropProject = $state('');
+  let dropAfter = $state(false);
+  function clearProjectDrag(): void {
+    draggingProject = '';
+    dropProject = '';
+    dropAfter = false;
+  }
+  function projectDrop(event: DragEvent, target: string): void {
+    event.preventDefault();
+    const source = draggingProject;
+    const after = dropAfter;
+    clearProjectDrag();
+    if (source)
+      void desktop.guard(() => desktop.moveProject(source, target, after));
+  }
+  function projectReorderKey(event: KeyboardEvent, path: string): void {
+    if (!event.altKey || !['ArrowUp', 'ArrowDown'].includes(event.key)) return;
+    event.preventDefault();
+    const order = desktop.projects;
+    const index = order.findIndex(
+      (project) =>
+        desktop.projectKey(project.path) === desktop.projectKey(path),
+    );
+    const after = event.key === 'ArrowDown';
+    const target = order[index + (after ? 1 : -1)];
+    if (target) {
+      const button = event.currentTarget as HTMLButtonElement;
+      void desktop.guard(async () => {
+        await desktop.moveProject(path, target.path, after);
+        await tick();
+        button.focus({ preventScroll: true });
+      });
+    }
+  }
   let searching = $derived(!!search.trim());
   function matchesSession(session: SessionSummary): boolean {
     return `${session.name} ${session.preview}`
@@ -32,7 +67,7 @@
       .includes(search.trim().toLowerCase());
   }
   let pinnedSessions = $derived(desktop.pinnedSessions.filter(matchesSession));
-  let recentSessions = $derived(desktop.sessions.filter(matchesSession));
+  let recentSessions = $derived(desktop.recentSessions.filter(matchesSession));
   let searchInput: HTMLInputElement;
   let renameOpen = $state(false);
   let renameValue = $state('');
@@ -176,7 +211,7 @@
       if (typeof path === 'string') selectNewProject(path);
     });
   }
-  /** 恢复历史时先建立该项目连接；被扩展取消时门面保持原状态。 */
+  /** 复用 Pi 恢复历史；被扩展取消时门面保持原状态。 */
   function selectSession(project: string, path: string): void {
     desktop.requestSwitch('打开历史会话', async () => {
       await desktop.openSession(project, path);
@@ -367,7 +402,32 @@
                   class="project-current"
                   class:active={desktop.projectKey(project.path) ===
                     desktop.projectKey(desktop.project)}
-                  title={project.path}
+                  class:project-dragging={draggingProject === project.path}
+                  class:drop-before={dropProject === project.path && !dropAfter}
+                  class:drop-after={dropProject === project.path && dropAfter}
+                  draggable={!desktop.projectOrderSaving}
+                  title={project.path + '（拖拽排序，或 Alt+↑/↓）'}
+                  ondragstart={(event) => {
+                    draggingProject = project.path;
+                    event.dataTransfer?.setData('text/plain', project.path);
+                    if (event.dataTransfer)
+                      event.dataTransfer.effectAllowed = 'move';
+                  }}
+                  ondragend={clearProjectDrag}
+                  ondragover={(event) => {
+                    if (!draggingProject || desktop.projectOrderSaving) return;
+                    event.preventDefault();
+                    if (event.dataTransfer)
+                      event.dataTransfer.dropEffect = 'move';
+                    const bounds = event.currentTarget.getBoundingClientRect();
+                    dropProject = project.path;
+                    dropAfter = event.clientY > bounds.top + bounds.height / 2;
+                  }}
+                  ondragleave={() => {
+                    if (dropProject === project.path) dropProject = '';
+                  }}
+                  ondrop={(event) => projectDrop(event, project.path)}
+                  onkeydown={(event) => projectReorderKey(event, project.path)}
                   aria-expanded={expanded}
                   onclick={() => desktop.toggleProject(project.path)}
                 >

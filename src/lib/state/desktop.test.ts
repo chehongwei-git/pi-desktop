@@ -221,13 +221,19 @@ describe('desktop business behavior', () => {
     desktop.project = 'C:/work/alpha';
     expect(desktop.projects.map((project) => project.path)).toEqual(order);
   });
-  it('discovers all workspaces at startup without connecting and groups Windows aliases', async () => {
+  it('discovers all workspaces, prewarms Pi and groups Windows aliases', async () => {
     const sessions = vi.fn().mockResolvedValue([
       { cwd: 'C:/work/alpha', path: 'a' },
       { cwd: 'c:\\work\\ALPHA', path: 'b' },
       { cwd: 'C:/work/beta', path: 'c' },
     ]);
-    const connect = vi.fn();
+    const connect = vi.fn().mockResolvedValue({
+      runtimeId: 'warm',
+      project: 'C:/work/empty',
+      snapshot: {},
+      version: '1.4.0',
+      verified: true,
+    });
     const desktop = new Desktop({
       ...bridge,
       settings: async () => ({
@@ -236,17 +242,21 @@ describe('desktop business behavior', () => {
       }),
       sessions,
       connect,
+      save: vi.fn().mockResolvedValue(undefined),
     });
+    vi.spyOn(desktop, 'refreshMetadata').mockResolvedValue();
+    vi.spyOn(desktop, 'refreshHistory').mockResolvedValue();
     await desktop.init();
     expect(sessions).toHaveBeenCalledWith('', '');
-    expect(connect).not.toHaveBeenCalled();
+    expect(connect).toHaveBeenCalledOnce();
+    expect(connect).toHaveBeenCalledWith('C:/work/empty', expect.any(Function));
     expect(desktop.projects.map((p) => p.sessions.length)).toEqual([2, 1, 0]);
     desktop.toggleProject('C:/work/alpha');
     expect(desktop.isExpanded('c:/work/ALPHA')).toBe(true);
     desktop.toggleProject('c:/work/ALPHA');
     expect(desktop.isExpanded('C:/work/alpha')).toBe(false);
   });
-  it('connects to a selected session workspace before restoring it', async () => {
+  it('reuses the Pi process when restoring a session in another workspace', async () => {
     const desktop = fixture(vi.fn());
     desktop.project = 'old-project';
     desktop.connection = 'ready';
@@ -260,7 +270,173 @@ describe('desktop business behavior', () => {
       order.push(`session:${path}`);
     });
     await desktop.openSession('other-project', 'history.jsonl');
-    expect(order).toEqual(['connect:other-project', 'session:history.jsonl']);
+    expect(order).toEqual(['session:history.jsonl']);
+    expect(desktop.switchSession).toHaveBeenCalledWith(
+      'history.jsonl',
+      'other-project',
+    );
+  });
+  it('keeps sessions in creation order when catalog order, names and activity change', () => {
+    const desktop = fixture(vi.fn());
+    desktop.sessions = [
+      { cwd: 'project', path: 'older', timestamp: '2026-01-01', modified: 9 },
+      { cwd: 'project', path: 'newer-b', timestamp: '2026-02-01', modified: 1 },
+      { cwd: 'project', path: 'newer-a', timestamp: '2026-02-01', modified: 2 },
+    ] as typeof desktop.sessions;
+    const order = () => desktop.projects[0].sessions.map((item) => item.path);
+    expect(order()).toEqual(['newer-a', 'newer-b', 'older']);
+    desktop.sessions.reverse();
+    desktop.sessions[0].modified = 100;
+    desktop.sessions[0].name = 'renamed';
+    expect(order()).toEqual(['newer-a', 'newer-b', 'older']);
+  });
+  it('only promotes a conversation after a successful send in both lists', async () => {
+    const action = vi.fn().mockResolvedValue({});
+    const desktop = fixture(action);
+    desktop.connection = 'ready';
+    desktop.project = 'project';
+    desktop.snapshot = { sessionFile: 'older' };
+    desktop.sessions = [
+      {
+        cwd: 'project',
+        path: 'older',
+        timestamp: '2025-01-01',
+        lastPromptAt: '2026-01-01T00:00:00.000Z',
+        modified: 100,
+      },
+      {
+        cwd: 'project',
+        path: 'newer',
+        timestamp: '2025-02-01',
+        lastPromptAt: '2026-02-01T00:00:00.000Z',
+        modified: 1,
+      },
+    ] as typeof desktop.sessions;
+    const recentOrder = () => desktop.recentSessions.map((item) => item.path);
+    const projectOrder = () =>
+      desktop.projects[0].sessions.map((item) => item.path);
+    expect(recentOrder()).toEqual(['newer', 'older']);
+    expect(projectOrder()).toEqual(recentOrder());
+    desktop.sessions.reverse();
+    desktop.sessions[1].name = 'renamed';
+    desktop.sessions[1].modified = 999;
+    expect(projectOrder()).toEqual(['newer', 'older']);
+    desktop.draft = 'next';
+    action.mockRejectedValueOnce(new Error('rejected'));
+    await expect(desktop.send()).rejects.toThrow('rejected');
+    expect(recentOrder()).toEqual(['newer', 'older']);
+    await desktop.send();
+    expect(recentOrder()).toEqual(['older', 'newer']);
+    expect(projectOrder()).toEqual(recentOrder());
+  });
+  it('persists project moves across path aliases and leaves order intact on save failure', async () => {
+    const save = vi.fn().mockResolvedValue(undefined);
+    const desktop = new Desktop({ ...bridge, save });
+    desktop.sessions = ['alpha', 'beta', 'gamma'].map((name) => ({
+      cwd: `C:/work/${name}`,
+      path: name,
+    })) as typeof desktop.sessions;
+    const order = () => desktop.projects.map((item) => item.path);
+    await desktop.moveProject('c:\\work\\GAMMA', 'C:/work/alpha');
+    expect(order()).toEqual(['C:/work/gamma', 'C:/work/alpha', 'C:/work/beta']);
+    expect(save).toHaveBeenLastCalledWith(
+      expect.objectContaining({ projectOrder: order() }),
+    );
+    desktop.sessions.reverse();
+    desktop.project = 'C:/work/beta';
+    expect(order()).toEqual(['C:/work/gamma', 'C:/work/alpha', 'C:/work/beta']);
+    save.mockRejectedValueOnce(new Error('disk full'));
+    await expect(
+      desktop.moveProject('C:/work/beta', 'C:/work/gamma'),
+    ).rejects.toThrow('disk full');
+    expect(order()).toEqual(['C:/work/gamma', 'C:/work/alpha', 'C:/work/beta']);
+    expect(desktop.projectOrderSaving).toBe(false);
+    await desktop.moveProject('C:/work/gamma', 'C:/work/beta', true);
+    expect(order()).toEqual(['C:/work/alpha', 'C:/work/beta', 'C:/work/gamma']);
+  });
+  it('commits cross-project switches only on success and restores each session draft', async () => {
+    let sessionFile = 'a';
+    let cwd = 'alpha';
+    let cancelled = false;
+    const connect = vi.fn();
+    const action: Bridge['action'] = async <T>(
+      _: string,
+      command: Parameters<Bridge['action']>[1],
+    ) => {
+      if (command.type === 'switch_session' && !cancelled) {
+        sessionFile = command.path;
+        cwd = sessionFile === 'a' ? 'alpha' : 'beta';
+      }
+      return (
+        command.type === 'state'
+          ? { sessionFile, cwd }
+          : command.type === 'history'
+            ? { messages: [], before: 0, hasMore: false }
+            : { cancelled }
+      ) as T;
+    };
+    const desktop = new Desktop({
+      ...bridge,
+      action,
+      connect,
+      events: async () => ({ runtimeId: 'r', sequence: 0, events: [] }),
+      sessions: async () => [],
+      save: vi.fn().mockResolvedValue(undefined),
+    });
+    desktop.connection = 'ready';
+    desktop.runtimeId = 'r';
+    desktop.project = 'alpha';
+    desktop.snapshot = { sessionFile: 'a' };
+    desktop.draft = 'alpha draft';
+    cancelled = true;
+    await desktop.openSession('beta', 'b');
+    expect(desktop.project).toBe('alpha');
+    expect(desktop.draft).toBe('alpha draft');
+    cancelled = false;
+    await desktop.openSession('beta', 'b');
+    expect(desktop.project).toBe('beta');
+    expect(desktop.draft).toBe('');
+    desktop.draft = 'beta draft';
+    await desktop.openSession('alpha', 'a');
+    expect(desktop.draft).toBe('alpha draft');
+    await desktop.openSession('beta', 'b');
+    expect(desktop.draft).toBe('beta draft');
+    expect(connect).not.toHaveBeenCalled();
+    expect(desktop.runtimeId).toBe('r');
+  });
+  it('waits for startup prewarming before opening a session without starting a second Pi', async () => {
+    let finish!: (value: Awaited<ReturnType<Bridge['connect']>>) => void;
+    const connect = vi.fn().mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+    );
+    const desktop = new Desktop({
+      ...bridge,
+      connect,
+      save: vi.fn().mockResolvedValue(undefined),
+    });
+    vi.spyOn(desktop, 'refreshMetadata').mockResolvedValue();
+    vi.spyOn(desktop, 'refreshHistory').mockResolvedValue();
+    vi.spyOn(desktop, 'refreshSessions').mockResolvedValue();
+    const switchSession = vi
+      .spyOn(desktop, 'switchSession')
+      .mockResolvedValue();
+    const warming = desktop.connect('alpha');
+    const opening = desktop.openSession('beta', 'b.jsonl');
+    expect(connect).toHaveBeenCalledOnce();
+    expect(switchSession).not.toHaveBeenCalled();
+    finish({
+      runtimeId: 'r',
+      project: 'alpha',
+      snapshot: {},
+      version: '1.4.0',
+      verified: true,
+    });
+    await Promise.all([warming, opening]);
+    expect(connect).toHaveBeenCalledOnce();
+    expect(switchSession).toHaveBeenCalledWith('b.jsonl', 'beta');
   });
   it('does not restore a session after connection failure', async () => {
     const desktop = fixture(vi.fn());
