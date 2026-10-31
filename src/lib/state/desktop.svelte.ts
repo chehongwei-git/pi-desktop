@@ -179,6 +179,17 @@ export class Desktop {
   commands = $state<Command[]>([]);
   builtinRequest = $state<{ name: string; args: string } | null>(null);
   draft = $state('');
+  newChatProject = $state<string | null>(null);
+  /** “+”只准备本地草稿，首次发送前不创建或切换 Pi 会话。 */
+  prepareNewChat(project = this.project, preserveDraft = false): void {
+    if (this.openingSession || this.submitting) return;
+    this.drafts.set(this.draftKey(), this.draft);
+    const text = this.draft;
+    this.newChatProject = project;
+    this.draft = preserveDraft
+      ? text
+      : (this.drafts.get(this.draftKey()) ?? '');
+  }
   notice = $state('');
   error = $state('');
   submitting = $state(false);
@@ -188,6 +199,7 @@ export class Desktop {
   /** 当前标题不依赖索引刷新是否暂时缺项；Pi 返回名称时仍以其为准。 */
   get sessionTitle(): string {
     if (this.openingSession) return this.openingSession.title;
+    if (this.newChatProject !== null) return '新对话';
     const session = this.sessions.find(
       (item) =>
         this.sessionKey(item.path) ===
@@ -248,7 +260,9 @@ export class Desktop {
   constructor(private api: Bridge = bridge) {}
   /** 当前会话草稿键；空白新会话也能在项目之间独立恢复。 */
   private draftKey(): string {
-    return `${this.project}:${this.snapshot.sessionFile ?? 'new'}`;
+    return this.newChatProject !== null
+      ? `draft:${this.newChatProject}`
+      : `${this.project}:${this.snapshot.sessionFile ?? 'new'}`;
   }
   /** 配置初始化失败仍可进入设置修复；普通浏览器预览给出明确桌面环境说明。 */
   async init(): Promise<void> {
@@ -335,6 +349,7 @@ export class Desktop {
       this.version = connected.version;
       this.snapshot = connected.snapshot;
       this.currentSessionTitle = '';
+      this.newChatProject = null;
       this.connection = 'ready';
       this.messages = [];
       this.toolViews = {};
@@ -348,10 +363,11 @@ export class Desktop {
           (p) => this.projectKey(p) !== this.projectKey(this.project),
         ),
       ].slice(0, 20);
-      await this.api.save($state.snapshot(this.settings));
       if (!connected.verified)
         this.notice = `Pi ${connected.version} 未经本版验证，将按 RPC 能力连接。`;
+      // 设置落盘与页面数据读取互不依赖，避免跨项目新建时逐步等待。
       await Promise.all([
+        this.api.save($state.snapshot(this.settings)),
         this.refreshMetadata(),
         this.refreshHistory(),
         this.refreshSessions(),
@@ -555,15 +571,17 @@ export class Desktop {
       this.openingSession = null;
     }
   }
-  /** 空项目由宿主解析为系统用户目录；已有连接时继续在当前项目新建。 */
+  /** 新建期间屏蔽连接/reset 的中间状态，避免旧记录随 runtime/session key 反复挂载。 */
   async newSession(project = this.project): Promise<void> {
-    if (this.connectionTask) await this.connectionTask;
-    if (
-      this.connection !== 'ready' ||
-      this.projectKey(this.project) !== this.projectKey(project)
-    )
-      await this.connect(project);
-    else await this.switchSession();
+    if (this.openingSession) return;
+    this.openingSession = { path: '', title: '新对话' };
+    try {
+      if (this.connectionTask) await this.connectionTask;
+      if (this.connection !== 'ready') await this.connect(project);
+      else await this.switchSession(undefined, project);
+    } finally {
+      this.openingSession = null;
+    }
   }
   /** 历史恢复由宿主投影与分页；首次只接收最后 50 条。 */
   async refreshHistory(before?: number): Promise<void> {
@@ -646,6 +664,17 @@ export class Desktop {
       this.builtinRequest = builtin;
       if (this.draft === text) this.draft = '';
       return;
+    }
+    if (this.newChatProject !== null) {
+      const project = this.newChatProject;
+      try {
+        await this.newSession(project);
+      } finally {
+        // 创建失败或被扩展取消时保留项目选择与首条消息，不能发进原会话。
+        this.draft = text;
+      }
+      if (this.newChatProject !== null || this.connection !== 'ready') return;
+      this.draft = text;
     }
     const sessionFile = this.snapshot.sessionFile;
     const sentAt = new Date().toISOString();
@@ -761,13 +790,18 @@ export class Desktop {
       : '';
     this.drafts.set(this.draftKey(), this.draft);
     const result = await this.action<{ cancelled: boolean }>(
-      path ? { type: 'switch_session', path } : { type: 'new_session' },
+      path
+        ? { type: 'switch_session', path }
+        : this.projectKey(project) !== this.projectKey(this.project)
+          ? { type: 'new_project_session', project }
+          : { type: 'new_session' },
     );
     if (result.cancelled) {
       this.notice = '切换已被 Pi 扩展取消';
       return;
     }
     this.currentSessionTitle = title;
+    this.newChatProject = null;
     this.toolViews = {};
     await this.drain();
     this.accessed.clear();

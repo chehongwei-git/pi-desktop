@@ -17,8 +17,7 @@
   import BuiltinCommandDialog from './lib/components/BuiltinCommandDialog.svelte';
   import SidebarSession from './lib/components/SidebarSession.svelte';
   const desktop = new Desktop();
-  let newChatMode = $state(false);
-  let projectSelection = $state<string | null>(null);
+  let displayProject = $derived(desktop.newChatProject ?? desktop.project);
   let sidebar = $state(true);
   let settingsOpen = $state(false);
   let search = $state('');
@@ -101,7 +100,8 @@
   );
   let lastFocus = 0;
   let empty = $derived(
-    !desktop.openingSession && desktop.messages.length === 0,
+    !desktop.openingSession &&
+      (desktop.newChatProject !== null || desktop.messages.length === 0),
   );
   let modelKey = $derived(
     desktop.snapshot.model
@@ -184,22 +184,12 @@
   /** 新对话可在输入框上方重新选择工作目录。 */
   function newChat(project = desktop.project): void {
     desktop.requestSwitch('开始新对话', async () => {
-      await desktop.newSession(project);
-      if (desktop.connection === 'ready') {
-        newChatMode = true;
-        projectSelection = project;
-      }
+      desktop.prepareNewChat(project);
     });
   }
   function selectNewProject(project: string): void {
     desktop.requestSwitch('选择新对话项目', async () => {
-      const draft = desktop.draft;
-      await desktop.newSession(project);
-      if (desktop.connection === 'ready') {
-        projectSelection = project;
-        desktop.draft = draft;
-        newChatMode = true;
-      }
+      desktop.prepareNewChat(project, true);
     });
   }
   async function createNewProject(): Promise<void> {
@@ -216,8 +206,6 @@
   function selectSession(project: string, path: string): void {
     desktop.requestSwitch('打开历史会话', async () => {
       await desktop.openSession(project, path);
-      newChatMode = false;
-      projectSelection = null;
       sidebar = window.innerWidth > 900;
     });
   }
@@ -299,7 +287,8 @@
   <SidebarSession
     {session}
     {showProject}
-    active={session.path === desktop.snapshot.sessionFile}
+    active={desktop.newChatProject === null &&
+      session.path === desktop.snapshot.sessionFile}
     pinned={desktop.isPinned(session.path)}
     busy={desktop.pinSaving}
     disabled={!!desktop.openingSession}
@@ -402,7 +391,7 @@
                 <button
                   class="project-current"
                   class:active={desktop.projectKey(project.path) ===
-                    desktop.projectKey(desktop.project)}
+                    desktop.projectKey(displayProject)}
                   class:project-dragging={draggingProject === project.path}
                   class:drop-before={dropProject === project.path && !dropAfter}
                   class:drop-after={dropProject === project.path && dropAfter}
@@ -582,13 +571,15 @@
             }}><Icon name="more" /></button
           >{#if sessionMenu}<div class="session-menu">
               <button
-                disabled={!!desktop.openingSession ||
+                disabled={desktop.newChatProject !== null ||
+                  !!desktop.openingSession ||
                   !desktop.snapshot.sessionFile}
                 onclick={() => {
                   void desktop.guard(copyPath);
                 }}>复制会话路径</button
               ><button
-                disabled={!!desktop.openingSession ||
+                disabled={desktop.newChatProject !== null ||
+                  !!desktop.openingSession ||
                   desktop.run !== 'idle' ||
                   !desktop.snapshot.sessionFile}
                 onclick={() => {
@@ -608,7 +599,7 @@
         </div>
       </div>
     </header>
-    {#if desktop.project || desktop.openingSession}
+    {#if displayProject || desktop.newChatProject !== null || desktop.openingSession}
       <div class="conversation-heading">
         <h1 class="session-title" title={desktop.sessionTitle}>
           {desktop.sessionTitle}
@@ -659,14 +650,14 @@
       {:else if empty}<div class="welcome">
           <div class="welcome-logo"><Icon name="pi" size={40} /></div>
           <h1>
-            {desktop.project ? '今天想做些什么？' : '让 Pi 与你的项目一起工作'}
+            {displayProject ? '今天想做些什么？' : '让 Pi 与你的项目一起工作'}
           </h1>
           <p>
-            {desktop.project
-              ? desktop.project
+            {displayProject
+              ? displayProject
               : '直接新建对话，或选择项目文件夹开始。'}
           </p>
-          {#if !desktop.project}<button
+          {#if !displayProject}<button
               class="choose-project"
               onclick={chooseProject}
               ><Icon name="folder" size={18} />选择项目文件夹</button
@@ -734,10 +725,10 @@
                 }}>草稿 {index + 1}</button
               >{/each}
           </div>{/if}
-        {#if newChatMode || empty}
+        {#if desktop.newChatProject !== null || empty}
           <ProjectPicker
             projects={desktop.projects}
-            project={projectSelection ?? desktop.project}
+            project={displayProject}
             disabled={!!desktop.openingSession ||
               desktop.connection === 'starting'}
             onselect={selectNewProject}
@@ -751,7 +742,6 @@
           onsend={(mode) => {
             void desktop.guard(async () => {
               await desktop.send(mode);
-              if (!desktop.draft.trim()) newChatMode = false;
             });
           }}
         />

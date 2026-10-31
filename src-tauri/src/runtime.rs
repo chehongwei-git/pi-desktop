@@ -175,6 +175,9 @@ impl Handle {
                 Ok(cleared)
             }
             Action::NewSession => self.rpc(json!({"type":"new_session"}), Kind::Reset).await,
+            Action::NewProjectSession { .. } => {
+                Err(AppError::new("SESSION", "跨项目新建必须由宿主创建会话"))
+            }
             Action::SwitchSession { path } => {
                 self.rpc(
                     json!({"type":"switch_session","sessionPath":path}),

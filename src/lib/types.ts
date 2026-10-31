@@ -158,6 +158,7 @@ export type Action =
         | 'commands'
         | 'state';
     }
+  | { type: 'new_project_session'; project: string }
   | { type: 'switch_session'; path: string }
   | { type: 'rename'; name: string }
   | { type: 'set_model'; provider: string; model: string }

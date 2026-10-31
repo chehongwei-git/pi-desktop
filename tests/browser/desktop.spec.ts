@@ -17,6 +17,7 @@ async function mock(
       let index = 0;
       let pending: any[] = [];
       let sessionFile = 'mock.jsonl';
+      let cwd = 'C:/Users/mock';
       host.ipcCalls = [];
       const settings = {
         schemaVersion: 1,
@@ -133,6 +134,7 @@ async function mock(
                 host.releaseConnection = resolve;
               });
             channel = args.channel;
+            cwd = args.project || 'C:/Users/mock';
             return {
               runtimeId: 'mock',
               project: args.project || 'C:/Users/mock',
@@ -180,6 +182,10 @@ async function mock(
                   });
                 }
                 return {};
+              case 'new_project_session':
+                cwd = args.action.project || 'C:/Users/mock';
+                sessionFile = 'new-project.jsonl';
+                return { cancelled: false };
               case 'new_session':
                 sessionFile = 'new.jsonl';
                 return { cancelled: false };
@@ -270,6 +276,7 @@ async function mock(
                 return {};
               case 'state':
                 return {
+                  cwd,
                   sessionFile: host.windowsPaths
                     ? sessionFile.replace(/\//g, '\\').toUpperCase()
                     : sessionFile,
@@ -798,6 +805,114 @@ test('session title updates before slow cross-project loading completes', async 
   ).toBeEnabled();
   expect(errors).toEqual([]);
 });
+test('creating a session in another project never remounts the old long transcript', async ({
+  page,
+}) => {
+  const errors: string[] = [];
+  page.on('pageerror', (error) => errors.push(error.message));
+  await mock(page, 300, true);
+  await page.goto('/');
+  await page
+    .getByRole('region', { name: '最近', exact: true })
+    .locator('.history-item')
+    .filter({ hasText: '修复登录' })
+    .click();
+  const transcript = page.locator('.transcript');
+  await expect(transcript).toBeVisible();
+  await expect
+    .poll(() =>
+      transcript.evaluate(
+        (node) => node.scrollHeight - node.clientHeight - node.scrollTop,
+      ),
+    )
+    .toBeLessThan(3);
+  await page.evaluate(() => {
+    const host = window as any;
+    host.deferConnection = true;
+    host.slowSession = 'new-project.jsonl';
+    host.historyMessages = [];
+    host.transcriptMounts = 0;
+    host.transcriptObserver = new MutationObserver((records) => {
+      for (const record of records) {
+        for (const node of record.addedNodes) {
+          if (
+            node instanceof Element &&
+            (node.matches('.transcript') || node.querySelector('.transcript'))
+          )
+            host.transcriptMounts++;
+        }
+      }
+    });
+    host.transcriptObserver.observe(document.querySelector('.conversation'), {
+      childList: true,
+      subtree: true,
+    });
+  });
+  await page
+    .getByRole('button', { name: '在 C:/work/beta 中新建会话', exact: true })
+    .click();
+  await expect(page.locator('.session-title')).toHaveText('新对话');
+  await expect(page.locator('.welcome p')).toHaveText('C:/work/beta');
+  expect(
+    await page.evaluate(
+      () =>
+        (window as any).ipcCalls.filter((call: any) =>
+          ['new_session', 'new_project_session'].includes(call.action?.type),
+        ).length,
+    ),
+  ).toBe(0);
+  const input = page.getByRole('textbox', { name: '消息输入', exact: true });
+  await expect(input).toBeEnabled();
+  await input.fill('首条消息');
+  await input.press('Enter');
+  await expect(page.locator('.conversation')).toHaveAttribute(
+    'aria-busy',
+    'true',
+  );
+  await expect(transcript).toHaveCount(0);
+  await expect(page.locator('.welcome')).toHaveCount(0);
+  await expect(
+    page.getByRole('textbox', { name: '消息输入', exact: true }),
+  ).toBeDisabled();
+  expect(
+    await page.evaluate(
+      () =>
+        (window as any).ipcCalls.filter(
+          (call: any) => call.command === 'connect_pi',
+        ).length,
+    ),
+  ).toBe(1);
+  await expect
+    .poll(() => page.evaluate(() => typeof (window as any).releaseHistory))
+    .toBe('function');
+  await expect(transcript).toHaveCount(0);
+  await expect(page.locator('.welcome')).toHaveCount(0);
+  await page.evaluate(() => (window as any).releaseHistory());
+  await expect(page.locator('.conversation')).toHaveAttribute(
+    'aria-busy',
+    'false',
+  );
+  await expect(page.getByText('这是模拟回答。', { exact: true })).toBeVisible();
+  const actions = await page.evaluate(() =>
+    (window as any).ipcCalls
+      .filter((call: any) => call.command === 'perform')
+      .map((call: any) => call.action),
+  );
+  expect(
+    actions.filter((action: any) => action.type === 'new_project_session'),
+  ).toEqual([{ type: 'new_project_session', project: 'C:/work/beta' }]);
+  expect(actions.filter((action: any) => action.type === 'prompt')).toEqual([
+    { type: 'prompt', message: '首条消息' },
+  ]);
+  expect(
+    await page.evaluate(() => {
+      const host = window as any;
+      host.transcriptObserver.disconnect();
+      return host.transcriptMounts;
+    }),
+  ).toBe(1);
+  expect(errors).toEqual([]);
+});
 test('new conversation without a project starts in the user directory', async ({
   page,
 }) => {
@@ -819,7 +934,7 @@ test('new conversation without a project starts in the user directory', async ({
           ).length,
       ),
     )
-    .toBe(2);
+    .toBe(0);
   const calls = await page.evaluate(() => (window as any).ipcCalls);
   expect(
     calls
@@ -1108,7 +1223,7 @@ test('new conversation project picker searches all projects and supports new dir
     calls
       .filter((c: any) => c.command === 'connect_pi')
       .map((c: any) => c.project),
-  ).toEqual(['', 'C:/work/beta', 'C:/mock/project', '']);
+  ).toEqual(['']);
   await picker.click();
   await page.screenshot({ path: 'test-results/project-picker-light.png' });
   await page.evaluate(() => {

@@ -1,6 +1,7 @@
 //! 应用服务入口：Tauri 命令只表达业务意图；平台与协议实现不泄漏到 UI。
 mod diagnostics;
 mod history;
+mod new_session;
 mod platform;
 mod rpc;
 mod runtime;
@@ -80,18 +81,25 @@ async fn connect_pi(
         project
     };
     let _gate = state.lifecycle.lock().await;
-    if let Some(old) = state.runtime.lock().await.take() {
-        let _ = old.shutdown().await;
-    }
     let settings = state.config()?;
-    let detected = platform::version(&settings).await?;
+    let old = state.runtime.lock().await.take();
+    // 版本探测不加载项目，可与旧进程退出并行；两者结束后才启动新 Agent。
+    // join! 确保探测失败时也等待旧进程完成回收。
+    let (detected, ()) = tokio::join!(platform::version(&settings), async {
+        if let Some(old) = old {
+            let _ = old.shutdown().await;
+        }
+    });
+    let detected = detected?;
     let handle = runtime::start(&settings, project.clone(), channel).await?;
     // 提前保存句柄，让启动时扩展的交互响应能送达，避免信任弹窗与初始化互锁。
     *state.runtime.lock().await = Some(handle.clone());
     let init = tokio::time::timeout(std::time::Duration::from_secs(15), async {
-        let snapshot = handle.action(Action::State).await?;
-        // 历史快照为必需能力；不兼容时在握手阶段回收，而不是留下失败状态的进程。
-        handle.action(Action::History { before: None }).await?;
+        // 两个只读查询独立提交，仍在握手阶段验证必需的历史快照能力。
+        let (snapshot, _) = tokio::try_join!(
+            handle.action(Action::State),
+            handle.action(Action::History { before: None }),
+        )?;
         Ok::<Value, AppError>(snapshot)
     })
     .await;
@@ -121,12 +129,48 @@ async fn disconnect_pi(state: State<'_, AppState>, force: Option<bool>) -> Resul
 }
 /// 白名单业务调用；runtimeId 检查防止旧 UI 请求影响新会话。
 #[tauri::command]
-async fn perform(state: State<'_, AppState>, runtime_id: String, action: Action) -> Result<Value> {
+async fn perform(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    runtime_id: String,
+    action: Action,
+) -> Result<Value> {
     let handle = state.handle().await?;
     if handle.id != runtime_id {
         return Err(AppError::new("STALE_RUNTIME", "会话连接已更新"));
     }
-    handle.action(action).await
+    if let Action::NewProjectSession { project } = action {
+        let project = if project.is_empty() {
+            app.path()
+                .home_dir()
+                .map_err(|error| AppError::new("HOME", error.to_string()))?
+                .to_string_lossy()
+                .into_owned()
+        } else {
+            project
+        };
+        let settings = state.config()?;
+        let empty = tokio::task::spawn_blocking(move || {
+            new_session::EmptySession::create(&settings, &project)
+        })
+        .await
+        .map_err(|_| AppError::new("SESSION", "创建空白会话失败"))??;
+        let result = handle
+            .action(Action::SwitchSession {
+                path: empty.path.to_string_lossy().into(),
+            })
+            .await;
+        // 超时结果未知时保留文件，避免删掉 Pi 已打开的会话。
+        if result
+            .as_ref()
+            .is_ok_and(|value| value["cancelled"] == true)
+        {
+            empty.discard_if_empty();
+        }
+        result
+    } else {
+        handle.action(action).await
+    }
 }
 /// 可靠批次拉取，前端确认游标才回收 spool。
 #[tauri::command]

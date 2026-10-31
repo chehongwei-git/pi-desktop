@@ -134,6 +134,9 @@ pub enum Action {
         mode: String,
     },
     NewSession,
+    NewProjectSession {
+        project: String,
+    },
     SwitchSession {
         path: String,
     },

@@ -8,6 +8,72 @@ function fixture(action: Bridge['action']) {
   return new Desktop({ ...bridge, action });
 }
 describe('desktop business behavior', () => {
+  it('prepares project drafts locally and creates exactly once on the first send', async () => {
+    const action = vi.fn().mockImplementation(async (_runtime, command) => {
+      if (command.type === 'state')
+        return { cwd: 'beta', sessionFile: 'new.jsonl' };
+      if (command.type === 'history')
+        return { messages: [], before: 0, hasMore: false };
+      return { cancelled: false };
+    });
+    const connect = vi.fn();
+    const desktop = new Desktop({
+      ...bridge,
+      action,
+      connect,
+      save: vi.fn().mockResolvedValue(undefined),
+      sessions: async () => [],
+      events: async () => ({ runtimeId: 'r', sequence: 0, events: [] }),
+    });
+    desktop.connection = 'ready';
+    desktop.runtimeId = 'r';
+    desktop.project = 'alpha';
+    desktop.snapshot = { cwd: 'alpha', sessionFile: 'old.jsonl' };
+    desktop.draft = '原会话草稿';
+    desktop.prepareNewChat('beta');
+    expect(desktop.draft).toBe('');
+    desktop.draft = '首条消息';
+    desktop.prepareNewChat('gamma', true);
+    desktop.prepareNewChat('beta', true);
+    expect(action).not.toHaveBeenCalled();
+    expect(connect).not.toHaveBeenCalled();
+    expect(desktop.snapshot.sessionFile).toBe('old.jsonl');
+    await desktop.send();
+    expect(
+      action.mock.calls.filter(
+        ([, command]) => command.type === 'new_project_session',
+      ),
+    ).toEqual([['r', { type: 'new_project_session', project: 'beta' }]]);
+    expect(action).toHaveBeenCalledWith('r', {
+      type: 'prompt',
+      message: '首条消息',
+      mode: undefined,
+    });
+    expect(desktop.newChatProject).toBeNull();
+    expect(desktop.draft).toBe('');
+    expect(desktop.project).toBe('beta');
+    expect(connect).not.toHaveBeenCalled();
+  });
+  it('keeps a new-chat draft without sending into the old session when creation is cancelled or fails', async () => {
+    const action = vi.fn().mockResolvedValue({ cancelled: true });
+    const desktop = fixture(action);
+    desktop.connection = 'ready';
+    desktop.project = 'alpha';
+    desktop.prepareNewChat('beta');
+    desktop.draft = '保留首条消息';
+    await desktop.send();
+    expect(desktop.newChatProject).toBe('beta');
+    expect(desktop.draft).toBe('保留首条消息');
+    action.mockRejectedValueOnce(new Error('failed'));
+    await expect(desktop.send()).rejects.toThrow('failed');
+    expect(desktop.newChatProject).toBe('beta');
+    expect(desktop.draft).toBe('保留首条消息');
+    expect(
+      action.mock.calls.every(
+        ([, command]) => command.type === 'new_project_session',
+      ),
+    ).toBe(true);
+  });
   it('cancels pending and newly arriving plan dialogs during stop', async () => {
     let finish!: (value: unknown) => void;
     const action = vi.fn().mockImplementation(async (_runtime, command) => {
@@ -307,6 +373,142 @@ describe('desktop business behavior', () => {
     expect(desktop.sessionTitle).toBe('原会话');
     desktop.snapshot.sessionName = '重命名后的会话';
     expect(desktop.sessionTitle).toBe('重命名后的会话');
+  });
+  it('keeps new-session loading active through connection and history and ignores repeated switches', async () => {
+    let finishConnection!: (
+      value: Awaited<ReturnType<Bridge['connect']>>,
+    ) => void;
+    let finishHistory!: () => void;
+    const connect = vi.fn().mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          finishConnection = resolve;
+        }),
+    );
+    const desktop = new Desktop({
+      ...bridge,
+      connect,
+      save: vi.fn().mockResolvedValue(undefined),
+    });
+    vi.spyOn(desktop, 'refreshMetadata').mockResolvedValue();
+    vi.spyOn(desktop, 'refreshSessions').mockResolvedValue();
+    vi.spyOn(desktop, 'refreshHistory').mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          finishHistory = resolve;
+        }),
+    );
+    desktop.project = 'alpha';
+    desktop.snapshot = { sessionName: '旧会话' };
+    const creating = desktop.newSession('beta');
+    expect(desktop.sessionTitle).toBe('新对话');
+    expect(desktop.openingSession).not.toBeNull();
+    await desktop.newSession('gamma');
+    await desktop.openSession('alpha', 'old.jsonl');
+    expect(connect).toHaveBeenCalledOnce();
+    finishConnection({
+      runtimeId: 'new-runtime',
+      project: 'beta',
+      snapshot: {},
+      version: '1.4.0',
+      verified: true,
+    });
+    await vi.waitFor(() => expect(finishHistory).toBeTypeOf('function'));
+    expect(desktop.openingSession).not.toBeNull();
+    finishHistory();
+    await creating;
+    expect(desktop.openingSession).toBeNull();
+    expect(desktop.project).toBe('beta');
+  });
+  it('loads a cross-project new session while recent-project settings are still being saved', async () => {
+    let finishSave!: () => void;
+    const save = vi.fn().mockImplementation(
+      () =>
+        new Promise<void>((resolve) => {
+          finishSave = resolve;
+        }),
+    );
+    const desktop = new Desktop({
+      ...bridge,
+      connect: vi.fn().mockResolvedValue({
+        runtimeId: 'beta-runtime',
+        project: 'beta',
+        snapshot: {},
+        version: '1.4.0',
+        verified: true,
+      }),
+      save,
+    });
+    const metadata = vi.spyOn(desktop, 'refreshMetadata').mockResolvedValue();
+    const history = vi.spyOn(desktop, 'refreshHistory').mockResolvedValue();
+    const sessions = vi.spyOn(desktop, 'refreshSessions').mockResolvedValue();
+    desktop.project = 'alpha';
+    const creating = desktop.newSession('beta');
+    await vi.waitFor(() => expect(save).toHaveBeenCalledOnce());
+    expect(metadata).toHaveBeenCalledOnce();
+    expect(history).toHaveBeenCalledOnce();
+    expect(sessions).toHaveBeenCalledOnce();
+    expect(desktop.openingSession).not.toBeNull();
+    finishSave();
+    await creating;
+    expect(desktop.openingSession).toBeNull();
+    expect(desktop.project).toBe('beta');
+  });
+  it('releases new-session loading and preserves the old conversation on cancellation or failure', async () => {
+    const action = vi.fn().mockResolvedValue({ cancelled: true });
+    const desktop = fixture(action);
+    desktop.connection = 'ready';
+    desktop.project = 'alpha';
+    desktop.snapshot = { sessionName: '旧会话' };
+    desktop.draft = '保留草稿';
+    await desktop.newSession('beta');
+    expect(action).toHaveBeenCalledWith('', {
+      type: 'new_project_session',
+      project: 'beta',
+    });
+    expect(desktop.project).toBe('alpha');
+    expect(desktop.openingSession).toBeNull();
+    expect(desktop.sessionTitle).toBe('旧会话');
+    expect(desktop.draft).toBe('保留草稿');
+    action.mockRejectedValueOnce(new Error('new failed'));
+    await expect(desktop.newSession('beta')).rejects.toThrow('new failed');
+    expect(desktop.openingSession).toBeNull();
+    expect(desktop.sessionTitle).toBe('旧会话');
+    expect(desktop.draft).toBe('保留草稿');
+  });
+  it('reuses the runtime when creating a blank session in another project', async () => {
+    const action = vi.fn().mockResolvedValue({ cancelled: false });
+    const connect = vi.fn();
+    const desktop = new Desktop({
+      ...bridge,
+      action,
+      connect,
+      save: vi.fn().mockResolvedValue(undefined),
+    });
+    desktop.connection = 'ready';
+    desktop.runtimeId = 'existing-runtime';
+    desktop.project = 'alpha';
+    desktop.snapshot = { sessionFile: 'old.jsonl', cwd: 'alpha' };
+    desktop.draft = 'alpha draft';
+    vi.spyOn(desktop, 'syncState').mockImplementation(async () => {
+      desktop.snapshot = { sessionFile: 'blank.jsonl', cwd: 'beta' };
+    });
+    vi.spyOn(desktop as any, 'drain').mockResolvedValue(undefined);
+    vi.spyOn(desktop, 'refreshHistory').mockImplementation(async () => {
+      desktop.messages = [];
+    });
+    vi.spyOn(desktop, 'refreshMetadata').mockResolvedValue();
+    vi.spyOn(desktop, 'refreshSessions').mockResolvedValue();
+    await desktop.newSession('beta');
+    expect(connect).not.toHaveBeenCalled();
+    expect(action).toHaveBeenCalledWith('existing-runtime', {
+      type: 'new_project_session',
+      project: 'beta',
+    });
+    expect(desktop.runtimeId).toBe('existing-runtime');
+    expect(desktop.project).toBe('beta');
+    expect(desktop.draft).toBe('');
+    expect(desktop.sessionTitle).toBe('新对话');
   });
   it('uses the host-resolved home directory for a new conversation without a project', async () => {
     const connect = vi.fn().mockResolvedValue({
