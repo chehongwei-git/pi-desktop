@@ -133,6 +133,41 @@ describe('desktop business behavior', () => {
     expect(desktop.project).toBe('beta');
     expect(connect).not.toHaveBeenCalled();
   });
+  it.each([
+    [
+      '/workspace/project',
+      '/sessions/original.jsonl',
+      '/sessions/original.jsonl',
+    ],
+    [
+      'C:/work/project',
+      '\\\\?\\C:\\sessions\\original.jsonl',
+      'c:/SESSIONS/ORIGINAL.jsonl',
+    ],
+  ])(
+    'returns from a local new-chat draft without invoking switch hooks (%s)',
+    async (project, activePath, targetPath) => {
+      const action = vi.fn().mockResolvedValue({ cancelled: true });
+      const desktop = fixture(action);
+      desktop.connection = 'ready';
+      desktop.project = project;
+      desktop.snapshot = { sessionFile: activePath };
+      desktop.draft = '原会话草稿';
+      desktop.toggleTool('tool', 'output');
+      const messages = desktop.messages;
+      desktop.prepareNewChat('another-project');
+      desktop.draft = '新对话草稿';
+      await desktop.openSession(project, targetPath);
+      expect(action).not.toHaveBeenCalled();
+      expect(desktop.newChatProject).toBeNull();
+      expect(desktop.openingSession).toBeNull();
+      expect(desktop.draft).toBe('原会话草稿');
+      expect(desktop.messages).toBe(messages);
+      expect(desktop.toolViews.tool.output).toBe(true);
+      desktop.prepareNewChat('another-project');
+      expect(desktop.draft).toBe('新对话草稿');
+    },
+  );
   it('keeps a new-chat draft without sending into the old session when creation is cancelled or fails', async () => {
     const action = vi.fn().mockResolvedValue({ cancelled: true });
     const desktop = fixture(action);

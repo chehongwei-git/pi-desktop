@@ -710,6 +710,19 @@ export class Desktop {
   /** 已有历史直接交给 Pi 切换，Pi 根据 header.cwd 重建项目服务。 */
   async openSession(project: string, path: string): Promise<void> {
     if (this.openingSession) return;
+    // 新对话尚未提交时，后台仍是原会话；返回它只需退出本地草稿页。
+    // 避免重新恢复同一会话触发扩展切换钩子，使返回操作被取消或挂起。
+    if (
+      this.newChatProject !== null &&
+      this.connection === 'ready' &&
+      this.snapshot.sessionFile &&
+      this.sessionKey(path) === this.sessionKey(this.snapshot.sessionFile)
+    ) {
+      this.drafts.set(this.draftKey(), this.draft);
+      this.newChatProject = null;
+      this.draft = this.drafts.get(this.draftKey()) ?? '';
+      return;
+    }
     this.openingSession = {
       path,
       title: this.sessionLabel(path) || '新会话',
