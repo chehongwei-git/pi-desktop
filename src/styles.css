@@ -558,19 +558,6 @@ button svg {
   font-weight: 600;
   margin-right: 1px;
 }
-.model-select,
-.thinking-select {
-  border: 0;
-  background: transparent;
-  font-size: 12px;
-  color: var(--muted);
-  max-width: 280px;
-  padding: 6px;
-  cursor: pointer;
-}
-.thinking-select {
-  max-width: 90px;
-}
 .connection {
   font-size: 10px;
   color: var(--muted);
@@ -929,7 +916,7 @@ button svg {
   box-shadow: 0 2px 6px #00000003;
 }
 .composer:focus-within {
-  border-color: var(--border);
+  border-color: var(--accent);
 }
 .composer.disabled {
   opacity: 0.65;
@@ -952,13 +939,24 @@ button svg {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding-top: 12px;
+  padding-top: 14px;
+  gap: 12px;
+  align-items: flex-end;
+}
+/* 模型和强度贴近输入，与发送区分列；窄窗口自然换行，不挤压草稿。 */
+.composer-options {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
 }
 .composer-hint {
   font-size: 10px;
   color: var(--muted);
 }
 .composer-actions {
+  flex-shrink: 0;
   display: flex;
   align-items: center;
   gap: 6px;
@@ -1593,6 +1591,17 @@ dialog::backdrop {
     transition: none !important;
   }
 }
+@media (max-width: 600px) {
+  .composer-bottom {
+    flex-wrap: wrap;
+  }
+  .composer-options {
+    flex-basis: 100%;
+  }
+  .composer-actions {
+    margin-inline-start: auto;
+  }
+}
 /* 窄窗口侧栏变成抽屉，主聊天宽度不再被 260px 压缩。 */
 @media (max-width: 900px) {
   .app-shell,
@@ -1625,9 +1634,6 @@ dialog::backdrop {
   }
   .connection {
     display: none;
-  }
-  .model-select {
-    max-width: 210px;
   }
   .composer-area {
     width: calc(100% - 40px);

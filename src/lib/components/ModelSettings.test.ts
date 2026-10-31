@@ -132,7 +132,8 @@ describe('model settings', () => {
     const summary = view.getByText('Remote model', { selector: 'strong' });
     await fireEvent.click(summary);
     expect(view.getByLabelText('上下文长度（tokens）')).toBeInTheDocument();
-    expect(view.getByLabelText('思考能力')).toBeInTheDocument();
+    expect(view.getByLabelText('思考能力')).toHaveValue('true');
+    expect(view.getByLabelText('此模型的默认思考等级')).toHaveValue('off');
     expect(discoverModels).toHaveBeenCalledOnce();
   });
   it('retains manual entry and reports discovery errors locally', async () => {
@@ -151,5 +152,7 @@ describe('model settings', () => {
     );
     await fireEvent.click(view.getByRole('button', { name: '手动添加模型' }));
     expect(view.getByText('新模型')).toBeInTheDocument();
+    expect(view.getByLabelText('思考能力')).toHaveValue('true');
+    expect(view.getByLabelText('此模型的默认思考等级')).toHaveValue('off');
   });
 });

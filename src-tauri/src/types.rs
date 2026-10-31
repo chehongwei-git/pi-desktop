@@ -46,7 +46,17 @@ pub struct SidebarItem {
     pub state: Option<String>,
 }
 
-/// 应用配置仅存启动方式和界面偏好；Pi 凭据始终留在 Pi 目录。
+/// 工作项目的会话统一使用此模型偏好；不含凭据，不修改历史消息。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectModelPreference {
+    pub project: String,
+    pub provider: String,
+    pub model: String,
+    pub thinking_level: String,
+}
+
+/// 应用配置存启动方式、项目模型和界面偏好；Pi 凭据始终留在 Pi 目录。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct Settings {
@@ -59,6 +69,7 @@ pub struct Settings {
     pub project_order: Vec<String>,
     pub pinned_sessions: Vec<String>,
     pub sidebar_items: Vec<SidebarItem>,
+    pub project_models: Vec<ProjectModelPreference>,
     pub theme: String,
     pub zoom: u32,
 }
@@ -75,6 +86,7 @@ impl Default for Settings {
             project_order: vec![],
             pinned_sessions: vec![],
             sidebar_items: vec![],
+            project_models: vec![],
             theme: "system".into(),
             zoom: 100,
         }

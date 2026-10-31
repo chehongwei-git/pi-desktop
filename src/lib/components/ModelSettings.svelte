@@ -193,8 +193,9 @@
     provider.models.push({
       id,
       overrideOnly,
-      values: name ? { name } : {},
-      defaultThinking: null,
+      // 新模型显式声明思考能力，默认关闭强度，避免继承 Pi 的 medium 默认值。
+      values: { ...(name ? { name } : {}), reasoning: true },
+      defaultThinking: 'off',
     });
     visibleCount = provider.models.length;
   }
@@ -486,8 +487,8 @@
             <section class="card">
               <h3>模型与能力</h3>
               <p>
-                远端缺少能力元数据时继承 Pi
-                默认，不猜测图片或思考能力。再次获取不会覆盖已有参数。
+                新模型默认支持思考，强度为 off，可按服务端能力调整。
+                图片、上下文和输出长度继承 Pi 默认。再次获取不会覆盖已有参数。
               </p>
               {#if !configured.length}<p class="empty-models">
                   尚未配置模型。获取远端列表或手动添加模型 ID。

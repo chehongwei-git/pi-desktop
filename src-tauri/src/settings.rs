@@ -88,6 +88,25 @@ mod tests {
             vec!["session.jsonl"]
         );
     }
+    /// 老配置缺省为空；项目模型与强度经 JSON 保存读取后完整保留。
+    #[test]
+    fn project_models_are_backward_compatible_and_persisted() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("settings.json"), r#"{"schemaVersion":1}"#).unwrap();
+        let mut settings = load(dir.path()).unwrap();
+        assert!(settings.project_models.is_empty());
+        settings.project_models.push(crate::types::ProjectModelPreference {
+            project: "工作项目".into(),
+            provider: "test".into(),
+            model: "model-b".into(),
+            thinking_level: "high".into(),
+        });
+        save(dir.path(), &settings).unwrap();
+        let saved = load(dir.path()).unwrap();
+        assert_eq!(saved.project_models[0].project, "工作项目");
+        assert_eq!(saved.project_models[0].model, "model-b");
+        assert_eq!(saved.project_models[0].thinking_level, "high");
+    }
     #[test]
     fn invalid_zoom_is_rejected() {
         let dir = tempfile::tempdir().unwrap();

@@ -6,6 +6,7 @@ import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
 
+const defaultThinking = process.argv.includes('--thinking-off') ? 'off' : 'max';
 const directory = await mkdtemp(join(tmpdir(), 'pi-desktop-models-'));
 const pending = new Map();
 let serial = 0;
@@ -45,11 +46,13 @@ try {
     JSON.stringify({
       defaultProvider: 'desktop-test',
       defaultModel: 'test-model',
-      modelThinkingLevels: { 'desktop-test/test-model': 'max' },
+      defaultThinkingLevel: defaultThinking,
+      modelThinkingLevels: { 'desktop-test/test-model': defaultThinking },
     }),
   );
   // 显式入口支持 Windows JS 安装；不通过 cmd 或 shell 执行。
-  const entry = process.argv[2] || 'pi';
+  const entry =
+    process.argv.slice(2).find((arg) => arg !== '--thinking-off') || 'pi';
   const script = /\.[cm]?js$/i.test(entry);
   const args = [
     '--mode',
@@ -103,7 +106,10 @@ try {
     });
   }
   const state = await request('get_state');
-  if (state.model?.id !== 'test-model' || state.thinkingLevel !== 'max')
+  if (
+    state.model?.id !== 'test-model' ||
+    state.thinkingLevel !== defaultThinking
+  )
     throw new Error('模型或默认思考等级未加载');
   const available = await request('get_available_models');
   const model = available.models.find((m) => m.id === 'test-model');
@@ -122,7 +128,7 @@ try {
   const after = await request('get_state');
   if (after.sessionId !== state.sessionId) throw new Error('刷新改变了会话');
   console.log(
-    '真实 Pi 模型参数、图片能力、max 默认等级、禁用 xhigh 与模型刷新通过；未调用模型。',
+    `真实 Pi 模型参数、图片能力、${defaultThinking} 默认等级、禁用 xhigh 与模型刷新通过；未调用模型。`,
   );
 } finally {
   for (const p of pending.values()) clearTimeout(p.timer);

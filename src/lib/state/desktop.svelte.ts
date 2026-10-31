@@ -324,6 +324,7 @@ export class Desktop {
   newChatProject = $state<string | null>(null);
   // 首次发送创建真实会话会恢复 Pi 默认模型，显式选择需在创建后再次应用。
   private newChatModel: string | null = null;
+  private newChatThinking: string | undefined;
   /** “+”只准备本地草稿，首次发送前不创建或切换 Pi 会话。 */
   prepareNewChat(project = this.project, preserveDraft = false): void {
     if (this.openingSession || this.submitting) return;
@@ -541,6 +542,7 @@ export class Desktop {
         this.refreshHistory(),
         this.refreshSessions(),
       ]);
+      if (generation === this.generation) await this.applyProjectModel();
     } catch (error) {
       if (generation === this.generation) {
         this.connection = 'failed';
@@ -745,6 +747,7 @@ export class Desktop {
       this.newChatProject = null;
       this.newChatModel = null;
       this.draft = this.drafts.get(this.draftKey()) ?? '';
+      await this.applyProjectModel();
       return;
     }
     this.openingSession = {
@@ -855,6 +858,9 @@ export class Desktop {
       return;
     }
     if (this.newChatProject !== null) {
+      // 创建真实会话也会恢复默认强度，在创建前保留输入区的最终选择。
+      if (this.newChatModel)
+        this.newChatThinking = this.snapshot.thinkingLevel ?? 'off';
       const project = this.newChatProject;
       try {
         await this.newSession(project);
@@ -866,10 +872,15 @@ export class Desktop {
       this.draft = text;
     }
     if (this.newChatModel) {
-      // 应用失败时保留选择和首条消息；重试只应用模型，不重复创建会话或发送。
-      await this.applyModel(this.newChatModel);
+      // 项目偏好优先于早先的草稿选择，失败重试不重复创建会话。
+      const preference = this.projectModel(this.project);
+      if (!preference)
+        await this.applyModel(this.newChatModel, this.newChatThinking);
       this.newChatModel = null;
+      this.newChatThinking = undefined;
     }
+    if (this.projectModel(this.project) && this.run === 'idle')
+      await this.applyProjectModel();
     const sessionFile = this.snapshot.sessionFile;
     const sentAt = new Date().toISOString();
     const delivery = mode ?? (this.run !== 'idle' ? 'steer' : undefined);
@@ -927,6 +938,7 @@ export class Desktop {
       this.refreshMetadata(),
       this.refreshSessions(),
     ]);
+    await this.applyProjectModel();
   }
   /** 停止先清队列再 abort；5 秒后提供强制断开入口，保留草稿和当前消息。 */
   async stop(): Promise<void> {
@@ -1011,6 +1023,7 @@ export class Desktop {
       this.refreshSessions(),
     ]);
     this.draft = this.drafts.get(this.draftKey()) ?? '';
+    await this.applyProjectModel();
     if (this.projectKey(previousProject) !== this.projectKey(this.project)) {
       this.settings.recentProjects = [
         this.project,
@@ -1039,14 +1052,114 @@ export class Desktop {
     await this.syncState();
     await this.refreshSessions();
   }
-  /** 模型切换后重读思考等级，避免沿用新模型不支持的选项。 */
+  /** 项目偏好按规范化目录隔离；新对话草稿以其目标目录为准。 */
+  private projectModel(project = this.newChatProject ?? this.project) {
+    return this.settings.projectModels?.find(
+      (item) => this.projectKey(item.project) === this.projectKey(project),
+    );
+  }
+  /** 跨项目本地草稿显示其项目偏好，后台会话仍在原项目。 */
+  get selectedModel(): Model | undefined {
+    const preference = this.projectModel();
+    return preference
+      ? (this.models.find(
+          (model) =>
+            model.provider === preference.provider &&
+            model.id === preference.model,
+        ) ?? {
+          provider: preference.provider,
+          id: preference.model,
+          name: preference.model,
+        })
+      : this.snapshot.model;
+  }
+  get selectedThinking(): string {
+    return (
+      this.projectModel()?.thinkingLevel ?? this.snapshot.thinkingLevel ?? 'off'
+    );
+  }
+  private async rememberProjectModel(project: string): Promise<void> {
+    const model = this.snapshot.model;
+    if (!project || !model) return;
+    const preference = {
+      project,
+      provider: model.provider,
+      model: model.id,
+      thinkingLevel: this.snapshot.thinkingLevel ?? 'off',
+    };
+    const projectModels = [
+      ...(this.settings.projectModels ?? []).filter(
+        (item) => this.projectKey(item.project) !== this.projectKey(project),
+      ),
+      preference,
+    ];
+    // 先写入内存保留已确认的选择；磁盘失败明确提示，用户可重试保存。
+    this.settings.projectModels = projectModels;
+    try {
+      await this.api.save($state.snapshot(this.settings));
+    } catch (cause) {
+      throw new Error(
+        `当前会话已应用，但项目设置保存失败：${errorMessage(cause)}`,
+      );
+    }
+  }
+  /** 恢复项目统一值；旧会话自身记录不能覆盖项目选择，发送前也会重新核对。 */
+  private async applyProjectModel(): Promise<void> {
+    const preference = this.projectModel(this.project);
+    if (!preference || this.run !== 'idle') return;
+    const key = `${preference.provider}/${preference.model}`;
+    if (
+      this.snapshot.model?.provider === preference.provider &&
+      this.snapshot.model?.id === preference.model &&
+      this.snapshot.thinkingLevel === preference.thinkingLevel
+    )
+      return;
+    await this.applyModel(key, preference.thinkingLevel);
+  }
+  /** 模型与强度确认后统一保存到工作项目，不修改其他项目。 */
   async setModel(key: string): Promise<void> {
     const model = this.models.find((m) => `${m.provider}/${m.id}` === key);
     if (!model) return;
-    await this.applyModel(key);
+    const project = this.newChatProject ?? this.project;
+    const runtime = this.runtimeId;
+    const session = this.snapshot.sessionFile;
+    await this.applyModel(key, this.projectModel(project)?.thinkingLevel);
+    if (runtime !== this.runtimeId || session !== this.snapshot.sessionFile)
+      return;
     if (this.newChatProject !== null) this.newChatModel = key;
+    await this.rememberProjectModel(project);
   }
-  private async applyModel(key: string): Promise<void> {
+  /** 所有强度入口共用此方法，确保项目模型与强度作为一组持久化。 */
+  async setThinking(level: string): Promise<void> {
+    const project = this.newChatProject ?? this.project;
+    const runtime = this.runtimeId;
+    const session = this.snapshot.sessionFile;
+    const preference = this.projectModel(project);
+    if (
+      preference &&
+      (this.snapshot.model?.provider !== preference.provider ||
+        this.snapshot.model?.id !== preference.model)
+    ) {
+      await this.applyModel(
+        `${preference.provider}/${preference.model}`,
+        preference.thinkingLevel,
+      );
+      if (runtime !== this.runtimeId || session !== this.snapshot.sessionFile)
+        return;
+    }
+    await this.action({ type: 'set_thinking', level });
+    await this.syncState();
+    if (runtime !== this.runtimeId || session !== this.snapshot.sessionFile)
+      return;
+    if (project && this.snapshot.model)
+      await this.rememberProjectModel(project);
+  }
+  private async applyModel(
+    key: string,
+    thinkingLevel = this.snapshot.thinkingLevel ?? 'off',
+  ): Promise<void> {
+    const runtime = this.runtimeId;
+    const session = this.snapshot.sessionFile;
     const model = this.models.find((m) => `${m.provider}/${m.id}` === key);
     if (!model) throw new Error('所选模型已不可用，请重新选择模型。');
     await this.action({
@@ -1055,6 +1168,32 @@ export class Desktop {
       model: model.id,
     });
     await this.syncState();
+    if (runtime !== this.runtimeId || session !== this.snapshot.sessionFile)
+      return;
+    // 单独查询新模型支持等级，查询失败时不能依赖旧目录判断或继续发送。
+    const { levels = [] } = await this.action<{ levels: string[] }>({
+      type: 'thinking_levels',
+    });
+    if (runtime !== this.runtimeId || session !== this.snapshot.sessionFile)
+      return;
+    this.levels = levels;
+    if (this.snapshot.thinkingLevel !== thinkingLevel) {
+      if (levels.includes(thinkingLevel)) {
+        try {
+          await this.action({ type: 'set_thinking', level: thinkingLevel });
+        } catch (cause) {
+          await this.syncState();
+          throw new Error(
+            `模型已切换，但保留思考强度失败：${errorMessage(cause)}`,
+          );
+        }
+        await this.syncState();
+      }
+      if (runtime !== this.runtimeId || session !== this.snapshot.sessionFile)
+        return;
+      if (this.snapshot.thinkingLevel !== thinkingLevel)
+        this.notice = `当前模型无法使用思考强度 ${thinkingLevel}，已采用 ${this.snapshot.thinkingLevel ?? 'off'}。`;
+    }
     await this.refreshMetadata();
   }
   /** 读取前 64KiB 用于虚拟列表重新挂载，全文由分块对话框浏览。 */
@@ -1114,6 +1253,7 @@ export class Desktop {
         return;
       await this.syncState();
       await this.refreshMetadata();
+      await this.applyProjectModel();
       this.modelConfigPending = false;
       this.modelConfigStatus =
         '已保存并应用；默认值用于后续新会话，必要时重新连接 Pi';
@@ -1126,8 +1266,13 @@ export class Desktop {
   }
   /** 配置更新原子持久化，运行时配置需重新连接才生效。 */
   async saveSettings(settings: Settings): Promise<void> {
-    await this.api.save(settings);
-    this.settings = settings;
+    // 设置表单可能早于项目选择打开，保留运行期间更新的项目统一值。
+    const merged = {
+      ...settings,
+      projectModels: $state.snapshot(this.settings.projectModels),
+    };
+    await this.api.save(merged);
+    this.settings = merged;
     await this.refreshSessions();
   }
   /** 连接诊断只返回版本与路径，不读凭据。 */

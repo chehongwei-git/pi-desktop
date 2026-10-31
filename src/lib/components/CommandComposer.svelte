@@ -1,6 +1,7 @@
 <!-- 命令菜单只在输入区域持有层级状态；执行由 Desktop 和白名单 Action 完成。 -->
 <script lang="ts">
   import Composer from './Composer.svelte';
+  import ModelControls from './ModelControls.svelte';
   import type { Desktop } from '../state/desktop.svelte';
   import type { Action } from '../types';
   import { errorMessage } from '../client';
@@ -23,6 +24,7 @@
     | 'tree_options';
   let page = $state<Page | null>(null);
   let busy = $state(false);
+  let modelChanging = $state(false);
   let loading = $state(false);
   let error = $state('');
   let origin = $state('');
@@ -102,7 +104,7 @@
       desktop.error = 'Pi 已断开，请重新连接后执行命令；草稿仍可编辑。';
       return true;
     }
-    if (desktop.run !== 'idle') {
+    if (desktop.run !== 'idle' || modelChanging) {
       desktop.error = '请等待当前任务结束后执行命令。';
       return true;
     }
@@ -255,19 +257,18 @@
         return;
       }
       if (target === 'model') await desktop.setModel(name);
+      else if (target === 'thinking') await desktop.setThinking(name);
       else {
         const action: Action =
-          target === 'thinking'
-            ? { type: 'set_thinking', level: name }
-            : target === 'auto_compaction'
-              ? { type: 'set_auto_compaction', enabled: name === '开启' }
-              : {
-                  type:
-                    target === 'steering_mode'
-                      ? 'set_steering_mode'
-                      : 'set_follow_up_mode',
-                  mode: name === '全部处理' ? 'all' : 'one-at-a-time',
-                };
+          target === 'auto_compaction'
+            ? { type: 'set_auto_compaction', enabled: name === '开启' }
+            : {
+                type:
+                  target === 'steering_mode'
+                    ? 'set_steering_mode'
+                    : 'set_follow_up_mode',
+                mode: name === '全部处理' ? 'all' : 'one-at-a-time',
+              };
         await desktop.action(action);
         await desktop.syncState();
       }
@@ -314,6 +315,7 @@
     ['starting', 'stopping'].includes(desktop.connection)}
   running={desktop.run !== 'idle'}
   submitting={desktop.submitting ||
+    modelChanging ||
     busy ||
     loading ||
     desktop.connection !== 'ready'}
@@ -343,4 +345,12 @@
   onstop={() => {
     void desktop.guard(() => desktop.stop());
   }}
-/>
+>
+  {#snippet controls()}
+    <ModelControls
+      {desktop}
+      bind:busy={modelChanging}
+      disabled={busy || loading || page !== null}
+    />
+  {/snippet}
+</Composer>

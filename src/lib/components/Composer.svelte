@@ -1,6 +1,6 @@
 <!-- 输入器只有草稿与提交意图，不知道 RPC；组合输入、自动高度和发送模式在此收敛。 -->
 <script lang="ts">
-  import { tick } from 'svelte';
+  import { tick, type Snippet } from 'svelte';
   import Icon from './Icon.svelte';
   import { shouldSend } from '../state/reducer';
   import {
@@ -20,6 +20,7 @@
     commands = [],
     unavailableCommands = [],
     menu,
+    controls,
     onchoose,
     onback,
     oncommand,
@@ -32,6 +33,7 @@
     submitting?: boolean;
     commands?: Command[];
     unavailableCommands?: string[];
+    controls?: Snippet;
     menu?: {
       title: string;
       items: { name: string; description?: string }[];
@@ -305,13 +307,16 @@
       composing = false;
     }}></textarea>
   <div class="composer-bottom">
-    <span class="composer-hint"
-      >{!menu && /^\/compact(?:\s|$)/.test(value)
-        ? '语法：/compact [可选压缩要求] · Enter 直接执行压缩'
-        : running
-          ? 'Enter 发送引导 · Shift + Enter 换行'
-          : 'Shift + Enter 换行'}</span
-    >
+    <div class="composer-options">
+      {#if controls}{@render controls()}{/if}
+      <span class="composer-hint"
+        >{!menu && /^\/compact(?:\s|$)/.test(value)
+          ? '语法：/compact [可选压缩要求] · Enter 直接执行压缩'
+          : running
+            ? 'Enter 发送引导 · Shift + Enter 换行'
+            : 'Shift + Enter 换行'}</span
+      >
+    </div>
     <div class="composer-actions">
       {#if running}
         <button

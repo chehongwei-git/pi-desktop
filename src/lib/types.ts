@@ -5,6 +5,13 @@ export interface SidebarItem {
   name?: string | null;
   state?: 'archived' | 'deleted' | null;
 }
+/** 同一工作目录的所有会话共享模型与强度，路径使用 Desktop.projectKey 比较。 */
+export interface ProjectModelPreference {
+  project: string;
+  provider: string;
+  model: string;
+  thinkingLevel: string;
+}
 export interface Settings {
   schemaVersion: number;
   piPath: string;
@@ -15,6 +22,7 @@ export interface Settings {
   projectOrder: string[];
   pinnedSessions: string[];
   sidebarItems?: SidebarItem[];
+  projectModels?: ProjectModelPreference[];
   theme: 'system' | 'light' | 'dark';
   zoom: number;
 }

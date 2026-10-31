@@ -205,7 +205,8 @@ pub fn load(dir: &Path) -> Result<ModelSettings> {
         providers,
         default_provider: optional(&settings, "defaultProvider"),
         default_model: optional(&settings, "defaultModel"),
-        default_thinking_level: optional(&settings, "defaultThinkingLevel"),
+        default_thinking_level: optional(&settings, "defaultThinkingLevel")
+            .or_else(|| Some("off".into())),
     })
 }
 fn read_model(
@@ -215,17 +216,23 @@ fn read_model(
     settings: &Value,
     provider: &str,
 ) -> ModelConfig {
+    let mut values: BTreeMap<String, Value> = MODEL_FIELDS
+        .iter()
+        .filter(|k| **k != "id")
+        .filter_map(|k| m.get(*k).map(|v| ((*k).into(), v.clone())))
+        .collect();
+    // 自定义模型不再继承 Pi 的“不支持思考”；已有显式关闭或等级选择仍然保留。
+    if !override_only {
+        values.entry("reasoning".into()).or_insert(json!(true));
+    }
     ModelConfig {
         id: id.into(),
         override_only,
-        values: MODEL_FIELDS
-            .iter()
-            .filter(|k| **k != "id")
-            .filter_map(|k| m.get(*k).map(|v| ((*k).into(), v.clone())))
-            .collect(),
+        values,
         default_thinking: settings["modelThinkingLevels"][format!("{provider}/{id}")]
             .as_str()
-            .map(str::to_owned),
+            .map(str::to_owned)
+            .or_else(|| (!override_only).then(|| "off".into())),
     }
 }
 fn set_optional(v: &mut Value, key: &str, value: &Option<String>) {
@@ -741,6 +748,44 @@ mod tests {
             "CONFIG_CONFLICT"
         );
     }
+    #[test]
+    fn custom_models_default_to_reasoning_with_thinking_off_and_keep_explicit_choices() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("models.json"),
+            json!({"providers": {"test": {
+                "baseUrl": "https://example.test/v1", "api": "openai-responses",
+                "models": [{"id": "new"}, {"id": "disabled", "reasoning": false}],
+                "modelOverrides": {"catalog": {"maxTokens": 1000}}
+            }}})
+            .to_string(),
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join("settings.json"),
+            r#"{"modelThinkingLevels":{"test/disabled":"off"}}"#,
+        )
+        .unwrap();
+        let form = load(dir.path()).unwrap();
+        assert_eq!(form.default_thinking_level.as_deref(), Some("off"));
+        let models = &form.providers[0].models;
+        assert_eq!(models[0].values["reasoning"], true);
+        assert_eq!(models[0].default_thinking.as_deref(), Some("off"));
+        assert_eq!(models[1].values["reasoning"], false);
+        assert!(!models[2].values.contains_key("reasoning"));
+        assert!(models[2].default_thinking.is_none());
+        save(dir.path(), form).unwrap();
+        let bytes = raw(dir.path()).unwrap();
+        assert_eq!(
+            parse(&bytes[0], "models.json").unwrap()["providers"]["test"]["models"][0]["reasoning"],
+            true
+        );
+        assert_eq!(
+            parse(&bytes[2], "settings.json").unwrap()["modelThinkingLevels"]["test/new"],
+            "off"
+        );
+    }
+
     #[test]
     fn auth_only_providers_do_not_create_empty_model_config() {
         let dir = tempfile::tempdir().unwrap();

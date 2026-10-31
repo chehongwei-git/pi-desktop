@@ -1,6 +1,12 @@
 /** 内联命令通过真实键盘事件验证层级、搜索、IME 和草稿；不创建 Pi 进程。 */
 import '@testing-library/jest-dom/vitest';
-import { cleanup, fireEvent, render, waitFor } from '@testing-library/svelte';
+import {
+  cleanup,
+  fireEvent,
+  render,
+  waitFor,
+  within,
+} from '@testing-library/svelte';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import CommandComposer from './CommandComposer.svelte';
 import { Desktop } from '../state/desktop.svelte';
@@ -53,7 +59,9 @@ describe('inline command menus', () => {
     const setModel = vi.spyOn(desktop, 'setModel').mockResolvedValue();
     const view = render(CommandComposer, { desktop, onsend: vi.fn() });
     await fireEvent.keyDown(view.getByRole('textbox'), { key: 'Enter' });
-    expect(view.getAllByRole('option').length).toBeLessThanOrEqual(40);
+    expect(
+      view.getByRole('listbox').querySelectorAll('[role="option"]').length,
+    ).toBeLessThanOrEqual(40);
     await fireEvent.input(view.getByRole('textbox'), {
       target: { value: 'm4999' },
     });
@@ -207,7 +215,11 @@ describe('inline command menus', () => {
     });
     const view = render(CommandComposer, { desktop, onsend: vi.fn() });
     await fireEvent.keyDown(view.getByRole('textbox'), { key: 'Enter' });
-    await waitFor(() => expect(view.getAllByRole('option')).toHaveLength(40));
+    await waitFor(() =>
+      expect(
+        view.getByRole('listbox').querySelectorAll('[role="option"]'),
+      ).toHaveLength(40),
+    );
     await fireEvent.input(view.getByRole('textbox'), {
       target: { value: 'node-1999' },
     });
@@ -220,14 +232,16 @@ describe('inline command menus', () => {
     vi.spyOn(desktop, 'syncState').mockResolvedValue();
     const view = render(CommandComposer, { desktop, onsend: vi.fn() });
     await fireEvent.keyDown(view.getByRole('textbox'), { key: 'Enter' });
-    await fireEvent.click(view.getByRole('option', { name: 'high' }));
+    await fireEvent.click(
+      within(view.getByRole('listbox')).getByRole('option', { name: 'high' }),
+    );
     await waitFor(() =>
       expect(action).toHaveBeenCalledWith('', {
         type: 'set_thinking',
         level: 'high',
       }),
     );
-    expect(desktop.draft).toBe('');
+    await waitFor(() => expect(desktop.draft).toBe(''));
   });
   it('resumes a selected session through the session transaction', async () => {
     const { desktop } = fixture();

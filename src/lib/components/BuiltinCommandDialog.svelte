@@ -77,8 +77,7 @@
         case 'thinking':
           if (!desktop.levels.includes(input))
             throw new Error('请选择当前模型支持的思考级别。');
-          await desktop.action({ type: 'set_thinking', level: input });
-          await desktop.syncState();
+          await desktop.setThinking(input);
           output = `思考级别：${input}`;
           break;
         case 'name':

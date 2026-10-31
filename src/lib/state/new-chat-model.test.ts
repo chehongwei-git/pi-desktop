@@ -10,8 +10,10 @@ describe('new chat model selection', () => {
       const gpt = { provider: 'openai', id: 'gpt', name: 'GPT' };
       const deepseek = { provider: 'proxy', id: 'deepseek', name: 'DeepSeek' };
       let current = gpt;
+      let thinkingLevel = 'high';
       let fail = false;
       let creations = 0;
+      let sessionFile = 'old.jsonl';
       const sent: string[] = [];
       const action = vi.fn().mockImplementation(async (_runtime, command) => {
         if (
@@ -19,14 +21,25 @@ describe('new chat model selection', () => {
           command.type === 'new_project_session'
         ) {
           creations++;
+          sessionFile = 'new.jsonl';
           current = gpt;
+          thinkingLevel = 'off';
         }
         if (command.type === 'set_model') {
           if (fail) throw new Error('model unavailable');
           current = command.model === 'deepseek' ? deepseek : gpt;
+          thinkingLevel = 'off';
         }
+        if (command.type === 'set_thinking') thinkingLevel = command.level;
+        if (command.type === 'thinking_levels')
+          return { levels: ['off', 'high'] };
         if (command.type === 'state')
-          return { cwd: project, sessionFile: 'new.jsonl', model: current };
+          return {
+            cwd: project,
+            sessionFile,
+            model: current,
+            thinkingLevel,
+          };
         if (command.type === 'prompt') sent.push(current.id);
         return { cancelled: false };
       });
@@ -39,7 +52,12 @@ describe('new chat model selection', () => {
       desktop.runtimeId = 'r';
       desktop.project = 'alpha';
       desktop.models = [gpt, deepseek];
-      desktop.snapshot = { cwd: 'alpha', sessionFile: 'old.jsonl', model: gpt };
+      desktop.snapshot = {
+        cwd: 'alpha',
+        sessionFile,
+        model: gpt,
+        thinkingLevel,
+      };
       vi.spyOn(desktop, 'refreshMetadata').mockResolvedValue();
       vi.spyOn(desktop, 'refreshHistory').mockResolvedValue();
       vi.spyOn(desktop, 'refreshSessions').mockResolvedValue();
@@ -56,6 +74,8 @@ describe('new chat model selection', () => {
       expect(creations).toBe(1);
       expect(sent).toEqual(['deepseek']);
       expect(desktop.snapshot.model?.id).toBe('deepseek');
+      expect(thinkingLevel).toBe('high');
+      expect(desktop.snapshot.thinkingLevel).toBe('high');
       expect(desktop.draft).toBe('');
     },
   );

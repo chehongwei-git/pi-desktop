@@ -267,11 +267,6 @@
     !desktop.openingSession &&
       (desktop.newChatProject !== null || desktop.messages.length === 0),
   );
-  let modelKey = $derived(
-    desktop.snapshot.model
-      ? `${desktop.snapshot.model.provider}/${desktop.snapshot.model.id}`
-      : '',
-  );
   let runLabel = $derived(
     {
       idle: '',
@@ -962,42 +957,7 @@
               onclick={() => {
                 void setSidebar(true);
               }}><Icon name="panel" /></button
-            >{/if}<span class="product-name">Pi</span><select
-            class="model-select"
-            aria-label="模型"
-            value={modelKey}
-            disabled={!!desktop.openingSession ||
-              desktop.connection !== 'ready' ||
-              desktop.run !== 'idle'}
-            onchange={(event) => {
-              void desktop.guard(() =>
-                desktop.setModel(event.currentTarget.value),
-              );
-            }}
-            ><option value=""
-              >{desktop.connection === 'starting'
-                ? '正在连接…'
-                : '选择模型'}</option
-            >{#each desktop.models as model}<option
-                value={`${model.provider}/${model.id}`}
-                >{model.name} · {model.provider}</option
-              >{/each}</select
-          >{#if desktop.levels.length > 1}<select
-              class="thinking-select"
-              aria-label="思考级别"
-              value={desktop.snapshot.thinkingLevel ?? 'off'}
-              disabled={!!desktop.openingSession || desktop.run !== 'idle'}
-              onchange={(event) => {
-                const level = event.currentTarget.value;
-                void desktop.guard(async () => {
-                  await desktop.action({ type: 'set_thinking', level });
-                  await desktop.syncState();
-                });
-              }}
-              >{#each desktop.levels as level}<option value={level}
-                  >{level}</option
-                >{/each}</select
-            >{/if}
+            >{/if}<span class="product-name">Pi</span>
         </div>
         <div class="topbar-right">
           <span

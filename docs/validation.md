@@ -59,6 +59,15 @@ TAURI_BUNDLER_TOOLS_GITHUB_MIRROR=https://v4.gh-proxy.org/https://github.com npm
 - 修改的 Rust 文件通过 stable rustfmt 检查，`git diff --check` 通过。全仓库 `cargo fmt --check` 仍被 rpc.rs、runtime.rs 中已有格式差异阻塞，本次未修改这些文件。
 - 本次未执行 Windows/Linux 实机验证或重新打包安装器。
 
+## 思考默认值与输入区模型控件调整（macOS）
+
+- 手动新增与远端发现模型默认 reasoning=true、默认强度 off；Rust 覆盖已有自定义模型缺省值、显式配置保留及保存结果，28 项测试通过。
+- 前端 143 项单元/组件测试通过；TypeScript/Svelte 无错误和警告；Vite 与 Rust 开发构建通过。
+- 本机 Chrome 45 项模拟 IPC 浏览器测试全部通过，新增输入框内模型与强度选择、Tab 焦点、切换失败恢复及草稿保留、390px 深色布局验证。已检查浅色和深色截图。
+- `node scripts/verify-model-config.mjs --thinking-off` 通过：真实 Pi 加载支持思考的模型时默认 off，仍可枚举扩展等级并刷新，未调用生成模型。
+- Playwright 默认 Chromium 未安装，验证使用临时系统 Chrome 配置，完成后移除。修改的 Rust 文件格式与 `git diff --check` 通过。
+- 未重新打包发行安装器，未执行 Windows/Linux 实机或真实服务端思考生成验证。
+
 ## 尚待验收与已知限制
 
 - Pi 1.4.0 的真实模型发送、真实 CLI 历史恢复、工具和扩展交互仍需使用者实机验收；模拟协议不等同于完整用户环境。
