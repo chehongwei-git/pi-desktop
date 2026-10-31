@@ -134,7 +134,7 @@ export class Desktop {
       const previous = this.sidebarItem(kind, path);
       const item = { ...previous, kind, path, ...change };
       if (item.state === 'deleted') item.state = 'archived';
-      if (item.name !== undefined) {
+      if (item.name != null) {
         item.name = item.name.trim();
         if (!item.name || item.name.length > 200)
           throw new Error('名称须为 1 至 200 个字符。');

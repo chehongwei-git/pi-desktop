@@ -2,8 +2,8 @@
 export interface SidebarItem {
   kind: 'project' | 'session';
   path: string;
-  name?: string;
-  state?: 'archived' | 'deleted';
+  name?: string | null;
+  state?: 'archived' | 'deleted' | null;
 }
 export interface Settings {
   schemaVersion: number;

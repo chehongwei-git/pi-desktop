@@ -517,26 +517,33 @@ button svg {
   border: 0;
   font-size: 12px;
 }
-.banner {
-  margin: 0 24px 8px;
+.notice-stack {
+  position: absolute;
+  top: 112px;
+  right: 16px;
+  z-index: 12;
+  width: min(380px, calc(100% - 32px));
+  max-height: calc(60% - 112px);
   display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 9px 12px;
-  border-radius: 9px;
-  font-size: 12px;
-  line-height: 1.5;
+  flex-direction: column;
+  gap: 10px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  padding: 4px;
+  pointer-events: none;
 }
-.banner > span {
-  flex: 1;
-  overflow-wrap: anywhere;
+.notice-stack.collection-notices {
+  position: relative;
+  top: auto;
+  right: auto;
+  align-self: flex-end;
+  flex-shrink: 0;
+  max-height: 30dvh;
+  margin: 8px 16px 0;
 }
-.error-banner {
-  color: var(--error);
-  background: color-mix(in srgb, var(--error) 7%, var(--bg));
-}
-.notice-banner {
-  background: var(--accent-soft);
+.notice-stack:empty {
+  display: none;
 }
 .conversation-heading {
   padding: 0 24px 12px;

@@ -16,6 +16,8 @@
       'M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8ZM12 2v3m0 14v3M2 12h3m14 0h3M5 5l2 2m10 10 2 2M5 19l2-2M17 7l2-2',
     copy: 'M9 9h12v12H9V9ZM15 5V3H3v12h2',
     check: 'm5 12 4 4L19 6',
+    info: 'M12 11v6M12 7h.01M22 12a10 10 0 1 1-20 0 10 10 0 0 1 20 0Z',
+    warning: 'm12 3 10 18H2L12 3ZM12 9v5M12 17h.01',
     more: 'M5 12h.01M12 12h.01M19 12h.01',
     stop: 'M6 6h12v12H6z',
     refresh:
