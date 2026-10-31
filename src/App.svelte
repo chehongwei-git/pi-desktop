@@ -16,6 +16,8 @@
   import ExtensionDialog from './lib/components/ExtensionDialog.svelte';
   import BuiltinCommandDialog from './lib/components/BuiltinCommandDialog.svelte';
   import SidebarSession from './lib/components/SidebarSession.svelte';
+  import SidebarRename from './lib/components/SidebarRename.svelte';
+  import type { SidebarItem } from './lib/types';
   import SidebarContextMenu from './lib/components/SidebarContextMenu.svelte';
   import SidebarCollection from './lib/components/SidebarCollection.svelte';
   import MessageNotice from './lib/components/MessageNotice.svelte';
@@ -26,6 +28,17 @@
   let settingsVisible = $derived(
     settingsOpen || desktop.builtinRequest?.name === 'settings',
   );
+  let settingsPage = $state<SettingsDialog>();
+  /** 管理视图切换先经过设置草稿保护，成功导航时再清理页面状态。 */
+  function leaveSettings(action: () => void): void {
+    if (settingsVisible && settingsPage) settingsPage.requestLeave(action);
+    else action();
+  }
+  function hideSettings(): void {
+    settingsOpen = false;
+    if (desktop.builtinRequest?.name === 'settings')
+      desktop.builtinRequest = null;
+  }
   let settingsTrigger: HTMLElement | null = null;
   function openSettings(): void {
     if (settingsVisible) return;
@@ -33,6 +46,7 @@
       document.activeElement instanceof HTMLElement
         ? document.activeElement
         : null;
+    sidebarCollection = null;
     settingsOpen = true;
     sidebar = window.innerWidth > 900;
   }
@@ -50,15 +64,118 @@
     target?.focus({ preventScroll: true });
   }
   let search = $state('');
+  let editing = $state<{
+    kind: SidebarItem['kind'];
+    path: string;
+    label: string;
+    entry: string;
+    origin: HTMLElement;
+  } | null>(null);
+  let searchCollapsed = $state<string[]>([]);
+  let recentLimit = $state(20);
+  let projectLimits = $state<Record<string, number>>({});
+  let preferencesReady = $state(false);
+  let preferenceError = $state('');
+  /** 搜索折叠独立于普通浏览偏好。 */
+  function isSectionExpanded(key: string, normal: boolean): boolean {
+    return searching ? !searchCollapsed.includes(key) : normal;
+  }
+  function toggleSearch(key: string): void {
+    searchCollapsed = searchCollapsed.includes(key)
+      ? searchCollapsed.filter((item) => item !== key)
+      : [...searchCollapsed, key];
+  }
+  function toggleSection(
+    key: 'pinned' | 'projects' | 'recent',
+    event: MouseEvent,
+  ): void {
+    (event.currentTarget as HTMLElement).focus({ preventScroll: true });
+    if (editing) {
+      document
+        .querySelector<HTMLInputElement>('.sidebar-rename input')
+        ?.focus();
+      return;
+    }
+    if (searching) {
+      toggleSearch(key);
+      return;
+    }
+    if (key === 'pinned') pinnedOpen = !pinnedOpen;
+    if (key === 'projects') {
+      projectsOpen = !projectsOpen;
+      showAllProjects = false;
+    }
+    if (key === 'recent') recentOpen = !recentOpen;
+  }
+  async function setSidebar(open: boolean): Promise<void> {
+    if (!open && editing) {
+      document
+        .querySelector<HTMLInputElement>('.sidebar-rename input')
+        ?.focus();
+      return;
+    }
+    sidebar = open;
+    await tick();
+    (open
+      ? searchInput
+      : document.querySelector<HTMLElement>(
+          '.main-pane [aria-label="展开侧栏"]',
+        )
+    )?.focus({ preventScroll: true });
+  }
+  async function finishRename(): Promise<void> {
+    const origin = editing?.origin;
+    const host = origin?.closest<HTMLElement>('[data-entry]');
+    const entry = editing?.entry;
+    editing = null;
+    await tick();
+    const replacement = [
+      ...document.querySelectorAll<HTMLElement>('[data-entry]'),
+    ].find((node) => node.dataset.entry === entry);
+    (origin?.isConnected
+      ? origin
+      : ((host?.isConnected ? host : replacement)?.querySelector<HTMLElement>(
+          '[data-sidebar-kind]',
+        ) ?? searchInput)
+    )?.focus({ preventScroll: true });
+  }
+  $effect(() => {
+    search;
+    searchCollapsed = [];
+    recentLimit = 20;
+    projectLimits = {};
+  });
+  /** 界面偏好采用独立存储，搜索不会覆盖正常展开状态。 */
+  $effect(() => {
+    if (!preferencesReady) return;
+    try {
+      localStorage.setItem(
+        'pi-desktop-sidebar',
+        JSON.stringify({
+          sidebar,
+          pinnedOpen,
+          projectsOpen,
+          recentOpen,
+          expandedProjects: desktop.expandedProjects,
+        }),
+      );
+    } catch {
+      preferenceError = '侧栏布局暂时无法保存。';
+    }
+  });
   let pinnedOpen = $state(true);
   let projectsOpen = $state(true);
   let recentOpen = $state(true);
   let sidebarCollection = $state<'archived' | null>(null);
   let collectionTrigger: HTMLElement | null = null;
   function openCollection(event: MouseEvent, collection: 'archived'): void {
-    collectionTrigger = event.currentTarget as HTMLElement;
-    sidebarCollection = collection;
-    sidebar = window.innerWidth > 900;
+    const trigger = event.currentTarget as HTMLElement;
+    leaveSettings(() => {
+      hideSettings();
+      collectionTrigger = trigger;
+      sidebarCollection = collection;
+      sidebar = window.innerWidth > 900;
+    });
   }
   async function closeCollection(): Promise<void> {
     sidebarCollection = null;
@@ -109,7 +226,7 @@
   }
   let searching = $derived(!!search.trim());
   function matchesSession(session: SessionSummary): boolean {
-    return `${session.name} ${session.preview}`
+    return `${session.name} ${session.preview} ${desktop.projectName(session.cwd)} ${session.cwd}`
       .toLowerCase()
       .includes(search.trim().toLowerCase());
   }
@@ -134,7 +251,7 @@
         ...project,
         sessions: query
           ? project.sessions.filter((session) =>
-              `${session.name} ${session.preview}`
+              `${session.name} ${session.preview} ${desktop.projectName(session.cwd)} ${session.cwd}`
                 .toLowerCase()
                 .includes(query),
             )
@@ -165,6 +282,27 @@
     }[desktop.run],
   );
   onMount(() => {
+    try {
+      const saved = JSON.parse(
+        localStorage.getItem('pi-desktop-sidebar') || 'null',
+      );
+      if (saved && typeof saved === 'object') {
+        if (typeof saved.sidebar === 'boolean') sidebar = saved.sidebar;
+        if (typeof saved.pinnedOpen === 'boolean')
+          pinnedOpen = saved.pinnedOpen;
+        if (typeof saved.projectsOpen === 'boolean')
+          projectsOpen = saved.projectsOpen;
+        if (typeof saved.recentOpen === 'boolean')
+          recentOpen = saved.recentOpen;
+        if (Array.isArray(saved.expandedProjects))
+          desktop.expandedProjects = saved.expandedProjects.filter(
+            (path: unknown) => typeof path === 'string',
+          );
+      }
+    } catch {
+      preferenceError = '未能读取侧栏布局，已使用默认布局。';
+    }
+    preferencesReady = true;
     void desktop.init();
     const media = window.matchMedia('(prefers-color-scheme: dark)');
     themeDark = media.matches;
@@ -230,9 +368,12 @@
   }
   /** 新对话可在输入框上方重新选择工作目录。 */
   function newChat(project = desktop.project): void {
-    sidebarCollection = null;
-    desktop.requestSwitch('开始新对话', async () => {
-      desktop.prepareNewChat(project);
+    leaveSettings(() => {
+      desktop.requestSwitch('开始新对话', async () => {
+        hideSettings();
+        sidebarCollection = null;
+        desktop.prepareNewChat(project);
+      });
     });
   }
   function selectNewProject(project: string): void {
@@ -252,14 +393,31 @@
   }
   /** 复用 Pi 恢复历史；被扩展取消时门面保持原状态。 */
   function selectSession(project: string, path: string): void {
-    desktop.requestSwitch('打开历史会话', async () => {
-      await desktop.openSession(project, path);
-      sidebarCollection = null;
-      sidebar = window.innerWidth > 900;
+    leaveSettings(() => {
+      desktop.requestSwitch('打开历史会话', async () => {
+        await desktop.openSession(project, path);
+        hideSettings();
+        sidebarCollection = null;
+        sidebar = window.innerWidth > 900;
+      });
     });
   }
   /** 快捷键与普通输入不冲突；原生 dialog 已处理 Escape/焦点约束。 */
   function keydown(event: KeyboardEvent): void {
+    if (event.defaultPrevented) return;
+    if (
+      event.key === 'Escape' &&
+      sidebar &&
+      (document.activeElement as Element)?.closest('.sidebar') &&
+      !editing
+    ) {
+      event.preventDefault();
+      if (search) {
+        search = '';
+        searchInput.focus();
+      } else if (window.innerWidth <= 900) void setSidebar(false);
+      return;
+    }
     if (
       (event.ctrlKey || event.metaKey) &&
       !event.altKey &&
@@ -287,7 +445,7 @@
         sidebar = true;
         queueMicrotask(() => searchInput?.focus());
       }
-      if (key === 'b') sidebar = !sidebar;
+      if (key === 'b') void setSidebar(!sidebar);
       if (key === ',') openSettings();
     }
   }
@@ -332,28 +490,61 @@
 </script>
 
 <svelte:window onkeydown={keydown} onfocus={focus} />
-<SidebarContextMenu {desktop} />
-{#snippet sessionItem(session: SessionSummary, showProject = false)}
-  <SidebarSession
-    {session}
-    {showProject}
-    active={desktop.newChatProject === null &&
-      session.path === desktop.snapshot.sessionFile}
-    pinned={desktop.isPinned(session.path)}
-    busy={desktop.pinSaving}
-    disabled={!!desktop.openingSession}
-    onopen={() => selectSession(session.cwd, session.path)}
-    onpin={() => {
-      void desktop.guard(() => desktop.togglePin(session.path));
-    }}
-  />
+<SidebarContextMenu
+  {desktop}
+  onrename={(kind, path, label, origin) => {
+    if (editing) {
+      document
+        .querySelector<HTMLInputElement>('.sidebar-rename input')
+        ?.focus();
+      return;
+    }
+    editing = {
+      kind,
+      path,
+      label,
+      origin,
+      entry: origin.closest<HTMLElement>('[data-entry]')?.dataset.entry ?? '',
+    };
+  }}
+/>
+{#snippet sessionItem(
+  session: SessionSummary,
+  showProject = false,
+  location = 'project',
+)}
+  <div data-entry={`${location}:${session.path}`}>
+    {#if editing?.kind === 'session' && editing.entry === `${location}:${session.path}`}
+      <SidebarRename
+        {desktop}
+        kind="session"
+        path={session.path}
+        label={editing.label}
+        onclose={() => {
+          void finishRename();
+        }}
+      />
+    {:else}
+      <SidebarSession
+        {session}
+        {showProject}
+        active={desktop.newChatProject === null &&
+          session.path === desktop.snapshot.sessionFile}
+        pinned={desktop.isPinned(session.path)}
+        busy={desktop.pinSaving}
+        disabled={!!desktop.openingSession}
+        onopen={() => selectSession(session.cwd, session.path)}
+        onpin={() => desktop.guard(() => desktop.togglePin(session.path))}
+      />
+    {/if}
+  </div>
 {/snippet}
 <div class="app-shell" class:sidebar-hidden={!sidebar}>
   {#if sidebar}<button
       class="sidebar-backdrop"
       aria-label="收起侧栏"
       onclick={() => {
-        sidebar = false;
+        void setSidebar(false);
       }}
     ></button>{/if}
   <aside class="sidebar" class:open={sidebar} aria-label="项目与历史会话">
@@ -364,7 +555,7 @@
         aria-label="收起侧栏"
         title="Ctrl/Cmd+B"
         onclick={() => {
-          sidebar = false;
+          void setSidebar(false);
         }}><Icon name="panel" /></button
       >
     </div>
@@ -376,191 +567,273 @@
       <Icon name="search" size={16} /><input
         bind:this={searchInput}
         bind:value={search}
+        disabled={!!editing}
         placeholder="搜索会话"
         aria-label="搜索历史会话"
       />
+      {#if search}<button
+          class="icon-button"
+          disabled={!!editing}
+          aria-label="清除会话搜索"
+          onclick={() => {
+            search = '';
+            searchInput.focus();
+          }}>×</button
+        >{/if}
     </div>
+    {#if searching}<p class="sidebar-search-summary" role="status">
+        搜索结果 · {recentSessions.length} 个会话
+      </p>{/if}
+    {#if preferenceError}<p class="sidebar-search-summary" role="status">
+        {preferenceError}
+      </p>{/if}
     <nav
       class="history-list"
       aria-label="项目与历史会话"
       aria-busy={desktop.loadingSessions}
     >
-      <section class="sidebar-section" aria-label="置顶">
-        <div class="section-label">
-          <button
-            class="section-toggle"
-            aria-expanded={pinnedOpen || searching}
-            onclick={() => {
-              pinnedOpen = !pinnedOpen;
-            }}
-          >
-            <span
-              class="project-chevron"
-              class:collapsed={!(pinnedOpen || searching)}
-              ><Icon name="down" size={13} /></span
-            >
-            <span>置顶</span><small>{pinnedSessions.length}</small>
-          </button>
-        </div>
-        {#if pinnedOpen || searching}
-          {#each pinnedSessions as session (session.path)}
-            {@render sessionItem(session, true)}
-          {:else}<div class="history-empty">
-              {searching ? '没有匹配的置顶会话' : '点击会话旁的图钉置顶'}
-            </div>{/each}
-        {/if}
-      </section>
-      <section class="sidebar-section" aria-label="工作项目">
-        <div class="section-label">
-          <button
-            class="section-toggle"
-            aria-expanded={projectsOpen || searching}
-            onclick={() => {
-              projectsOpen = !projectsOpen;
-              showAllProjects = false;
-            }}
-          >
-            <span
-              class="project-chevron"
-              class:collapsed={!(projectsOpen || searching)}
-              ><Icon name="down" size={13} /></span
-            >
-            <span>工作项目</span><small>{projects.length}</small>
-          </button>
-          <button
-            class="icon-button"
-            aria-label="选择项目文件夹"
-            onclick={chooseProject}><Icon name="plus" size={15} /></button
-          >
-        </div>
-        {#if projectsOpen || searching}
-          {#each visibleProjects as project (desktop.projectKey(project.path))}
-            {@const expanded = desktop.isExpanded(project.path) || searching}
-            <div class="project-group">
-              <div class="project-row">
-                <button
-                  class="project-current"
-                  data-sidebar-kind="project"
-                  data-sidebar-path={project.path}
-                  data-sidebar-label={desktop.projectName(project.path)}
-                  class:active={desktop.projectKey(project.path) ===
-                    desktop.projectKey(displayProject)}
-                  class:project-dragging={draggingProject === project.path}
-                  class:drop-before={dropProject === project.path && !dropAfter}
-                  class:drop-after={dropProject === project.path && dropAfter}
-                  draggable={!desktop.projectOrderSaving}
-                  title={project.path + '（拖拽排序，或 Alt+↑/↓）'}
-                  ondragstart={(event) => {
-                    draggingProject = project.path;
-                    event.dataTransfer?.setData('text/plain', project.path);
-                    if (event.dataTransfer)
-                      event.dataTransfer.effectAllowed = 'move';
-                  }}
-                  ondragend={clearProjectDrag}
-                  ondragover={(event) => {
-                    if (!draggingProject || desktop.projectOrderSaving) return;
-                    event.preventDefault();
-                    if (event.dataTransfer)
-                      event.dataTransfer.dropEffect = 'move';
-                    const bounds = event.currentTarget.getBoundingClientRect();
-                    dropProject = project.path;
-                    dropAfter = event.clientY > bounds.top + bounds.height / 2;
-                  }}
-                  ondragleave={() => {
-                    if (dropProject === project.path) dropProject = '';
-                  }}
-                  ondrop={(event) => projectDrop(event, project.path)}
-                  onkeydown={(event) => projectReorderKey(event, project.path)}
-                  aria-expanded={expanded}
-                  onclick={() => desktop.toggleProject(project.path)}
-                >
-                  <span class="project-chevron" class:collapsed={!expanded}
-                    ><Icon name="down" size={13} /></span
-                  >
-                  <Icon name="folder" size={17} /><span class="project-name"
-                    >{desktop.projectName(project.path)}</span
-                  >
-                  <small>{project.sessions.length}</small>
-                </button>
-                <button
-                  class="icon-button project-new"
-                  aria-label={`在 ${project.path} 中新建会话`}
-                  onclick={() => newChat(project.path)}
-                  ><Icon name="plus" size={15} /></button
-                >
-              </div>
-              {#if expanded}
-                <div class="project-sessions">
-                  {#each project.sessions as session (session.path)}
-                    {@render sessionItem(session)}
-                  {:else}<div class="history-empty">
-                      暂无会话，点击 + 开始对话
-                    </div>{/each}
-                </div>
-              {/if}
-            </div>
-          {:else}<div class="history-empty" role="status">
-              {desktop.loadingSessions
-                ? '正在加载工作区…'
-                : searching
-                  ? '没有匹配的会话'
-                  : '还没有 Pi 工作区，可直接新建对话'}
-            </div>{/each}
-          {#if !searching && projects.length > 5}
+      {#if !searching || pinnedSessions.length > 0}
+        <section class="sidebar-section" aria-label="置顶">
+          <div class="section-label">
             <button
-              class="text-button show-more"
-              onclick={() => {
-                showAllProjects = !showAllProjects;
-              }}
+              class="section-toggle"
+              aria-expanded={isSectionExpanded('pinned', pinnedOpen)}
+              onclick={(event) => toggleSection('pinned', event)}
             >
-              {showAllProjects
-                ? '收起更多项目'
-                : `显示全部 ${projects.length} 个项目`}
+              <span
+                class="project-chevron"
+                class:collapsed={!isSectionExpanded('pinned', pinnedOpen)}
+                ><Icon name="down" size={13} /></span
+              >
+              <span>置顶</span><small>{pinnedSessions.length}</small>
             </button>
+          </div>
+          {#if isSectionExpanded('pinned', pinnedOpen)}
+            {#each pinnedSessions as session (session.path)}
+              {@render sessionItem(session, true, 'pinned')}
+            {:else}<div class="history-empty">
+                {searching ? '没有匹配的置顶会话' : '点击会话旁的图钉置顶'}
+              </div>{/each}
           {/if}
-        {/if}
-      </section>
-      <section class="sidebar-section" aria-label="最近">
-        <div class="section-label">
-          <button
-            class="section-toggle"
-            aria-expanded={recentOpen || searching}
-            onclick={() => {
-              recentOpen = !recentOpen;
-            }}
-          >
-            <span
-              class="project-chevron"
-              class:collapsed={!(recentOpen || searching)}
-              ><Icon name="down" size={13} /></span
+        </section>
+      {/if}
+      {#if !searching || projects.length > 0}
+        <section class="sidebar-section" aria-label="工作项目">
+          <div class="section-label">
+            <button
+              class="section-toggle"
+              aria-expanded={isSectionExpanded('projects', projectsOpen)}
+              onclick={(event) => toggleSection('projects', event)}
             >
-            <span>最近</span><small>{recentSessions.length}</small>
-          </button>
+              <span
+                class="project-chevron"
+                class:collapsed={!isSectionExpanded('projects', projectsOpen)}
+                ><Icon name="down" size={13} /></span
+              >
+              <span>工作项目</span><small>{projects.length}</small>
+            </button>
+            <button
+              class="icon-button"
+              aria-label="选择项目文件夹"
+              onclick={chooseProject}><Icon name="plus" size={15} /></button
+            >
+          </div>
+          {#if isSectionExpanded('projects', projectsOpen)}
+            {#each visibleProjects as project (desktop.projectKey(project.path))}
+              {@const expanded = isSectionExpanded(
+                `project:${project.path}`,
+                desktop.isExpanded(project.path),
+              )}
+              <div class="project-group" data-entry={`project:${project.path}`}>
+                {#if editing?.kind === 'project' && editing.path === project.path}
+                  <SidebarRename
+                    {desktop}
+                    kind="project"
+                    path={project.path}
+                    label={editing.label}
+                    onclose={() => {
+                      void finishRename();
+                    }}
+                  />
+                {:else}
+                  <div class="project-row">
+                    <button
+                      class="project-current"
+                      data-sidebar-kind="project"
+                      data-sidebar-path={project.path}
+                      data-sidebar-label={desktop.projectName(project.path)}
+                      class:active={desktop.projectKey(project.path) ===
+                        desktop.projectKey(displayProject)}
+                      class:project-dragging={draggingProject === project.path}
+                      class:drop-before={dropProject === project.path &&
+                        !dropAfter}
+                      class:drop-after={dropProject === project.path &&
+                        dropAfter}
+                      draggable={!desktop.projectOrderSaving}
+                      title={project.path + '（拖拽排序，或 Alt+↑/↓）'}
+                      ondragstart={(event) => {
+                        draggingProject = project.path;
+                        event.dataTransfer?.setData('text/plain', project.path);
+                        if (event.dataTransfer)
+                          event.dataTransfer.effectAllowed = 'move';
+                      }}
+                      ondragend={clearProjectDrag}
+                      ondragover={(event) => {
+                        if (!draggingProject || desktop.projectOrderSaving)
+                          return;
+                        event.preventDefault();
+                        if (event.dataTransfer)
+                          event.dataTransfer.dropEffect = 'move';
+                        const bounds =
+                          event.currentTarget.getBoundingClientRect();
+                        dropProject = project.path;
+                        dropAfter =
+                          event.clientY > bounds.top + bounds.height / 2;
+                      }}
+                      ondragleave={() => {
+                        if (dropProject === project.path) dropProject = '';
+                      }}
+                      ondrop={(event) => projectDrop(event, project.path)}
+                      onkeydown={(event) =>
+                        projectReorderKey(event, project.path)}
+                      aria-expanded={expanded}
+                      onclick={(event) => {
+                        event.currentTarget.focus({ preventScroll: true });
+                        if (editing) {
+                          document
+                            .querySelector<HTMLInputElement>(
+                              '.sidebar-rename input',
+                            )
+                            ?.focus();
+                          return;
+                        }
+                        if (searching) toggleSearch(`project:${project.path}`);
+                        else desktop.toggleProject(project.path);
+                      }}
+                    >
+                      <span class="project-chevron" class:collapsed={!expanded}
+                        ><Icon name="down" size={13} /></span
+                      >
+                      <Icon name="folder" size={17} /><span class="project-name"
+                        >{desktop.projectName(project.path)}</span
+                      >
+                      <small>{project.sessions.length}</small>
+                    </button>
+                    <button
+                      class="icon-button project-new"
+                      aria-label={`在 ${project.path} 中新建会话`}
+                      onclick={() => newChat(project.path)}
+                      ><Icon name="plus" size={15} /></button
+                    >
+                    <button
+                      class="icon-button sidebar-more"
+                      data-sidebar-more
+                      aria-haspopup="menu"
+                      aria-label={`项目操作 ${desktop.projectName(project.path)}`}
+                      title="更多操作"><Icon name="more" size={14} /></button
+                    >
+                  </div>
+                {/if}
+                {#if expanded}
+                  <div class="project-sessions">
+                    {#each project.sessions.slice(0, projectLimits[project.path] ?? 20) as session (session.path)}
+                      {@render sessionItem(session)}
+                    {:else}<div class="history-empty">
+                        暂无会话，点击 + 开始对话
+                      </div>{/each}
+                    {#if project.sessions.length > (projectLimits[project.path] ?? 20)}
+                      <button
+                        class="text-button show-more"
+                        onclick={() => {
+                          projectLimits[project.path] =
+                            (projectLimits[project.path] ?? 20) + 20;
+                        }}
+                        >显示更多会话（剩余 {project.sessions.length -
+                          (projectLimits[project.path] ?? 20)}）</button
+                      >
+                    {/if}
+                  </div>
+                {/if}
+              </div>
+            {:else}<div class="history-empty" role="status">
+                {desktop.loadingSessions
+                  ? '正在加载工作区…'
+                  : searching
+                    ? '没有匹配的会话'
+                    : '还没有 Pi 工作区，可直接新建对话'}
+              </div>{/each}
+            {#if !searching && projects.length > 5}
+              <button
+                class="text-button show-more"
+                onclick={() => {
+                  showAllProjects = !showAllProjects;
+                }}
+              >
+                {showAllProjects
+                  ? '收起更多项目'
+                  : `显示全部 ${projects.length} 个项目`}
+              </button>
+            {/if}
+          {/if}
+        </section>
+      {/if}
+      {#if !searching || recentSessions.length > 0}
+        <section class="sidebar-section" aria-label="最近">
+          <div class="section-label">
+            <button
+              class="section-toggle"
+              aria-expanded={isSectionExpanded('recent', recentOpen)}
+              onclick={(event) => toggleSection('recent', event)}
+            >
+              <span
+                class="project-chevron"
+                class:collapsed={!isSectionExpanded('recent', recentOpen)}
+                ><Icon name="down" size={13} /></span
+              >
+              <span>最近</span><small>{recentSessions.length}</small>
+            </button>
+          </div>
+          {#if isSectionExpanded('recent', recentOpen)}
+            {#each recentSessions.slice(0, recentLimit) as session (session.path)}
+              {@render sessionItem(session, true, 'recent')}
+            {:else}<div class="history-empty">
+                {searching ? '没有匹配的会话' : '暂无最近会话'}
+              </div>{/each}
+            {#if recentSessions.length > recentLimit}<button
+                class="text-button show-more"
+                onclick={() => {
+                  recentLimit += 20;
+                }}
+                >显示更多会话（剩余 {recentSessions.length -
+                  recentLimit}）</button
+              >{/if}
+          {/if}
+        </section>
+      {/if}
+      {#if searching && recentSessions.length === 0 && projects.length === 0 && pinnedSessions.length === 0}
+        <div class="history-empty">
+          没有匹配的会话，试试其他名称、项目或路径。
         </div>
-        {#if recentOpen || searching}
-          {#each recentSessions as session (session.path)}
-            {@render sessionItem(session, true)}
-          {:else}<div class="history-empty">
-              {searching ? '没有匹配的会话' : '暂无最近会话'}
-            </div>{/each}
-        {/if}
-      </section>
-      <div class="section-label">
-        <button
-          class="text-button"
-          aria-current={sidebarCollection === 'archived' ? 'page' : undefined}
-          onclick={(event) => openCollection(event, 'archived')}>已归档</button
-        >
-      </div>
+      {/if}
     </nav>
-    <button
-      class="sidebar-settings"
-      aria-current={settingsVisible ? 'page' : undefined}
-      onclick={openSettings}
-      ><Icon name="settings" size={19} /><span>设置</span><small
-        >本地 Pi · RPC</small
-      ></button
-    >
+    <div class="sidebar-footer">
+      <button
+        class="sidebar-settings"
+        aria-current={sidebarCollection === 'archived' && !settingsVisible
+          ? 'page'
+          : undefined}
+        onclick={(event) => openCollection(event, 'archived')}
+        ><Icon name="folder" size={19} /><span>已归档</span></button
+      >
+      <button
+        class="sidebar-settings"
+        aria-current={settingsVisible ? 'page' : undefined}
+        onclick={openSettings}
+        ><Icon name="settings" size={19} /><span>设置</span><small
+          >本地 Pi · RPC</small
+        ></button
+      >
+    </div>
   </aside>
   <main class="main-pane">
     <section
@@ -650,6 +923,7 @@
     </section>
     {#if settingsVisible}
       <SettingsDialog
+        bind:this={settingsPage}
         {desktop}
         onclose={() => {
           void closeSettings();
@@ -662,7 +936,7 @@
             class="icon-button"
             aria-label="展开侧栏"
             onclick={() => {
-              sidebar = true;
+              void setSidebar(true);
             }}><Icon name="panel" /></button
           >{/if}<span>项目与会话</span>{#if runLabel}<span role="status"
             >{runLabel}</span
@@ -686,7 +960,7 @@
               class="icon-button"
               aria-label="展开侧栏"
               onclick={() => {
-                sidebar = true;
+                void setSidebar(true);
               }}><Icon name="panel" /></button
             >{/if}<span class="product-name">Pi</span><select
             class="model-select"

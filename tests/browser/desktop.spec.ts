@@ -2026,18 +2026,19 @@ test('sidebar context menus rename, archive and restore projects and sessions ac
   await alpha.click({ button: 'right' });
   await page.getByRole('menuitem', { name: '重命名', exact: true }).click();
   await page
-    .getByRole('textbox', { name: '名称', exact: true })
+    .getByRole('textbox', { name: '重命名项目', exact: true })
     .fill('核心项目');
   await page.getByRole('button', { name: '保存', exact: true }).click();
   await expect(alpha).toContainText('核心项目');
-  await alpha.click();
+  if ((await alpha.getAttribute('aria-expanded')) === 'false')
+    await alpha.click();
   const session = tree.locator(
     '[data-sidebar-kind="session"][data-sidebar-path="alpha.jsonl"]',
   );
   await session.click({ button: 'right' });
   await page.getByRole('menuitem', { name: '重命名', exact: true }).click();
   await page
-    .getByRole('textbox', { name: '名称', exact: true })
+    .getByRole('textbox', { name: '重命名会话', exact: true })
     .fill('排查登录');
   await page.getByRole('button', { name: '保存', exact: true }).click();
   await expect(session).toContainText('排查登录');
@@ -2073,6 +2074,168 @@ test('sidebar context menus rename, archive and restore projects and sessions ac
   await alpha.click({ button: 'right' });
   await page.keyboard.press('Escape');
   await expect(page.getByRole('menu')).toHaveCount(0);
+});
+
+test('sidebar navigation selects only the visible page and protects unsaved settings', async ({
+  page,
+}) => {
+  await mock(page, 2, true);
+  await page.goto('/');
+  const archiveButton = page.getByRole('button', {
+    name: '已归档',
+    exact: true,
+  });
+  const settingsButton = page
+    .locator('.sidebar-footer')
+    .getByRole('button', { name: /设置/ });
+  const settings = page.getByRole('region', { name: '应用设置' });
+  await archiveButton.click();
+  await expect(archiveButton).toHaveAttribute('aria-current', 'page');
+  await settingsButton.click();
+  await expect(settings).toBeVisible();
+  await expect(archiveButton).not.toHaveAttribute('aria-current', 'page');
+  await expect(settingsButton).toHaveAttribute('aria-current', 'page');
+  await archiveButton.click();
+  await expect(settings).toHaveCount(0);
+  await expect(archiveButton).toHaveAttribute('aria-current', 'page');
+  await settingsButton.click();
+  await settings.getByRole('radio', { name: '深色', exact: true }).check();
+  await archiveButton.click();
+  await expect(settings).toContainText('有未保存的更改，是否放弃');
+  await expect(settingsButton).toHaveAttribute('aria-current', 'page');
+  await expect(archiveButton).not.toHaveAttribute('aria-current', 'page');
+  await settings.getByRole('button', { name: '继续编辑', exact: true }).click();
+  await expect(
+    settings.getByRole('radio', { name: '深色', exact: true }),
+  ).toBeChecked();
+  await archiveButton.click();
+  await settings
+    .getByRole('button', { name: '放弃并继续', exact: true })
+    .click();
+  await expect(settings).toHaveCount(0);
+  await expect(archiveButton).toHaveAttribute('aria-current', 'page');
+  await settingsButton.click();
+  await page
+    .getByRole('region', { name: '最近', exact: true })
+    .locator('[data-sidebar-path="alpha.jsonl"]')
+    .click();
+  await expect(settings).toHaveCount(0);
+  await expect(page.locator('.conversation-workspace')).toBeVisible();
+  await settingsButton.click();
+  await page
+    .getByRole('button', { name: /新对话/ })
+    .first()
+    .click();
+  await expect(settings).toHaveCount(0);
+  await expect(
+    page.getByRole('textbox', { name: '消息输入', exact: true }),
+  ).toBeVisible();
+});
+
+test('sidebar progressively reveals long recent and project lists', async ({
+  page,
+}) => {
+  await mock(page, 2, true);
+  await page.addInitScript(() => {
+    (window as any).sessionCatalog = Array.from({ length: 45 }, (_, i) => ({
+      path: `long-${i}.jsonl`,
+      id: `long-${i}`,
+      cwd: 'C:/work/alpha',
+      name: `长列表会话 ${i}`,
+      preview: '',
+      timestamp: '',
+      modified: i,
+      warning: null,
+    }));
+  });
+  await page.goto('/');
+  const recent = page.getByRole('region', { name: '最近', exact: true });
+  await expect(recent.locator('.history-item')).toHaveCount(20);
+  await recent
+    .getByRole('button', { name: '显示更多会话（剩余 25）', exact: true })
+    .click();
+  await expect(recent.locator('.history-item')).toHaveCount(40);
+  const projects = page.getByRole('region', { name: '工作项目', exact: true });
+  const alpha = projects.locator(
+    '[data-sidebar-kind="project"][data-sidebar-path="C:/work/alpha"]',
+  );
+  if ((await alpha.getAttribute('aria-expanded')) === 'false')
+    await alpha.click();
+  await expect(projects.locator('.history-item')).toHaveCount(20);
+  await projects
+    .getByRole('button', { name: '显示更多会话（剩余 25）', exact: true })
+    .click();
+  await expect(projects.locator('.history-item')).toHaveCount(40);
+});
+
+test('sidebar restores focus when cancelling a pin or closing the drawer', async ({
+  page,
+}) => {
+  await mock(page, 2, true);
+  await page.goto('/');
+  const recent = page.getByRole('region', { name: '最近', exact: true });
+  await recent
+    .getByRole('button', { name: '置顶 修复登录', exact: true })
+    .click();
+  const pinned = page.getByRole('region', { name: '置顶', exact: true });
+  const unpin = pinned.getByRole('button', {
+    name: '取消置顶 修复登录',
+    exact: true,
+  });
+  await unpin.focus();
+  await unpin.press('Enter');
+  await expect(pinned.locator('.section-toggle')).toBeFocused();
+  await page.setViewportSize({ width: 800, height: 700 });
+  await page.getByRole('textbox', { name: '搜索历史会话' }).focus();
+  await page.keyboard.press('Escape');
+  const open = page.getByRole('button', { name: '展开侧栏', exact: true });
+  await expect(open).toBeFocused();
+  await open.press('Enter');
+  await expect(
+    page.getByRole('textbox', { name: '搜索历史会话' }),
+  ).toBeFocused();
+  await expect(
+    page.getByRole('button', { name: '已归档', exact: true }),
+  ).toBeVisible();
+});
+
+test('sidebar search preserves folds and exposes inline actions with keyboard focus', async ({
+  page,
+}) => {
+  await mock(page, 2, true);
+  await page.goto('/');
+  const recent = page.getByRole('region', { name: '最近', exact: true });
+  const toggle = recent.locator('.section-toggle');
+  await toggle.click();
+  await expect(toggle).toHaveAttribute('aria-expanded', 'false');
+  const search = page.getByRole('textbox', { name: '搜索历史会话' });
+  await search.fill('修复');
+  await expect(toggle).toHaveAttribute('aria-expanded', 'true');
+  await toggle.click();
+  await expect(toggle).toHaveAttribute('aria-expanded', 'false');
+  await page.getByRole('button', { name: '清除会话搜索' }).click();
+  await expect(toggle).toHaveAttribute('aria-expanded', 'false');
+  await page.reload();
+  await expect(toggle).toHaveAttribute('aria-expanded', 'false');
+  await toggle.click();
+  const more = recent.getByRole('button', {
+    name: '会话操作 修复登录',
+    exact: true,
+  });
+  await more.click();
+  await page.getByRole('menuitem', { name: '重命名', exact: true }).click();
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  const rename = page.getByRole('textbox', { name: '重命名会话', exact: true });
+  await expect(rename).toBeFocused();
+  await rename.press('Escape');
+  await expect(
+    recent.locator('[data-sidebar-path="alpha.jsonl"]'),
+  ).toBeFocused();
+  await search.fill('没有这种会话');
+  await expect(page.locator('.history-list .history-empty')).toHaveCount(1);
+  await expect(
+    page.getByRole('button', { name: '已归档', exact: true }),
+  ).toBeVisible();
 });
 
 test('history management preserves transcript and draft, filters and restores keyboard focus with undo', async ({

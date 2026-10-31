@@ -12,7 +12,7 @@
   --surface: #f1f1ef;
   --hover: #eaeae7;
   --text: #262725;
-  --muted: #868782;
+  --muted: #6c6f67;
   --border: #e7e7e3;
   --accent: #2b6150;
   --accent-soft: #e9f1ec;
@@ -203,7 +203,7 @@ button svg {
   display: flex;
   align-items: center;
   gap: 8px;
-  margin: 5px 0 22px;
+  margin: 5px 0 10px;
   padding: 0 9px;
   border: 1px solid var(--border);
   border-radius: 8px;
@@ -221,14 +221,14 @@ button svg {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  font-size: 11px;
+  gap: 8px;
+  font-size: 12px;
   color: var(--muted);
-  padding: 0 8px;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
+  padding: 2px 4px;
+  margin-bottom: 4px;
 }
 .sidebar-section {
-  padding-bottom: 12px;
+  padding-bottom: 16px;
 }
 .section-toggle {
   display: flex;
@@ -237,16 +237,36 @@ button svg {
   flex: 1;
   min-width: 0;
   border: 0;
-  padding: 8px 0;
+  min-height: 36px;
+  padding: 8px 6px;
   text-align: left;
   font-size: inherit;
+  font-weight: 500;
+  line-height: 1.5;
   color: inherit;
 }
 .section-toggle > span:nth-child(2) {
-  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
-.section-toggle small {
-  font-size: 10px;
+/* 区块计数紧随标题形成信息组，不再被弹性文字推到操作区边缘。 */
+.section-toggle small,
+.project-current small {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  min-width: 24px;
+  padding: 1px 6px;
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 400;
+  line-height: 18px;
+  font-variant-numeric: tabular-nums;
 }
 .show-more {
   margin-left: 22px;
@@ -256,9 +276,30 @@ button svg {
   display: flex;
   align-items: center;
   border-radius: 9px;
+  /* 为窄滚动条留出稳定间距，避免置顶按钮被覆盖。 */
+  margin-inline-end: 3px;
 }
-.session-row.active {
+.session-row.active,
+.session-row:hover,
+.session-row:focus-within {
   background: var(--hover);
+}
+.session-row .history-item:hover:not(:disabled) {
+  background: transparent;
+}
+/* 操作区始终占位；鼠标环境弱化次要操作，键盘与触控保持可发现。 */
+.sidebar-more {
+  flex-shrink: 0;
+  min-width: 24px;
+  min-height: 28px;
+  padding: 5px;
+}
+@media (hover: hover) and (pointer: fine) {
+  .session-row:not(:hover):not(:focus-within) .sidebar-more,
+  .project-row:not(:hover):not(:focus-within) .sidebar-more,
+  .session-row:not(:hover):not(:focus-within) .session-pin:not(.pinned) {
+    opacity: 0.35;
+  }
 }
 .session-row .history-item {
   flex: 1;
@@ -274,7 +315,7 @@ button svg {
   text-overflow: ellipsis;
   white-space: nowrap;
   color: var(--muted);
-  font-size: 10px;
+  font-size: 11px;
 }
 .session-pin {
   flex-shrink: 0;
@@ -293,8 +334,11 @@ button svg {
   gap: 8px;
   border: 0;
   font-size: 13px;
-  width: 100%;
-  padding: 8px;
+  flex: 1;
+  min-width: 0;
+  min-height: 38px;
+  padding: 8px 10px;
+  line-height: 1.5;
 }
 .project-current .project-name {
   flex: 1;
@@ -306,9 +350,8 @@ button svg {
 .project-row {
   display: flex;
   align-items: center;
-}
-.project-current {
-  min-width: 0;
+  gap: 4px;
+  padding-inline-end: 4px;
 }
 .project-current[draggable='true'] {
   cursor: grab;
@@ -325,13 +368,16 @@ button svg {
 }
 .project-current.active {
   color: var(--accent);
-}
-.project-current small {
-  color: var(--muted);
-  font-size: 10px;
+  background: var(--accent-soft);
+  box-shadow: inset 3px 0 var(--accent);
 }
 .project-chevron {
   display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 16px;
+  height: 16px;
 }
 .project-chevron.collapsed {
   transform: rotate(-90deg);
@@ -355,7 +401,10 @@ button svg {
   flex: 1;
   overflow-y: auto;
   min-height: 0;
-  padding-top: 12px;
+  padding-block-start: 12px;
+  /* 覆盖式滚动条不占槽位，额外内边距确保按钮与滚动条分离。 */
+  padding-inline-end: 12px;
+  scrollbar-gutter: stable;
   scrollbar-width: thin;
 }
 .history-list h3 {
@@ -395,9 +444,57 @@ button svg {
   gap: 10px;
   font-size: 13px;
   border: 0;
+  border-radius: 8px;
+  min-height: 38px;
+  padding: 9px 8px;
+  text-align: left;
+}
+.sidebar-footer {
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
   border-top: 1px solid var(--border);
-  border-radius: 0;
-  padding: 16px 8px 4px;
+  padding-top: 8px;
+  margin-top: 6px;
+}
+.sidebar-settings[aria-current='page'] {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+.sidebar-search-summary {
+  margin: 0;
+  padding: 4px 9px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.sidebar-rename {
+  margin: 4px 3px;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--bg);
+}
+.sidebar-rename input {
+  width: 100%;
+  font-size: 12px;
+  padding: 8px;
+}
+.rename-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 8px;
+}
+.rename-actions button {
+  font-size: 12px;
+  padding: 5px 9px;
+}
+.sidebar-rename p {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--error);
+  overflow-wrap: anywhere;
 }
 .sidebar-settings small {
   margin-left: auto;

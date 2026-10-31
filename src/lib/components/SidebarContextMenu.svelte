@@ -1,49 +1,73 @@
 <script lang="ts">
   import { tick } from 'svelte';
-  import Modal from './Modal.svelte';
+
   import type { Desktop } from '../state/desktop.svelte';
   import type { SidebarItem } from '../types';
-  let { desktop }: { desktop: Desktop } = $props();
+  let {
+    desktop,
+    onrename,
+  }: {
+    desktop: Desktop;
+    onrename: (
+      kind: SidebarItem['kind'],
+      path: string,
+      label: string,
+      origin: HTMLElement,
+    ) => void;
+  } = $props();
   let target = $state<{
     kind: SidebarItem['kind'];
     path: string;
     label: string;
   } | null>(null);
   let position = $state<{ x: number; y: number } | null>(null);
-  let operation = $state<'rename' | null>(null);
-  let value = $state('');
+
   let error = $state('');
   let busy = $state(false);
   let trigger: HTMLElement | null = null;
   let menu = $state<HTMLDivElement>();
-  function close(): void {
+  function close(restore = true): void {
     position = null;
-    trigger?.focus({ preventScroll: true });
+    if (restore && trigger?.isConnected) trigger.focus({ preventScroll: true });
   }
   async function context(event: MouseEvent): Promise<void> {
-    const node = (event.target as Element).closest<HTMLElement>(
-      '[data-sidebar-kind]',
+    if (busy) return;
+    const source = (event.target as Element).closest<HTMLElement>(
+      '[data-sidebar-more]',
     );
+    const row = source?.closest('.session-row, .project-row');
+    const node = source
+      ? row?.querySelector<HTMLElement>('[data-sidebar-kind]')
+      : (event.target as Element).closest<HTMLElement>('[data-sidebar-kind]');
     if (!node || desktop.openingSession || desktop.sidebarSaving) return;
     event.preventDefault();
-    trigger = node;
+    trigger = source ?? node;
     target = {
       kind: node.dataset.sidebarKind as SidebarItem['kind'],
       path: node.dataset.sidebarPath!,
       label: node.dataset.sidebarLabel!,
     };
+    const bounds = trigger.getBoundingClientRect();
     position = {
-      x: Math.max(4, Math.min(event.clientX, window.innerWidth - 190)),
-      y: Math.max(4, Math.min(event.clientY, window.innerHeight - 150)),
+      x: Math.max(
+        4,
+        Math.min(source ? bounds.left : event.clientX, window.innerWidth - 190),
+      ),
+      y: Math.max(
+        4,
+        Math.min(
+          source ? bounds.bottom + 4 : event.clientY,
+          window.innerHeight - 150,
+        ),
+      ),
     };
     await tick();
     menu?.querySelector<HTMLButtonElement>('button')?.focus();
   }
-  function choose(next: 'rename'): void {
-    close();
-    operation = next;
-    value = target?.label ?? '';
-    error = '';
+  function choose(): void {
+    close(false);
+    if (target && trigger)
+      onrename(target.kind, target.path, target.label, trigger);
   }
   async function apply(state?: SidebarItem['state']): Promise<void> {
     if (!target || busy) return;
@@ -54,16 +78,15 @@
       ...(region?.querySelectorAll<HTMLButtonElement>('[data-sidebar-kind]') ??
         []),
     ];
-    const index = controls.indexOf(origin as HTMLButtonElement);
+    const subject =
+      origin
+        ?.closest('.session-row, .project-row')
+        ?.querySelector('[data-sidebar-kind]') ?? origin;
+    const index = controls.indexOf(subject as HTMLButtonElement);
     busy = true;
     error = '';
     try {
-      await desktop.manageSidebar(
-        item.kind,
-        item.path,
-        operation === 'rename' ? { name: value } : { state },
-      );
-      operation = null;
+      await desktop.manageSidebar(item.kind, item.path, { state });
       close();
       if (state) {
         await tick();
@@ -80,7 +103,7 @@
     } catch (cause) {
       error = String(cause);
       if (state) desktop.sidebarError = error;
-      else desktop.error = error;
+      else desktop.sidebarError = error;
     } finally {
       busy = false;
     }
@@ -89,13 +112,21 @@
 
 <svelte:window
   oncontextmenu={context}
-  onpointerdown={(event) => {
-    if (position && !menu?.contains(event.target as Node)) close();
+  onclick={(event) => {
+    if ((event.target as Element).closest('[data-sidebar-more]'))
+      void context(event);
   }}
-  onblur={close}
+  onpointerdown={(event) => {
+    if (position && !menu?.contains(event.target as Node)) close(false);
+  }}
+  onblur={() => close(false)}
   onkeydown={(event) => {
     if (!position) return;
     if (event.key === 'Escape' || event.key === 'Tab') {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        event.stopPropagation();
+      }
       close();
       return;
     }
@@ -127,50 +158,15 @@
     style:left={`${position.x}px`}
     style:top={`${position.y}px`}
   >
-    <button role="menuitem" onclick={() => choose('rename')}>重命名</button>
+    <button role="menuitem" onclick={choose}>重命名</button>
     <button
       role="menuitem"
       onclick={() => {
         close();
-        operation = null;
         void apply('archived');
       }}>归档</button
     >
   </div>
-{/if}
-{#if operation && target}
-  <Modal
-    title={`重命名${target.kind === 'project' ? '项目' : '会话'}`}
-    onclose={() => {
-      if (!busy) operation = null;
-    }}
-  >
-    <form
-      onsubmit={(event) => {
-        event.preventDefault();
-        void apply();
-      }}
-    >
-      <label class="dialog-field"
-        >名称<input bind:value maxlength="200" disabled={busy} /></label
-      >
-      <p class="muted">修改桌面显示名称，原文件和工作目录保持不变。</p>
-      {#if error}<p role="alert">{error}</p>{/if}
-      <footer class="modal-actions">
-        <button
-          type="button"
-          disabled={busy}
-          onclick={() => {
-            operation = null;
-          }}>取消</button
-        ><button
-          class="primary"
-          disabled={busy || (operation === 'rename' && !value.trim())}
-          >保存</button
-        >
-      </footer>
-    </form>
-  </Modal>
 {/if}
 
 <style>

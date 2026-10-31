@@ -56,10 +56,23 @@
   );
   onMount(() => heading?.focus({ preventScroll: true }));
 
-  function close() {
+  let pendingLeave = $state<(() => void) | null>(null);
+  /** 返回与侧栏导航共用未保存保护，确认后执行用户选择的目的地。 */
+  export function requestLeave(action: () => void = onclose): void {
     if (busy) return;
-    if (dirty) confirmLeave = true;
-    else onclose();
+    if (dirty) {
+      pendingLeave = action;
+      confirmLeave = true;
+    } else action();
+  }
+  function close(): void {
+    requestLeave();
+  }
+  function discard(): void {
+    const action = pendingLeave ?? onclose;
+    pendingLeave = null;
+    confirmLeave = false;
+    action();
   }
   function keydown(event: KeyboardEvent) {
     if (event.key === 'Escape' && !event.defaultPrevented) {
@@ -320,8 +333,11 @@
         <span>有未保存的更改，是否放弃？</span><button
           onclick={() => {
             confirmLeave = false;
+            pendingLeave = null;
           }}>继续编辑</button
-        ><button onclick={onclose}>放弃并返回</button>
+        ><button onclick={discard}
+          >{pendingLeave ? '放弃并继续' : '放弃并返回'}</button
+        >
       </div>
     {:else}<div class="save-hint" role="status">
         {#if status}<span class="error-text">{status}</span>{:else}{dirty
