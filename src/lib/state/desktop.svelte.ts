@@ -1,6 +1,7 @@
 /** 应用门面：组件只调用用户意图；集中连接状态、草稿、事件确认与切换事务。 */
 import { bridge, errorMessage, type Bridge } from '../client';
 import { parseBuiltin } from '../commands';
+import type { ModelSettings, ProviderConfig } from '../model-config';
 import { terminalText } from '../terminal-text';
 import { reduceEvents } from './reducer';
 import {
@@ -321,17 +322,25 @@ export class Desktop {
   builtinRequest = $state<{ name: string; args: string } | null>(null);
   draft = $state('');
   newChatProject = $state<string | null>(null);
+  // 首次发送创建真实会话会恢复 Pi 默认模型，显式选择需在创建后再次应用。
+  private newChatModel: string | null = null;
   /** “+”只准备本地草稿，首次发送前不创建或切换 Pi 会话。 */
   prepareNewChat(project = this.project, preserveDraft = false): void {
     if (this.openingSession || this.submitting) return;
     this.drafts.set(this.draftKey(), this.draft);
     const text = this.draft;
+    if (this.newChatProject !== project && !preserveDraft)
+      this.newChatModel = null;
     this.newChatProject = project;
     this.draft = preserveDraft
       ? text
       : (this.drafts.get(this.draftKey()) ?? '');
   }
   notice = $state('');
+  modelConfigPending = $state(false);
+  modelConfigApplying = $state(false);
+  modelConfigStatus = $state('');
+  private modelConfigRevision = 0;
   error = $state('');
   submitting = $state(false);
   loadingHistory = $state(false);
@@ -484,6 +493,7 @@ export class Desktop {
   private async connectProject(project: string): Promise<void> {
     this.drafts.set(this.draftKey(), this.draft);
     const generation = ++this.generation;
+    const modelRevision = this.modelConfigRevision;
     this.connection = 'starting';
     this.ack = 0;
     this.runtimeId = '';
@@ -503,6 +513,13 @@ export class Desktop {
       this.currentSessionTitle = '';
       this.newChatProject = null;
       this.connection = 'ready';
+      if (
+        modelRevision === this.modelConfigRevision &&
+        this.modelConfigPending
+      ) {
+        this.modelConfigPending = false;
+        this.modelConfigStatus = '已从共享配置启动 Pi';
+      }
       this.messages = [];
       this.toolViews = {};
       this.accessed.clear();
@@ -596,6 +613,12 @@ export class Desktop {
             await this.syncState();
             await this.refreshSessions();
           });
+          if (
+            this.run === 'idle' &&
+            this.modelConfigPending &&
+            !this.pendingSwitch?.waiting
+          )
+            void this.applyModelConfig();
           if (this.run === 'idle' && this.pendingSwitch?.waiting)
             void this.executePending();
         }
@@ -720,6 +743,7 @@ export class Desktop {
     ) {
       this.drafts.set(this.draftKey(), this.draft);
       this.newChatProject = null;
+      this.newChatModel = null;
       this.draft = this.drafts.get(this.draftKey()) ?? '';
       return;
     }
@@ -840,6 +864,11 @@ export class Desktop {
       }
       if (this.newChatProject !== null || this.connection !== 'ready') return;
       this.draft = text;
+    }
+    if (this.newChatModel) {
+      // 应用失败时保留选择和首条消息；重试只应用模型，不重复创建会话或发送。
+      await this.applyModel(this.newChatModel);
+      this.newChatModel = null;
     }
     const sessionFile = this.snapshot.sessionFile;
     const sentAt = new Date().toISOString();
@@ -966,6 +995,7 @@ export class Desktop {
       return;
     }
     this.currentSessionTitle = title;
+    if (path) this.newChatModel = null;
     this.newChatProject = null;
     this.toolViews = {};
     await this.drain();
@@ -1013,6 +1043,12 @@ export class Desktop {
   async setModel(key: string): Promise<void> {
     const model = this.models.find((m) => `${m.provider}/${m.id}` === key);
     if (!model) return;
+    await this.applyModel(key);
+    if (this.newChatProject !== null) this.newChatModel = key;
+  }
+  private async applyModel(key: string): Promise<void> {
+    const model = this.models.find((m) => `${m.provider}/${m.id}` === key);
+    if (!model) throw new Error('所选模型已不可用，请重新选择模型。');
     await this.action({
       type: 'set_model',
       provider: model.provider,
@@ -1043,6 +1079,50 @@ export class Desktop {
     )
       throw new Error('会话已切换，正文读取已取消');
     return page;
+  }
+  /** 共享配置 IO 与会话独立；不把凭据放入通用 Settings。 */
+  loadModelConfig() {
+    return this.api.modelConfig();
+  }
+  discoverModels(provider: ProviderConfig) {
+    return this.api.discoverModels(provider);
+  }
+  async saveModelConfig(config: ModelSettings): Promise<ModelSettings> {
+    const saved = await this.api.saveModelConfig(config);
+    this.modelConfigRevision++;
+    this.modelConfigPending = true;
+    this.modelConfigStatus =
+      this.run !== 'idle' ? '已保存，等待任务结束后应用' : '已保存';
+    await this.applyModelConfig();
+    return saved;
+  }
+  /** 刷新只在空闲时执行，失败保留待应用状态；迟到结果不能覆盖新的运行实例。 */
+  async applyModelConfig(): Promise<void> {
+    if (!this.modelConfigPending || this.modelConfigApplying) return;
+    if (this.connection !== 'ready') {
+      this.modelConfigStatus = '已保存，下次连接生效';
+      return;
+    }
+    if (this.run !== 'idle') return;
+    const runtime = this.runtimeId;
+    const revision = this.modelConfigRevision;
+    this.modelConfigApplying = true;
+    this.modelConfigStatus = '已保存，正在应用…';
+    try {
+      await this.api.action(runtime, { type: 'refresh_models' });
+      if (runtime !== this.runtimeId || revision !== this.modelConfigRevision)
+        return;
+      await this.syncState();
+      await this.refreshMetadata();
+      this.modelConfigPending = false;
+      this.modelConfigStatus =
+        '已保存并应用；默认值用于后续新会话，必要时重新连接 Pi';
+    } catch (error) {
+      if (runtime === this.runtimeId && revision === this.modelConfigRevision)
+        this.modelConfigStatus = `已保存，应用失败：${errorMessage(error)}。可重试或重新连接 Pi。`;
+    } finally {
+      this.modelConfigApplying = false;
+    }
   }
   /** 配置更新原子持久化，运行时配置需重新连接才生效。 */
   async saveSettings(settings: Settings): Promise<void> {

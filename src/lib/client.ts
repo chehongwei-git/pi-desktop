@@ -1,5 +1,6 @@
 /** Tauri 端口适配器；业务层可替换此对象，测试不需要桌面窗口或在线模型。 */
 import { Channel, invoke } from '@tauri-apps/api/core';
+import type { ModelSettings, ProviderConfig, Discovery } from './model-config';
 import type {
   Action,
   ContentPage,
@@ -41,6 +42,16 @@ export const bridge = {
   /** 正常退出可等待自身进程树回收。 */
   disconnect(force = false): Promise<void> {
     return invoke('disconnect_pi', { force });
+  },
+  /** 专用接口仅返回认证元数据，凭据替换通过明确动作提交。 */
+  modelConfig(): Promise<ModelSettings> {
+    return invoke('get_model_config');
+  },
+  saveModelConfig(config: ModelSettings): Promise<ModelSettings> {
+    return invoke('save_model_config', { config });
+  },
+  discoverModels(provider: ProviderConfig): Promise<Discovery> {
+    return invoke('discover_models', { provider });
   },
   /** 配置中无密钥。 */
   settings(): Promise<Settings> {

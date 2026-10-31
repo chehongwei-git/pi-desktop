@@ -29,6 +29,28 @@ TAURI_BUNDLER_TOOLS_GITHUB_MIRROR=https://v4.gh-proxy.org/https://github.com npm
 
 安装器位于 `src-tauri/target/release/bundle/nsis/`。安装/卸载、缺少 WebView2 的引导流程仍待独立 Windows 环境验证，未在当前开发机执行安装器。
 
+## 模型配置增量验证（2026-07-17，macOS arm64）
+
+本次新增设置内模型与服务商管理，实测结果：
+
+- `npm run check`：0 错误、0 警告；`npm test`：135 项通过；`npm run build`：通过。
+- `cargo test --manifest-path src-tauri/Cargo.toml --lib`：24 项通过，新增配置无损合并、密钥不回传、锁冲突、OAuth 替换保护、损坏文件保护及模拟 HTTP 模型发现验证。
+- 浏览器：本机 Chrome，44 项通过，包含新增服务商、远端拉取、四项模型能力、max 映射、保存及离开设置时保留草稿。IPC 为模拟，不能替代原生网络验收。Playwright 自带 Chromium 下载超时，因此使用临时 Chrome 配置执行，临时配置已移除。
+- `node scripts/verify-model-config.mjs`：隔离目录中的真实 Pi 1.4.0 正确加载 contextWindow=200000、maxTokens=32000、图片输入、默认 max 和禁用 xhigh；模型刷新保持会话，未调用生成模型。
+- `python3 scripts/verify-bridge.py`：真实 Pi 桥接加载、资源重载和模型刷新通过。
+- Rust 新增源码使用 stable 工具链 rustfmt 格式化；默认 1.90 工具链未安装 rustfmt/Clippy，另一套 stable 为 1.87，不能构建当前依赖，因此 Clippy 未完成。
+
+本次未进行 Windows/Linux 实机、原生安装包、真实远端服务鉴权、付费生成调用、断电/强杀多文件事务和完整无障碍标准验收。模型发现取消采用忽略迟到响应，宿主请求在 30 秒内超时；默认启动设置应重新连接后验证。标准 JSON 以外带注释的 models.json 暂不支持编辑。特殊认证头、命令型密钥和 OAuth 模型发现暂不支持，保留手动模型入口。跨平台实现采用 Rust/Node 路径及进程 API，以上不构成三平台验证完成声明。
+
+## 自定义端点页面调整验证
+
+页面改为自定义端点列表与详情，移除新增内置服务商及目录覆盖入口，保留隐藏 CLI 配置。参考 npm 包 @rotriz/pi-web-ui 1.6.0 的搜索模型列表；该版本本身没有端点配置表单。
+
+- `npm test`：137 项通过，新增隐藏 CLI 配置无损保留及自定义端点必填地址测试。
+- `npm run check`：0 错误、0 警告；`npm run build`：通过。
+- macOS 本机 Chrome 模拟 IPC 浏览器流程：新增端点、发现模型、编辑能力和 max 映射、保存及离开草稿保护通过。临时浏览器配置已移除。
+- 本次为前端与交互文档修改，未重新验证 Windows/Linux 原生环境。
+
 ## 尚待验收与已知限制
 
 - Pi 1.4.0 的真实模型发送、真实 CLI 历史恢复、工具和扩展交互仍需使用者实机验收；模拟协议不等同于完整用户环境。

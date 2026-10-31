@@ -161,6 +161,7 @@ export type Action =
         | 'reload'
         | 'new_session'
         | 'models'
+        | 'refresh_models'
         | 'thinking_levels'
         | 'commands'
         | 'state';

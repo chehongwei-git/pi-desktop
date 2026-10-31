@@ -154,6 +154,7 @@ pub enum Action {
         name: String,
     },
     Models,
+    RefreshModels,
     ThinkingLevels,
     SetModel {
         provider: String,

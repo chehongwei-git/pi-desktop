@@ -189,6 +189,10 @@ impl Handle {
                 self.rpc(json!({"type":"set_session_name","name":name}), Kind::Mutate)
                     .await
             }
+            Action::RefreshModels => {
+                self.bridge("pi-desktop-models-v1", Value::Null, Kind::Bridge)
+                    .await
+            }
             Action::Models => {
                 self.rpc(json!({"type":"get_available_models"}), Kind::Query)
                     .await

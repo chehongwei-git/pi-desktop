@@ -12,6 +12,10 @@ App.svelte / components
 
 `history.rs` 只读 Pi 历史，`settings.rs` 原子保存应用偏好，`diagnostics.rs` 写结构化诊断。Rust DTO 与 `src/lib/types.ts` 成对维护。新增业务应扩展 `Action` 与明确的类型，不暴露任意 RPC、文件访问或 shell 接口。
 
+模型配置通过独立 get_model_config/save_model_config/discover_models 业务接口进入 model_config.rs/model_discovery.rs，不扩充普通 Settings 的凭据字段。共享仓库仅向前端投影白名单字段，未知模型参数及认证请求头在宿主合并保留。文件版本使用 SHA-256，保存前获取与 Pi proper-lockfile 相同的 .lock 目录并校验版本；不持锁执行网络请求。单文件用同目录 tempfile 原子替换，多文件失败尝试恢复，无法保证进程被强杀时的多文件事务性。auth.json 保留既有权限，新建凭据文件使用私有临时文件权限，Windows 继承目录 ACL，仍需 Windows 实机权限验收。配置文件目前要求标准 JSON（兼容 BOM），含注释的 models.json 会拒绝编辑且保留原文。
+
+模型发现使用 reqwest + rustls，不依赖系统 shell 或 WebView CORS。限定三种协议的 GET /models，禁止重定向，限制超时、响应大小、分页数和模型数量。错误不包含远端正文、URL 参数或密钥；UI 取消等待以请求代次隔离，网络 Future 在宿主超时后释放。配置应用通过 refresh_models Action 复用现有 pi-desktop-models-v1 桥接，前端集中管理 pending/applying/status；默认启动设置明确提示重新连接读取。
+
 actor 独占 stdin、请求表、投影和临时存储。stdout 与 stderr 各自有读取任务；stdout 通过有界通道交给 actor。请求 ID 关联响应，超时不重发。事件按序落盘，Channel 只通知拉取，前端处理成功后返回 ack。只有相邻同消息/同字段的 delta 合并，生命周期与最终消息保持原顺序。`message_end` 覆盖流式内容，`agent_settled` 发布 idle；prompt 响应不能代表任务完成。
 
 连接和断开通过异步生命周期锁串行，业务请求克隆句柄后释放锁。窗口退出等待 stdin 关闭和子进程回收，Windows Job / Unix 独立进程组限定自有子树。必须显式 drop stdin 才保证子进程观察 EOF。每个连接的 runtimeId 和前端 generation 用于隔离迟到数据。

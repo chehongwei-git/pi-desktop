@@ -3,6 +3,7 @@
   import { onMount } from 'svelte';
   import { open } from '@tauri-apps/plugin-dialog';
   import Icon from './Icon.svelte';
+  import ModelSettings from './ModelSettings.svelte';
   import type { Desktop } from '../state/desktop.svelte';
   import { errorMessage } from '../client';
 
@@ -16,6 +17,10 @@
   let form = $state(structuredClone(initial));
   let paths = $state(initial.extraPath.join('\n'));
   let section = $state('appearance');
+  let modelsPage = $state<ModelSettings>();
+  let modelsVisited = $state(false);
+  let modelsDirty = $state(false);
+  let modelsBusy = $state(false);
   let busy = $state<'detect' | 'save' | null>(null);
   let diagnostic = $state('');
   let failed = $state(false);
@@ -34,6 +39,12 @@
       label: 'Pi 连接',
       icon: 'pi',
       description: '连接本机 Pi，配置启动环境。',
+    },
+    {
+      id: 'models',
+      label: '模型与服务商',
+      icon: 'pi',
+      description: '管理自定义 API 端点、模型与思考等级。',
     },
     {
       id: 'storage',
@@ -59,8 +70,8 @@
   let pendingLeave = $state<(() => void) | null>(null);
   /** 返回与侧栏导航共用未保存保护，确认后执行用户选择的目的地。 */
   export function requestLeave(action: () => void = onclose): void {
-    if (busy) return;
-    if (dirty) {
+    if (busy || modelsBusy) return;
+    if (dirty || modelsDirty) {
       pendingLeave = action;
       confirmLeave = true;
     } else action();
@@ -124,13 +135,16 @@
     }
   }
   async function save() {
-    if (busy) return;
+    if (busy || modelsBusy) return;
+    if (modelsDirty && !(await modelsPage?.save())) return;
+    if (section === 'models' && !dirty) return;
     busy = 'save';
     status = '';
     try {
       await desktop.saveSettings(value());
       desktop.notice = '设置已保存，启动配置在下次连接时生效。';
-      onclose();
+      if (!modelsVisited) onclose();
+      else status = '桌面设置已保存。';
     } catch (error) {
       status = errorMessage(error);
     } finally {
@@ -147,8 +161,10 @@
       <h1 bind:this={heading} tabindex="-1">设置</h1>
       <p>为你的本地工作空间，做一点调整。</p>
     </div>
-    <button class="return-button" disabled={!!busy} onclick={close}
-      ><span aria-hidden="true">←</span> 返回对话</button
+    <button
+      class="return-button"
+      disabled={!!busy || modelsBusy}
+      onclick={close}><span aria-hidden="true">←</span> 返回对话</button
     >
   </header>
   <div class="settings-layout">
@@ -159,6 +175,7 @@
           aria-current={section === item.id ? 'page' : undefined}
           onclick={() => {
             section = item.id;
+            if (section === 'models') modelsVisited = true;
           }}><Icon name={item.icon} size={18} />{item.label}</button
         >
       {/each}
@@ -173,7 +190,17 @@
         <h2>{sections.find((item) => item.id === section)?.label}</h2>
         <p>{sections.find((item) => item.id === section)?.description}</p>
       </div>
-      <fieldset disabled={!!busy}>
+      {#if modelsVisited}
+        <div hidden={section !== 'models'}>
+          <ModelSettings
+            bind:this={modelsPage}
+            {desktop}
+            bind:dirty={modelsDirty}
+            bind:busy={modelsBusy}
+          />
+        </div>
+      {/if}
+      <fieldset disabled={!!busy} hidden={section === 'models'}>
         {#if section === 'appearance'}
           <div class="settings-card">
             <div class="card-heading">
@@ -229,7 +256,10 @@
         {:else if section === 'connection'}
           <div class="connection-note">
             <Icon name="info" size={18} />
-            <p>连接本机已有 Pi。模型登录与 API Key 请在 Pi CLI 中配置。</p>
+            <p>
+              连接本机已有 Pi。API Key 和模型参数可在“模型与服务商”中配置；OAuth
+              登录仍由 Pi CLI 管理。
+            </p>
           </div>
           <div class="settings-card fields">
             <div class="field">
@@ -340,12 +370,13 @@
         >
       </div>
     {:else}<div class="save-hint" role="status">
-        {#if status}<span class="error-text">{status}</span>{:else}{dirty
+        {#if status}<span class="error-text">{status}</span>{:else}{dirty ||
+          modelsDirty
             ? '有未保存的更改'
             : '设置保存在本机'}<small>连接配置在下次连接时生效</small>{/if}
       </div>
-      <button class="primary" disabled={!!busy} onclick={save}
-        >{busy === 'save' ? '正在保存…' : '保存设置'}</button
+      <button class="primary" disabled={!!busy || modelsBusy} onclick={save}
+        >{busy === 'save' || modelsBusy ? '处理中…' : '保存设置'}</button
       >{/if}
   </footer>
 </section>

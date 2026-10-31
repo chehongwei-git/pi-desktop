@@ -1,6 +1,8 @@
 //! 应用服务入口：Tauri 命令只表达业务意图；平台与协议实现不泄漏到 UI。
 mod diagnostics;
 mod history;
+mod model_config;
+mod model_discovery;
 mod new_session;
 mod platform;
 mod rpc;
@@ -216,6 +218,44 @@ async fn list_sessions(
     .map_err(|_| AppError::new("HISTORY", "历史扫描任务异常"))?
 }
 
+/// 共享模型配置不要求先启动会话，文件 IO 在 blocking 池执行。
+#[tauri::command]
+async fn get_model_config(app: tauri::AppHandle) -> Result<model_config::ModelSettings> {
+    let home = app
+        .path()
+        .home_dir()
+        .map_err(|_| AppError::new("HOME", "无法读取用户目录"))?;
+    tokio::task::spawn_blocking(move || model_config::load(&model_config::directory(&home)))
+        .await
+        .map_err(|_| AppError::new("MODEL_CONFIG", "读取模型配置任务失败"))?
+}
+/// 提交版本检查及字段补丁，密钥不经通用 Settings 或诊断接口。
+#[tauri::command]
+async fn save_model_config(
+    app: tauri::AppHandle,
+    config: model_config::ModelSettings,
+) -> Result<model_config::ModelSettings> {
+    let home = app
+        .path()
+        .home_dir()
+        .map_err(|_| AppError::new("HOME", "无法读取用户目录"))?;
+    tokio::task::spawn_blocking(move || model_config::save(&model_config::directory(&home), config))
+        .await
+        .map_err(|_| AppError::new("MODEL_CONFIG", "保存模型配置任务失败，请重新读取确认状态"))?
+}
+/// 仅执行指定协议的模型发现，不接受任意 HTTP 方法或请求头。
+#[tauri::command]
+async fn discover_models(
+    app: tauri::AppHandle,
+    provider: model_config::ProviderConfig,
+) -> Result<model_discovery::Discovery> {
+    let home = app
+        .path()
+        .home_dir()
+        .map_err(|_| AppError::new("HOME", "无法读取用户目录"))?;
+    model_discovery::discover(&model_config::directory(&home), provider).await
+}
+
 /// 统一安装受限插件和命令；关闭窗口必须先 await 自有进程回收。
 pub fn run() {
     tauri::Builder::default()
@@ -238,6 +278,9 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_settings,
             save_settings,
+            get_model_config,
+            save_model_config,
+            discover_models,
             detect_pi,
             connect_pi,
             disconnect_pi,
