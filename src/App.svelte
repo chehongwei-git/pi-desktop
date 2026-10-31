@@ -23,6 +23,32 @@
   let displayProject = $derived(desktop.newChatProject ?? desktop.project);
   let sidebar = $state(true);
   let settingsOpen = $state(false);
+  let settingsVisible = $derived(
+    settingsOpen || desktop.builtinRequest?.name === 'settings',
+  );
+  let settingsTrigger: HTMLElement | null = null;
+  function openSettings(): void {
+    if (settingsVisible) return;
+    settingsTrigger =
+      document.activeElement instanceof HTMLElement
+        ? document.activeElement
+        : null;
+    settingsOpen = true;
+    sidebar = window.innerWidth > 900;
+  }
+  async function closeSettings(): Promise<void> {
+    settingsOpen = false;
+    sidebarCollection = null;
+    if (desktop.builtinRequest?.name === 'settings')
+      desktop.builtinRequest = null;
+    await tick();
+    const target =
+      settingsTrigger?.isConnected &&
+      (sidebar || !settingsTrigger.closest('.sidebar'))
+        ? settingsTrigger
+        : document.querySelector<HTMLElement>('.composer textarea');
+    target?.focus({ preventScroll: true });
+  }
   let search = $state('');
   let pinnedOpen = $state(true);
   let projectsOpen = $state(true);
@@ -262,7 +288,7 @@
         queueMicrotask(() => searchInput?.focus());
       }
       if (key === 'b') sidebar = !sidebar;
-      if (key === ',') settingsOpen = true;
+      if (key === ',') openSettings();
     }
   }
   /** 窗口重获焦点才增量刷新，不创建常驻轮询。 */
@@ -529,9 +555,8 @@
     </nav>
     <button
       class="sidebar-settings"
-      onclick={() => {
-        settingsOpen = true;
-      }}
+      aria-current={settingsVisible ? 'page' : undefined}
+      onclick={openSettings}
       ><Icon name="settings" size={19} /><span>设置</span><small
         >本地 Pi · RPC</small
       ></button
@@ -540,7 +565,7 @@
   <main class="main-pane">
     <section
       class="notice-stack"
-      class:collection-notices={sidebarCollection !== null}
+      class:collection-notices={sidebarCollection !== null || settingsVisible}
       aria-label="消息提示"
     >
       {#if desktop.error}
@@ -562,12 +587,7 @@
                     desktop.connect(desktop.project),
                   )}>重新连接</button
               >{/if}
-            <button
-              class="text-button"
-              onclick={() => {
-                settingsOpen = true;
-              }}>设置</button
-            >
+            <button class="text-button" onclick={openSettings}>设置</button>
           {/snippet}
         </MessageNotice>
       {/if}
@@ -628,7 +648,15 @@
         </MessageNotice>
       {/if}
     </section>
-    {#if sidebarCollection}
+    {#if settingsVisible}
+      <SettingsDialog
+        {desktop}
+        onclose={() => {
+          void closeSettings();
+        }}
+      />
+    {/if}
+    {#if sidebarCollection && !settingsVisible}
       <div class="collection-navigation">
         {#if !sidebar}<button
             class="icon-button"
@@ -649,8 +677,8 @@
     {/if}
     <div
       class="conversation-workspace"
-      class:collection-hidden={sidebarCollection !== null}
-      inert={sidebarCollection !== null}
+      class:collection-hidden={sidebarCollection !== null || settingsVisible}
+      inert={sidebarCollection !== null || settingsVisible}
     >
       <header class="topbar">
         <div class="topbar-left">
@@ -872,21 +900,8 @@
     </div>
   </main>
 </div>
-{#if settingsOpen}<SettingsDialog
-    {desktop}
-    onclose={() => {
-      settingsOpen = false;
-    }}
-  />{/if}
 {#if desktop.builtinRequest}
-  {#if desktop.builtinRequest.name === 'settings'}
-    <SettingsDialog
-      {desktop}
-      onclose={() => {
-        desktop.builtinRequest = null;
-      }}
-    />
-  {:else}
+  {#if desktop.builtinRequest.name !== 'settings'}
     {#key desktop.builtinRequest}
       <BuiltinCommandDialog
         {desktop}

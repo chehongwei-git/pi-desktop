@@ -652,6 +652,87 @@ test('settings use native nested menus and remain inside the viewport', async ({
   ).toBe(true);
 });
 
+test('settings preserve conversation, retain failed edits and save across categories', async ({
+  page,
+}) => {
+  await mock(page, 100);
+  await page.goto('/');
+  const input = page.getByRole('textbox', { name: '消息输入', exact: true });
+  await expect(input).toBeEnabled();
+  await input.fill('保留设置前的草稿');
+  await page.locator('.transcript').evaluate((node) => {
+    (window as any).savedTranscript = node;
+    node.scrollTop = 100;
+  });
+  await page.keyboard.press('Control+,');
+  const settings = page.getByRole('region', { name: '应用设置' });
+  await expect(
+    settings.getByRole('heading', { name: '设置', exact: true }),
+  ).toBeFocused();
+  await settings.getByRole('radio', { name: '深色', exact: true }).check();
+  await page.screenshot({ path: 'test-results/settings-appearance-light.png' });
+  await settings.getByRole('button', { name: 'Pi 连接', exact: true }).click();
+  await settings
+    .getByRole('textbox', { name: /Pi 入口路径/ })
+    .fill('/custom/pi');
+  await settings
+    .getByRole('textbox', { name: /额外 PATH/ })
+    .fill('/custom/bin\n\n/other/bin');
+  await settings.getByRole('button', { name: '检测 Pi', exact: true }).click();
+  await expect(settings.locator('.diagnostic-result')).toContainText(
+    'unmocked IPC',
+  );
+  await settings
+    .getByRole('button', { name: '会话与存储', exact: true })
+    .click();
+  await settings.getByRole('textbox', { name: /会话目录/ }).fill('/sessions');
+  await settings.getByRole('button', { name: '返回对话', exact: true }).click();
+  await expect(settings).toContainText('有未保存的更改，是否放弃');
+  await settings.getByRole('button', { name: '继续编辑', exact: true }).click();
+  await page.evaluate(() => {
+    (window as any).failSaveOnce = true;
+  });
+  await settings.getByRole('button', { name: '保存设置', exact: true }).click();
+  await expect(settings).toContainText('模拟保存失败');
+  await expect(settings.getByRole('textbox', { name: /会话目录/ })).toHaveValue(
+    '/sessions',
+  );
+  await settings.getByRole('button', { name: '保存设置', exact: true }).click();
+  await expect(settings).toHaveCount(0);
+  await expect(input).toHaveValue('保留设置前的草稿');
+  await expect(input).toBeFocused();
+  expect(
+    await page
+      .locator('.transcript')
+      .evaluate((node) => node === (window as any).savedTranscript),
+  ).toBe(true);
+  const saved = await page.evaluate(() =>
+    JSON.parse(localStorage.getItem('mock-settings')!),
+  );
+  expect(saved).toMatchObject({
+    theme: 'dark',
+    piPath: '/custom/pi',
+    sessionDir: '/sessions',
+    extraPath: ['/custom/bin', '/other/bin'],
+  });
+  await page.reload();
+  await page.keyboard.press('Control+,');
+  await expect(
+    settings.getByRole('radio', { name: '深色', exact: true }),
+  ).toBeChecked();
+  await page.screenshot({ path: 'test-results/settings-appearance-dark.png' });
+  await page.setViewportSize({ width: 480, height: 720 });
+  await expect(
+    settings.getByRole('button', { name: '保存设置', exact: true }),
+  ).toBeInViewport();
+  expect(
+    await page.evaluate(
+      () => document.documentElement.scrollWidth <= window.innerWidth,
+    ),
+  ).toBe(true);
+  await page.screenshot({ path: 'test-results/settings-narrow.png' });
+});
+
 test('desktop zoom shortcuts invoke native WebView scaling', async ({
   page,
 }) => {
@@ -702,7 +783,8 @@ test('interface zoom shortcuts persist, respect limits and work inside settings'
   await page.reload();
   await expect.poll(zoom).toBe(1.2);
   await page.keyboard.press('Control+,');
-  await expect(page.getByRole('dialog')).toBeVisible();
+  await expect(page.getByRole('region', { name: '应用设置' })).toBeVisible();
+  await expect(page.getByRole('dialog')).toHaveCount(0);
   await expect(page.getByRole('combobox', { name: '界面缩放' })).toHaveCount(0);
   await page.keyboard.press('Control+-');
   await expect.poll(zoom).toBe(1.1);
@@ -1064,9 +1146,7 @@ test('workspace tree discovers, expands, searches and restores across projects',
     originalOrder,
   );
   await page.keyboard.press('Control+,');
-  await page
-    .getByRole('combobox', { name: '外观', exact: true })
-    .selectOption('system');
+  await page.getByRole('radio', { name: '跟随系统', exact: true }).check();
   await page.getByRole('button', { name: '保存设置', exact: true }).click();
   await page.emulateMedia({ colorScheme: 'dark' });
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
@@ -1256,9 +1336,10 @@ test('welcome, project, conversation, send and shortcuts', async ({ page }) => {
     .press('Enter');
   await expect(page.getByText('这是模拟回答。', { exact: true })).toBeVisible();
   await page.keyboard.press('Control+,');
-  await expect(page.getByRole('dialog')).toBeVisible();
-  await page.keyboard.press('Escape');
+  await expect(page.getByRole('region', { name: '应用设置' })).toBeVisible();
   await expect(page.getByRole('dialog')).toHaveCount(0);
+  await page.keyboard.press('Escape');
+  await expect(page.getByRole('region', { name: '应用设置' })).toHaveCount(0);
   await page.screenshot({ path: 'test-results/conversation.png' });
   expect(errors).toEqual([]);
 });
