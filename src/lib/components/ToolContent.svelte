@@ -54,14 +54,7 @@
   });
 </script>
 
-{#if text}<ToolCode
-    {text}
-    {language}
-    {diff}
-    onend={() => {
-      if (!error) void load(id, generation);
-    }}
-  />{/if}
+{#if text}<ToolCode {text} {language} {diff} />{/if}
 {#if !text && done}<p class="tool-empty">无输出</p>{/if}
 {#if loading}<p class="tool-load-status" role="status">正在读取…</p>{/if}
 {#if error}<p class="tool-load-error" role="alert">{error}</p>{/if}

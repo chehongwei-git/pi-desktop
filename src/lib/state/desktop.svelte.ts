@@ -401,13 +401,14 @@ export class Desktop {
   private ack = 0;
   private pumpTask: Promise<void> | null = null;
   private generation = 0;
+  private historyRequest = 0;
   private searchGeneration = 0;
   private drafts = new Map<string, string>();
   private visible = new Set<string>();
   private accessed = new Map<string, number>();
   private accessSerial = 0;
   private submissionSerial = 0;
-  /** 虚拟列表报告挂载窗口；这些消息不被缓存淘汰，访问顺序用于 LRU。 */
+  /** 普通列表报告所有已挂载消息；已读正文不能被缓存淘汰后突然缩短。 */
   pinVisible(ids: string[]): void {
     this.visible = new Set(ids);
     for (const id of ids) this.accessed.set(id, ++this.accessSerial);
@@ -776,20 +777,60 @@ export class Desktop {
     }
   }
   /** 历史恢复由宿主投影与分页；首次只接收最后 50 条。 */
-  async refreshHistory(before?: number): Promise<void> {
+  async refreshHistory(
+    before?: number,
+    beforeInsert?: () => void,
+  ): Promise<void> {
+    if (before !== undefined && (this.loadingHistory || this.openingSession))
+      return;
     const generation = this.generation;
+    const session = this.snapshot.sessionFile;
+    const request = ++this.historyRequest;
+    const current = () =>
+      generation === this.generation &&
+      request === this.historyRequest &&
+      session === this.snapshot.sessionFile;
     this.loadingHistory = true;
     try {
       const page = await this.action<HistoryPage>({ type: 'history', before });
-      if (generation !== this.generation) return;
+      if (!current()) return;
+      if (before !== undefined && page.hasMore && page.before >= before)
+        throw new Error('历史游标未前进，请重试');
+      // 空预览在插入前读取，避免先插入占位再异步撑高已读区域。
+      await Promise.all(
+        page.messages.map(async (message) => {
+          if (
+            !message.text &&
+            message.contentRef &&
+            message.role !== 'toolResult'
+          ) {
+            const content = await this.readContent(message.contentRef, 0);
+            message.text = content.text;
+            message.truncated = !content.done;
+          }
+        }),
+      );
+      if (!current()) return;
+      const ids = new Set(
+        before === undefined ? [] : this.messages.map((message) => message.id),
+      );
+      const incoming = page.messages.filter((message) => {
+        if (ids.has(message.id)) return false;
+        ids.add(message.id);
+        return true;
+      });
+      if (before !== undefined && page.hasMore && !incoming.length)
+        throw new Error('历史加载未返回更早消息，请重试');
+      beforeInsert?.();
       this.messages =
-        before === undefined
-          ? page.messages
-          : [...page.messages, ...this.messages];
+        before === undefined ? incoming : [...incoming, ...this.messages];
       this.before = page.before;
       this.hasMore = page.hasMore;
+    } catch (cause) {
+      // 已取消会话的失败不能污染新会话，也不能在旧组件中弹出错误。
+      if (current()) throw cause;
     } finally {
-      if (generation === this.generation) this.loadingHistory = false;
+      if (request === this.historyRequest) this.loadingHistory = false;
     }
   }
   /** 发送接受前保留原草稿，超时绝不自动重发；用户消息由 Pi 权威事件插入。 */
@@ -1006,6 +1047,8 @@ export class Desktop {
       this.notice = '切换已被 Pi 扩展取消';
       return;
     }
+    ++this.historyRequest;
+    this.loadingHistory = false;
     this.currentSessionTitle = title;
     if (path) this.newChatModel = null;
     this.newChatProject = null;

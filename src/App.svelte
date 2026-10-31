@@ -1051,7 +1051,8 @@
               messages={desktop.messages}
               hasMore={desktop.hasMore}
               loading={desktop.loadingHistory}
-              onolder={() => desktop.refreshHistory(desktop.before)}
+              onolder={(beforeInsert) =>
+                desktop.refreshHistory(desktop.before, beforeInsert)}
               onfull={(message) => {
                 void showFull(message);
               }}

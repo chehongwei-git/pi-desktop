@@ -15,7 +15,6 @@
     "desktop": "tauri dev"
   },
   "dependencies": {
-    "@tanstack/virtual-core": "^3.13.0",
     "@tauri-apps/api": "^2.10.0",
     "@tauri-apps/plugin-dialog": "^2.6.0",
     "@tauri-apps/plugin-opener": "^2.5.0",

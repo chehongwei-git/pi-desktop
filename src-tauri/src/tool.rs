@@ -20,10 +20,44 @@ pub struct ToolPresentation {
     pub diff_ref: Option<String>,
     pub diff_preview: String,
     pub diff_lines: usize,
+    #[serde(default)]
+    pub added_lines: Option<usize>,
+    #[serde(default)]
+    pub removed_lines: Option<usize>,
     pub tail: String,
     pub output_lines: usize,
     pub truncation: Option<Value>,
     pub full_output_path: Option<String>,
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn pure_writes_count_all_content_as_additions() {
+        let mut store = Store::new().unwrap();
+        for (text, count) in [("", 0), ("一行", 1), ("a\nb\n", 2), ("a\r\nb\r\n", 2), ("a\n\n", 2)] {
+            let mut tool = ToolPresentation::call("write", "write", &json!({"content": text}), &mut store).unwrap();
+            tool.result("Successfully wrote", &Value::Null, &mut store).unwrap();
+            assert_eq!(tool.added_lines, Some(count));
+            assert_eq!(tool.removed_lines, Some(0));
+        }
+    }
+    #[test]
+    fn counts_full_diff_and_preserves_history_compatibility() {
+        let mut store = Store::new().unwrap();
+        let mut tool = ToolPresentation::default();
+        let diff = format!("--- a/file\r\n+++ b/file\r\n-1 old\r\n{}", (0..100).map(|i| format!("+{} new\n", i + 1)).collect::<String>());
+        tool.result("成功", &json!({"diff": diff}), &mut store).unwrap();
+        assert_eq!(tool.added_lines, Some(100));
+        assert_eq!(tool.removed_lines, Some(1));
+        assert!(tool.diff_preview.lines().count() <= 10);
+        let mut value = serde_json::to_value(&tool).unwrap();
+        value.as_object_mut().unwrap().remove("addedLines");
+        value.as_object_mut().unwrap().remove("removedLines");
+        let old: ToolPresentation = serde_json::from_value(value).unwrap();
+        assert_eq!(old.added_lines, None);
+        assert_eq!(old.removed_lines, None);
+    }
 }
 impl ToolPresentation {
     pub fn call(id: &str, name: &str, args: &Value, store: &mut Store) -> Result<Self> {
@@ -50,6 +84,11 @@ impl ToolPresentation {
             } else {
                 None
             },
+            // 纯写入按全部新增展示；若结果提供实际 diff，result 中以 diff 统计覆盖。
+            added_lines: if name == "write" {
+                args["content"].as_str().map(|text| text.lines().count())
+            } else { None },
+            removed_lines: if name == "write" && args["content"].is_string() { Some(0) } else { None },
             ..Self::default()
         })
     }
@@ -70,6 +109,9 @@ impl ToolPresentation {
                 16 * 1024,
             );
             self.diff_lines = diff.lines().count();
+            // 基于完整正文统计，排除统一 diff 的文件头，兼容 Pi 自带行号格式。
+            self.added_lines = Some(diff.lines().filter(|line| line.starts_with('+') && !line.starts_with("+++")).count());
+            self.removed_lines = Some(diff.lines().filter(|line| line.starts_with('-') && !line.starts_with("---")).count());
         }
         if details["truncation"].is_object() {
             let t = &details["truncation"];

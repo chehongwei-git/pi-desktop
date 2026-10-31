@@ -1,11 +1,7 @@
 <script lang="ts">
-  import { onDestroy, untrack } from 'svelte';
+  import { onDestroy, tick, untrack } from 'svelte';
   import type { ContentPage, Message } from '../types';
-  import {
-    colorCode,
-    languageForPath,
-    toolPreview,
-  } from '../tool-presentation';
+  import { colorCode, languageForPath } from '../tool-presentation';
   import ToolCode from './ToolCode.svelte';
   import ToolContent from './ToolContent.svelte';
   import Icon from './Icon.svelte';
@@ -14,8 +10,10 @@
     views,
     ontoggle,
     read,
+    onchange,
   }: {
     message: Message;
+    onchange?: (message: Message, trigger: HTMLButtonElement) => void;
     views: Record<string, Record<string, boolean>>;
     ontoggle: (id: string, section: string) => void;
     read: (id: string, offset: number) => Promise<ContentPage>;
@@ -48,10 +46,13 @@
   let current = $derived(shown ?? message);
   let tool = $derived(current.tool);
   let name = $derived(tool?.name ?? current.name ?? '工具');
-  let expanded = $derived(views[message.id]?.output ?? false);
-  let preview = $derived(toolPreview(current));
+  let codeEdit = $derived(name === 'edit' || name === 'write');
+  let expanded = $derived(!codeEdit && (views[message.id]?.output ?? false));
+
   let isDiff = $derived(
-    name === 'edit' && !!tool?.diffRef && current.status !== 'error',
+    !!(tool?.diffRef || tool?.writeRef) &&
+      current.status !== 'error' &&
+      current.status !== 'running',
   );
   let language = $derived(
     ['read', 'write'].includes(name) && current.status !== 'error'
@@ -74,13 +75,26 @@
     };
   });
   let warning = $derived(tool?.truncation);
+  let heading: HTMLButtonElement;
+  /** 末尾入口卸载后回到同一工具，避免焦点丢失或停留在收起前的深处。 */
+  async function collapse(): Promise<void> {
+    ontoggle(message.id, 'output');
+    await tick();
+    heading?.focus({ preventScroll: true });
+    heading?.scrollIntoView({ block: 'nearest', behavior: 'instant' });
+  }
 </script>
 
 <div class="tool-step" class:tool-failed={current.status === 'error'}>
   <button
     class="tool-heading"
-    aria-expanded={expanded}
-    onclick={() => ontoggle(message.id, 'output')}
+    bind:this={heading}
+    aria-expanded={codeEdit ? undefined : expanded}
+    disabled={codeEdit}
+    onclick={() => {
+      if (expanded) void collapse();
+      else ontoggle(message.id, 'output');
+    }}
   >
     <span class="status-dot" class:working={current.status === 'running'}
     ></span>
@@ -102,35 +116,44 @@
           ? '执行失败'
           : '已完成'}</span
     >
-    <span class="tool-toggle-label">{expanded ? '收起' : '展开'}</span>
-    <span class:tool-chevron-open={expanded}
-      ><Icon name="down" size={14} /></span
-    >
+    {#if !codeEdit}<span class="tool-toggle-label"
+        >{expanded ? '收起详情' : '查看详情'}</span
+      >
+      <span class:tool-chevron-open={expanded}
+        ><Icon name="down" size={14} /></span
+      >{/if}
   </button>
+  {#if codeEdit && current.status === 'error'}<p
+      class="tool-load-error"
+      role="alert"
+    >
+      {current.text || '编辑失败，未取得错误详情'}
+    </p>{/if}
+  {#if isDiff}
+    <div class="tool-change-summary">
+      {#if tool?.addedLines != null && tool?.removedLines != null}
+        <span class="change-added" aria-label={`新增 ${tool.addedLines} 行`}
+          >+{tool.addedLines}</span
+        >
+        <span class="change-removed" aria-label={`删除 ${tool.removedLines} 行`}
+          >−{tool.removedLines}</span
+        >
+      {/if}
+      <button
+        class="text-button"
+        onclick={(event) => onchange?.(current, event.currentTarget)}
+        >查看变更</button
+      >
+    </div>
+  {/if}
   {#if expanded}
     <div class="tool-expanded">
-      {#if isDiff && tool?.diffRef}
-        <ToolContent id={tool.diffRef} diff {read} />
-        {#if current.text}<ToolCode text={current.text} />{/if}
-      {:else if current.contentRef}
+      {#if current.contentRef}
         <ToolContent id={current.contentRef} {language} {read} />
       {:else if current.text}<ToolCode text={current.text} {language} />
       {:else}<p class="tool-empty">
           {current.status === 'running' ? '等待输出…' : '无输出'}
         </p>{/if}
-      {#if tool?.writeRef}
-        <button
-          class="text-button"
-          aria-expanded={views[message.id]?.write ?? false}
-          onclick={() => ontoggle(message.id, 'write')}
-          >写入内容 · {views[message.id]?.write ? '收起' : '展开'}</button
-        >
-        {#if views[message.id]?.write}<ToolContent
-            id={tool.writeRef}
-            {language}
-            {read}
-          />{/if}
-      {/if}
       {#if tool?.argsRef}
         <button
           class="text-button"
@@ -144,28 +167,24 @@
             {read}
           />{/if}
       {/if}
+      <div class="tool-footer">
+        <button
+          class="text-button tool-collapse"
+          onclick={() => void collapse()}
+          ><span class="tool-chevron-open"><Icon name="down" size={14} /></span
+          >收起输出</button
+        >
+      </div>
     </div>
-  {:else}
-    {#if preview.text}<div class="tool-preview">
-        <ToolCode text={preview.text} diff={preview.diff} {language} />
-      </div>{/if}
-    {#if preview.hidden > 0 || current.truncated}<button
-        class="text-button tool-expand-hint"
-        onclick={() => ontoggle(message.id, 'output')}
-        >{preview.hidden > 0 ? `还有 ${preview.hidden} 行` : '还有更多输出'} · 展开</button
-      >
-    {:else if !preview.text && name !== 'read'}<p class="tool-empty">
-        {current.status === 'running' ? '等待输出…' : '无输出'}
-      </p>{/if}
   {/if}
-  {#if warning?.truncated}<p class="tool-warning">
+  {#if expanded && warning?.truncated}<p class="tool-warning">
       工具已截断输出：{warning.firstLineExceedsLimit
         ? '首行超过大小限制'
         : warning.truncatedBy === 'lines'
           ? `显示 ${warning.outputLines ?? '?'} / ${warning.totalLines ?? '?'} 行`
           : `达到 ${Math.ceil((warning.maxBytes ?? 51200) / 1024)} KiB 大小限制`}。展开仅显示工具已返回的内容。
     </p>{/if}
-  {#if tool?.fullOutputPath}<p class="tool-warning">
+  {#if expanded && tool?.fullOutputPath}<p class="tool-warning">
       完整输出路径：<code>{tool.fullOutputPath}</code>
     </p>{/if}
 </div>

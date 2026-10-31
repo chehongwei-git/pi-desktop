@@ -1,38 +1,27 @@
-<!-- 长正文使用定高行窗口，完整文本保留可滚动浏览，不因 CSS 高度而丢失内容。 -->
+<!-- 正文采用普通布局与独立滚动框，不再测量行高或写入对话滚动位置。 -->
 <script lang="ts">
   import { colorCode, diffRows, escapeText } from '../tool-presentation';
   let {
     text,
     language,
     diff = false,
-    onend = () => {},
   }: {
     text: string;
     language?: string;
     diff?: boolean;
-    onend?: () => void;
   } = $props();
-  let viewport = $state<HTMLDivElement>();
-  let top = $state(0);
-  let height = $state(400);
   let html = $state<string[]>([]);
-  let rows = $derived(text.split('\n'));
-  let virtual = $derived(rows.length > 200);
-  let start = $derived(virtual ? Math.max(0, Math.floor(top / 21) - 8) : 0);
-  let end = $derived(
-    virtual
-      ? Math.min(rows.length, start + Math.ceil(height / 21) + 16)
-      : rows.length,
-  );
-  let visible = $derived(
+  let rows = $derived(
     diff
-      ? diffRows(rows.slice(start, end).join('\n'))
-      : rows
-          .slice(start, end)
-          .map((text) => ({ text, kind: 'context', html: escapeText(text) })),
+      ? diffRows(text)
+      : text.split('\n').map((text) => ({
+          text,
+          kind: 'context',
+          html: escapeText(text),
+        })),
   );
   $effect(() => {
-    const current = visible;
+    const current = rows;
     const lang = language;
     let alive = true;
     html = current.map((row) => row.html);
@@ -46,37 +35,18 @@
       alive = false;
     };
   });
-  $effect(() => {
-    if (!viewport) return;
-    const observer = new ResizeObserver(() => {
-      if (viewport) height = viewport.clientHeight;
-    });
-    observer.observe(viewport);
-    return () => observer.disconnect();
-  });
-  function scroll(): void {
-    if (!viewport) return;
-    top = viewport.scrollTop;
-    if (viewport.scrollHeight - top - viewport.clientHeight < 160) onend();
-  }
 </script>
 
-<!-- svelte-ignore a11y_no_noninteractive_tabindex (长输出滚动区需要键盘滚动与焦点。) -->
+<!-- svelte-ignore a11y_no_noninteractive_tabindex (正文滚动区需要支持键盘阅读。) -->
 <div
   class="tool-code"
-  class:virtual-code={virtual}
-  bind:this={viewport}
   role="region"
   aria-label={diff ? '代码差异' : '工具正文'}
   tabindex="0"
-  onscroll={scroll}
 >
-  <pre
-    class="tool-code-lines"
-    style:padding-top={`${start * 21}px`}
-    style:padding-bottom={`${(rows.length - end) * 21}px`}><code
+  <pre class="tool-code-lines"><code
       class={language ? `language-${language} hljs` : ''}
-      >{#each visible as row, index}<span
+      >{#each rows as row, index}<span
           class="tool-code-line"
           class:diff-added={diff && row.kind === 'added'}
           class:diff-removed={diff && row.kind === 'removed'}

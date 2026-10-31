@@ -8,6 +8,71 @@ function fixture(action: Bridge['action']) {
   return new Desktop({ ...bridge, action });
 }
 describe('desktop business behavior', () => {
+  it('serializes older pages, deduplicates IDs and captures the anchor at commit', async () => {
+    let release!: (page: unknown) => void;
+    const action = vi.fn().mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          release = resolve;
+        }),
+    );
+    const desktop = fixture(action);
+    const message = {
+      id: 'current',
+      role: 'assistant',
+      text: '正文',
+      thinking: '',
+      contentRef: null,
+      status: 'done',
+      name: null,
+    };
+    desktop.messages = [message];
+    desktop.before = 50;
+    const capture = vi.fn(() =>
+      expect(desktop.messages.map((m) => m.id)).toEqual(['current']),
+    );
+    const pending = desktop.refreshHistory(50, capture);
+    await desktop.refreshHistory(50, capture);
+    expect(action).toHaveBeenCalledOnce();
+    expect(capture).not.toHaveBeenCalled();
+    release({
+      messages: [
+        { ...message, id: 'older' },
+        message,
+        { ...message, id: 'older' },
+      ],
+      before: 0,
+      hasMore: false,
+    });
+    await pending;
+    expect(capture).toHaveBeenCalledOnce();
+    expect(desktop.messages.map((m) => m.id)).toEqual(['older', 'current']);
+    expect(desktop.loadingHistory).toBe(false);
+  });
+  it('ignores a late history response after switching sessions and rejects stalled cursors', async () => {
+    let release!: (page: unknown) => void;
+    const action = vi.fn().mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          release = resolve;
+        }),
+    );
+    const desktop = fixture(action);
+    desktop.snapshot = { sessionFile: 'a' };
+    const capture = vi.fn();
+    const pending = desktop.refreshHistory(50, capture);
+    desktop.snapshot = { sessionFile: 'b' };
+    release({ messages: [], before: 0, hasMore: false });
+    await pending;
+    expect(capture).not.toHaveBeenCalled();
+    expect(desktop.messages).toHaveLength(0);
+    expect(desktop.loadingHistory).toBe(false);
+    const stalled = desktop.refreshHistory(50, capture);
+    release({ messages: [], before: 50, hasMore: true });
+    await expect(stalled).rejects.toThrow('游标未前进');
+    expect(capture).not.toHaveBeenCalled();
+    expect(desktop.loadingHistory).toBe(false);
+  });
   it('persists sidebar names, archive and trash states and restores original catalog items', async () => {
     const save = vi.fn().mockResolvedValue(undefined);
     const desktop = new Desktop({ ...bridge, save });

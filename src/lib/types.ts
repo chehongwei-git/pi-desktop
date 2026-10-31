@@ -49,6 +49,9 @@ export interface ToolPresentation {
   diffRef?: string | null;
   diffPreview?: string;
   diffLines?: number;
+  /** 宿主从完整差异统计，旧记录缺少统计时不估算。 */
+  addedLines?: number | null;
+  removedLines?: number | null;
   tail?: string;
   outputLines?: number;
   truncation?: {

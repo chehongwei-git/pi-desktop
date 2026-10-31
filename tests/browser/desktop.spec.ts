@@ -237,6 +237,21 @@ async function mock(
                   await new Promise<void>((resolve) => {
                     host.releaseHistory = resolve;
                   });
+                if (!host.historyMessages) {
+                  const end = args.action.before ?? count;
+                  const start = Math.max(0, end - 50);
+                  return {
+                    messages: Array.from({ length: end - start }, (_, i) =>
+                      message(
+                        String(start + i),
+                        (start + i) % 2 ? 'assistant' : 'user',
+                        `消息 ${start + i}：这是模拟正文。`,
+                      ),
+                    ),
+                    before: start,
+                    hasMore: start > 0,
+                  };
+                }
                 return {
                   messages:
                     host.historyMessages ??
@@ -1456,6 +1471,8 @@ test('tool summaries expand inline with code, edit diff, parameters and truncati
         diffRef: 'diff',
         diffPreview: diff.split('\n').slice(0, 10).join('\n'),
         diffLines: 19,
+        addedLines: 16,
+        removedLines: 1,
         outputLines: 1,
       }),
       message('shell', 'bash', shell, {
@@ -1473,6 +1490,8 @@ test('tool summaries expand inline with code, edit diff, parameters and truncati
       message('write', 'write', '写入成功', {
         path: 'src/new.ts',
         writeRef: 'written',
+        addedLines: 1,
+        removedLines: 0,
         argsRef: 'args',
         outputLines: 1,
       }),
@@ -1487,6 +1506,12 @@ test('tool summaries expand inline with code, edit diff, parameters and truncati
     .locator('.tool-step')
     .filter({ has: page.locator('.tool-path', { hasText: 'src/read.ts' }) });
   await expect(read.locator('.tool-code')).toHaveCount(0);
+  // 先模拟用户上滚退出底部跟随，避免 WebKit 的自动滚入与跟随帧争夺位置。
+  await page.locator('.transcript').hover();
+  await page.mouse.wheel(0, -240);
+  await page.locator('.transcript').evaluate((node) => {
+    node.scrollTop = 0;
+  });
   await read.locator('.tool-heading').click();
   await expect(read.locator('.hljs-keyword').first()).toBeVisible();
   await expect(read.locator('.tool-code')).toContainText(
@@ -1500,41 +1525,40 @@ test('tool summaries expand inline with code, edit diff, parameters and truncati
   const edit = page
     .locator('.tool-step')
     .filter({ has: page.locator('.tool-path', { hasText: 'src/edit.ts' }) });
-  await expect(edit.locator('.tool-code-line')).toHaveCount(10);
-  await expect(edit.locator('.diff-removed mark')).toHaveText('old');
-  await expect(edit.locator('.diff-added mark')).toHaveText('new');
-  await edit.locator('.tool-heading').click();
-  await expect(
-    edit.getByText('+17 const added14 = true;', { exact: true }),
-  ).toBeVisible();
-  await edit.locator('.tool-heading').click();
-  await expect(edit.locator('.tool-code-line')).toHaveCount(10);
+  await expect(edit.locator('.tool-code')).toHaveCount(0);
+  await expect(edit.locator('.change-added')).toHaveText('+16');
+  await expect(edit.locator('.change-removed')).toHaveText('−1');
+  const view = edit.getByRole('button', { name: '查看变更', exact: true });
+  await view.click();
+  const panel = page.getByRole('complementary', { name: '代码变更' });
+  await expect(panel.locator('.diff-removed mark')).toHaveText('old');
+  await expect(panel.locator('.diff-added mark')).toHaveText('new');
+  await expect(panel).toContainText('+17 const added14 = true;');
+  await panel.getByRole('button', { name: '关闭变更' }).click();
+  await expect(view).toBeFocused();
   const shell = page
     .locator('.tool-step')
     .filter({ has: page.locator('.tool-name', { hasText: /^bash$/ }) });
-  await expect(shell.locator('.tool-preview .tool-code-line')).toHaveCount(5);
-  await expect(shell.locator('.tool-preview')).toContainText('shell line 11');
-  await expect(shell.locator('.tool-preview')).not.toContainText(
-    'shell line 0',
-  );
-  await expect(shell.locator('.tool-warning').first()).toContainText('12 / 99');
-  await expect(shell).toContainText('C:/tmp/full.txt');
+  await expect(shell.locator('.tool-code')).toHaveCount(0);
+  await expect(shell.locator('.tool-command')).toHaveText('echo "hello"');
+  await expect(shell.locator('.tool-warning')).toHaveCount(0);
   await shell.locator('.tool-heading').click();
   await expect(shell.getByText('shell line 0', { exact: true })).toBeVisible();
+  await expect(shell.locator('.tool-warning').first()).toContainText('12 / 99');
   const write = page
     .locator('.tool-step')
     .filter({ has: page.locator('.tool-path', { hasText: 'src/new.ts' }) });
-  await write.locator('.tool-heading').click();
-  await write
-    .getByRole('button', { name: '写入内容 · 展开', exact: true })
-    .click();
-  await expect(write.locator('.language-typescript .hljs-keyword')).toHaveText(
+  await expect(write.locator('.tool-toggle-label')).toHaveCount(0);
+  await write.getByRole('button', { name: '查看变更', exact: true }).click();
+  await expect(write.locator('.change-added')).toHaveText('+1');
+  await expect(write.locator('.change-removed')).toHaveText('−0');
+  await expect(panel).toContainText('新增内容');
+  await expect(panel).not.toContainText('缺少修改前版本');
+  await expect(panel.locator('.language-typescript .hljs-keyword')).toHaveText(
     'const',
   );
-  await write
-    .getByRole('button', { name: '调用参数 · 展开', exact: true })
-    .click();
-  await expect(write.locator('.language-json .hljs-attr')).toHaveText('"path"');
+  await panel.getByRole('button', { name: '关闭变更' }).click();
+  await expect(write.locator('.tool-expanded')).toHaveCount(0);
   await page.screenshot({ path: 'test-results/tools-light.png' });
   await page.evaluate(() => {
     document.documentElement.dataset.theme = 'dark';
@@ -1543,7 +1567,7 @@ test('tool summaries expand inline with code, edit diff, parameters and truncati
   expect(errors).toEqual([]);
 });
 
-test('large tool output retries and reads to the end inline with bounded mounted rows', async ({
+test('large tool output retries and reads explicit chunks in its own scroll box', async ({
   page,
 }) => {
   const errors: string[] = [];
@@ -1580,26 +1604,32 @@ test('large tool output retries and reads to the end inline with bounded mounted
   await tool.locator('.tool-heading').click();
   await expect(tool.getByRole('alert')).toContainText('模拟正文读取失败');
   await tool.getByRole('button', { name: '重试读取', exact: true }).click();
-  await expect(tool.locator('.virtual-code')).toBeVisible();
-  for (let i = 0; i < 5; i++) {
-    await tool.locator('.virtual-code').evaluate((node) => {
-      node.scrollTop = node.scrollHeight;
-    });
-    await page.waitForTimeout(100);
+  await expect(tool.locator('.tool-expanded .tool-code')).toBeVisible();
+  while (
+    await tool
+      .getByRole('button', { name: '继续加载输出', exact: true })
+      .count()
+  ) {
+    await tool
+      .getByRole('button', { name: '继续加载输出', exact: true })
+      .click();
   }
   await expect(tool).toContainText('已到末尾');
-  await tool.locator('.virtual-code').evaluate((node) => {
+  await page.locator('.transcript').evaluate((node) => {
     node.scrollTop = node.scrollHeight;
   });
   await expect(tool.getByText('最后一行', { exact: true })).toBeVisible();
-  expect(await tool.locator('.tool-code-line').count()).toBeLessThan(60);
+  await tool.locator('.tool-expanded .tool-code').evaluate((node) => {
+    node.scrollTop = node.scrollHeight;
+  });
+  expect(await tool.locator('.tool-code-line').count()).toBe(1201);
   await tool.locator('.tool-heading').click();
-  await expect(tool.locator('.virtual-code')).toHaveCount(0);
+  await expect(tool.locator('.tool-expanded')).toHaveCount(0);
   await expect(page.getByRole('dialog')).toHaveCount(0);
   expect(errors).toEqual([]);
 });
 
-test('tool expansion survives transcript recycling and updates from running to complete', async ({
+test('tool expansion survives scrolling and updates from running to complete', async ({
   page,
 }) => {
   await mock(page, 0);
@@ -1672,7 +1702,7 @@ test('tool expansion survives transcript recycling and updates from running to c
   await transcript.evaluate((node) => {
     node.scrollTop = 0;
   });
-  await expect(tool).toHaveCount(0);
+  await expect(tool).toHaveCount(1);
   await expect(
     page.getByRole('button', { name: '回到底部', exact: true }),
   ).toBeVisible();
@@ -1785,182 +1815,183 @@ test('running tasks accept direct steering and follow-up messages without stoppi
   expect(actions.some((action: any) => action.type === 'stop')).toBe(false);
 });
 
-test('wheel over code scrolls the conversation and chains at long-code boundaries', async ({
+test('long tool output scrolls independently and contains boundary gestures', async ({
   page,
 }) => {
   await mock(page, 0);
   await page.addInitScript(() => {
-    const host = window as any;
-    const long = Array.from(
-      { length: 600 },
-      (_, i) => `const value${i} = ${i};`,
-    ).join('\n');
-    host.bodies = { long };
-    host.historyMessages = [
-      ...Array.from({ length: 40 }, (_, i) => ({
-        id: `m${i}`,
-        role: 'user',
-        text: `previous message ${i}`,
-        thinking: '',
-        status: 'done',
-        contentRef: null,
-        name: null,
-      })),
-      {
-        id: 'long',
-        role: 'toolResult',
-        name: 'read',
-        text: long,
-        thinking: '',
-        status: 'done',
-        contentRef: 'long',
-        tool: {
-          callId: 'long',
-          name: 'read',
-          path: 'src/long.ts',
-          outputLines: 600,
-        },
-      },
-      {
-        id: 'short',
-        role: 'toolResult',
+    (window as any).historyMessages = Array.from({ length: 40 }, (_, i) => ({
+      id: String(i),
+      role: 'toolResult',
+      name: 'bash',
+      thinking: '',
+      status: 'done',
+      contentRef: null,
+      text: 'line\n'.repeat(600),
+      tool: {
+        callId: String(i),
         name: 'bash',
-        text: 'short code line',
-        thinking: '',
-        status: 'done',
-        contentRef: null,
-        tool: {
-          callId: 'short',
-          name: 'bash',
-          command: 'echo short',
-          tail: 'short code line',
-          outputLines: 1,
-        },
+        command: 'echo output',
+        tail: 'line',
+        outputLines: 600,
       },
-      {
-        id: 'markdown',
-        role: 'assistant',
-        text: '```typescript\nconst answer = 42;\n```',
-        thinking: '',
-        status: 'done',
-        contentRef: null,
-        name: null,
-      },
-    ];
+    }));
   });
   await page.goto('/');
-  await page
-    .getByRole('button', { name: '选择项目文件夹', exact: true })
-    .last()
-    .click();
-  const transcript = page.getByRole('region', {
-    name: '对话消息',
-    exact: true,
-  });
-  const short = page
-    .locator('.tool-step')
-    .filter({ has: page.locator('.tool-name', { hasText: /^bash$/ }) });
-  await short.locator('.tool-code').hover();
-  const before = await transcript.evaluate((node) => node.scrollTop);
-  await page.mouse.wheel(0, -240);
-  await expect
-    .poll(() => transcript.evaluate((node) => node.scrollTop))
-    .toBeLessThan(before - 100);
-  await transcript.evaluate((node) => {
-    node.scrollTop = node.scrollHeight;
-  });
-  const markdown = page.locator('.markdown pre');
-  await markdown.hover();
-  const beforeMarkdown = await transcript.evaluate((node) => node.scrollTop);
-  await page.mouse.wheel(0, -240);
-  await expect
-    .poll(() => transcript.evaluate((node) => node.scrollTop))
-    .toBeLessThan(beforeMarkdown - 100);
-  await transcript.evaluate((node) => {
-    node.scrollTop = node.scrollHeight;
-  });
-  const long = page
-    .locator('.tool-step')
-    .filter({ has: page.locator('.tool-name', { hasText: /^read$/ }) });
-  await long.locator('.tool-heading').click();
-  const code = long.locator('.virtual-code');
-  await code.scrollIntoViewIfNeeded();
+  const tool = page.locator('.tool-step').last();
+  await tool.locator('.tool-heading').click();
+  const code = tool.locator('.tool-expanded .tool-code');
   await code.hover();
+  const root = page.locator('.transcript');
+  const top = await root.evaluate((node) => node.scrollTop);
   await page.mouse.wheel(0, 240);
   await expect
     .poll(() => code.evaluate((node) => node.scrollTop))
     .toBeGreaterThan(100);
+  expect(await root.evaluate((node) => node.scrollTop)).toBe(top);
   await code.evaluate((node) => {
     node.scrollTop = 0;
   });
-  await page.waitForTimeout(150);
-  const atTop = await transcript.evaluate((node) => node.scrollTop);
   await page.mouse.wheel(0, -240);
-  await expect
-    .poll(() => transcript.evaluate((node) => node.scrollTop))
-    .toBeLessThan(atTop - 100);
+  await page.waitForTimeout(150);
+  expect(await root.evaluate((node) => node.scrollTop)).toBe(top);
 });
 
-test('expanded code keeps its collapse control floating while the conversation scrolls', async ({
-  page,
-}) => {
-  await mock(page, 0);
-  await page.addInitScript(() => {
-    const host = window as any;
-    const text = Array.from(
-      { length: 180 },
-      (_, i) => `const line${i} = ${i};`,
-    ).join('\n');
-    host.bodies = { sticky: text };
-    host.historyMessages = [
-      {
-        id: 'sticky',
-        role: 'toolResult',
-        name: 'read',
-        text,
-        thinking: '',
-        status: 'done',
-        contentRef: 'sticky',
-        tool: {
-          callId: 'sticky',
+for (const kind of ['many lines', 'few wrapped lines', 'virtual rows']) {
+  test(`expanded code keeps collapse accessible with ${kind}`, async ({
+    page,
+  }) => {
+    await mock(page, 0);
+    await page.addInitScript((kind) => {
+      const host = window as any;
+      const text =
+        kind === 'few wrapped lines'
+          ? Array.from(
+              { length: 3 },
+              (_, i) => `${i}: ${'长文本abcdef'.repeat(800)}`,
+            ).join('\n')
+          : Array.from(
+              { length: kind === 'virtual rows' ? 600 : 180 },
+              (_, i) => `const line${i} = ${i};`,
+            ).join('\n');
+      host.bodies = { sticky: text };
+      host.historyMessages = [
+        // 工具位于真实对话后段，必须覆盖虚拟消息项的非零纵向偏移。
+        ...Array.from({ length: 40 }, (_, i) => ({
+          id: `before-sticky-${i}`,
+          role: 'user',
+          text: `之前的消息 ${i}`,
+          thinking: '',
+          status: 'done',
+          contentRef: null,
+          name: null,
+        })),
+        {
+          id: 'sticky',
+          role: 'toolResult',
           name: 'read',
-          path: 'src/sticky.ts',
-          outputLines: 180,
+          text,
+          thinking: '',
+          status: 'done',
+          contentRef: 'sticky',
+          tool: {
+            callId: 'sticky',
+            name: 'read',
+            path: 'src/sticky.ts',
+            outputLines:
+              kind === 'few wrapped lines'
+                ? 3
+                : kind === 'virtual rows'
+                  ? 600
+                  : 180,
+          },
         },
-      },
-    ];
+      ];
+    }, kind);
+    await page.goto('/');
+    await page
+      .getByRole('button', { name: '选择项目文件夹', exact: true })
+      .last()
+      .click();
+    const transcript = page.getByRole('region', {
+      name: '对话消息',
+      exact: true,
+    });
+    const heading = page.locator('.tool-heading');
+    await heading.click();
+    await expect(page.locator('.tool-code-line')).toHaveCount(
+      kind === 'few wrapped lines' ? 3 : kind === 'virtual rows' ? 600 : 180,
+    );
+    const code = page.locator('.tool-expanded .tool-code');
+    for (const width of [1200, 480]) {
+      await page.setViewportSize({ width, height: 900 });
+      const backdrop = page.getByRole('button', {
+        name: '收起侧栏',
+        exact: true,
+      });
+      if (await backdrop.isVisible()) await backdrop.click();
+      // 按真实几何位置滚到正文中段，禁止测试自动寻找标题掩盖吸顶失效。
+      await code.evaluate((node) => {
+        node.scrollTop = (node.scrollHeight - node.clientHeight) / 2;
+        const area = node.closest('.transcript')!;
+        area.scrollTop = area.scrollHeight;
+      });
+      await expect
+        .poll(() => code.evaluate((node) => node.scrollTop))
+        .toBeGreaterThan(0);
+      await expect(heading).toBeInViewport({ ratio: 1 });
+      await expect
+        .poll(() =>
+          heading.evaluate((node) => {
+            const rect = node.getBoundingClientRect();
+            const hit = document.elementFromPoint(
+              rect.right - 20,
+              rect.top + rect.height / 2,
+            );
+            return node.contains(hit);
+          }),
+        )
+        .toBe(true);
+    }
+    await expect(heading).toBeInViewport();
+    await expect(heading.locator('.tool-toggle-label')).toHaveText('收起详情');
+    await heading.click();
+    await expect(heading).toHaveAttribute('aria-expanded', 'false');
+    await expect(page.locator('.tool-expanded')).toHaveCount(0);
+    await expect(heading).toBeFocused();
+    await expect(heading).toBeInViewport();
+    await heading.click();
+    const collapse = page.getByRole('button', {
+      name: '收起输出',
+      exact: true,
+    });
+    // 末尾按钮保持普通布局，仅在真正读到末尾时出现。
+    await transcript.evaluate((node) => {
+      node.scrollTop = node.scrollHeight;
+    });
+    await expect(collapse).toBeInViewport({ ratio: 1 });
+    // 命中测试确保按钮没有被正文或输入区覆盖，也不让 click 自动滚动掩盖问题。
+    await expect
+      .poll(() =>
+        collapse.evaluate((node) => {
+          const rect = node.getBoundingClientRect();
+          return node.contains(
+            document.elementFromPoint(
+              rect.x + rect.width / 2,
+              rect.y + rect.height / 2,
+            ),
+          );
+        }),
+      )
+      .toBe(true);
+    await collapse.click({ trial: true });
+    await collapse.focus();
+    await collapse.press('Enter');
+    await expect(heading).toHaveAttribute('aria-expanded', 'false');
+    await expect(heading).toBeFocused();
+    await expect(heading).toBeInViewport();
   });
-  await page.goto('/');
-  await page
-    .getByRole('button', { name: '选择项目文件夹', exact: true })
-    .last()
-    .click();
-  const transcript = page.getByRole('region', {
-    name: '对话消息',
-    exact: true,
-  });
-  const heading = page.locator('.tool-heading');
-  await heading.click();
-  await expect(page.locator('.tool-code-line')).toHaveCount(180);
-  await transcript.evaluate((node) => {
-    node.scrollTop = 800;
-  });
-  await expect
-    .poll(async () => {
-      const bar = await heading.boundingBox();
-      const area = await transcript.boundingBox();
-      const inset = await transcript.evaluate((node) =>
-        parseFloat(getComputedStyle(node).paddingTop),
-      );
-      return bar && area ? Math.abs(bar.y - area.y - inset) : 1000;
-    })
-    .toBeLessThan(3);
-  await expect(heading).toBeInViewport();
-  await expect(heading.locator('.tool-toggle-label')).toHaveText('收起');
-  await heading.click();
-  await expect(heading).toHaveAttribute('aria-expanded', 'false');
-  await expect(page.locator('.tool-expanded')).toHaveCount(0);
-});
+}
 
 test('the first small upward wheel gesture leaves the bottom without snapping back', async ({
   page,
@@ -1991,27 +2022,218 @@ test('the first small upward wheel gesture leaves the bottom without snapping ba
   await page.getByRole('button', { name: '回到底部', exact: true }).click();
   await expect.poll(distanceFromBottom).toBeLessThan(3);
 });
-test('10000 messages mount a bounded visible window', async ({ page }) => {
-  const errors: string[] = [];
-  page.on('pageerror', (error) => errors.push(error.message));
+for (const deferred of [false, true]) {
+  test(`switching sessions keeps reading anchors stable with ${deferred ? 'deferred' : 'inline'} history`, async ({
+    page,
+  }) => {
+    await mock(page, 2, true);
+    await page.goto('/');
+    const recent = page.getByRole('region', { name: '最近', exact: true });
+    await recent.locator('[data-sidebar-path="alpha.jsonl"]').click();
+    await page.evaluate((deferred) => {
+      const host = window as any;
+      host.bodies = {};
+      // 模拟正文缓存淘汰后的按需重载，让高度变化确实发生在向上滚动期间。
+      const invoke = host.__TAURI_INTERNALS__.invoke;
+      host.__TAURI_INTERNALS__.invoke = async (command: string, args: any) => {
+        if (command === 'read_content')
+          await new Promise((resolve) => setTimeout(resolve, 80));
+        return invoke(command, args);
+      };
+      host.historyMessages = Array.from({ length: 160 }, (_, i) => ({
+        id: `variable-${i}`,
+        role: i % 3 !== 0 ? 'toolResult' : 'assistant',
+        text:
+          i % 3 !== 0
+            ? `输出 ${i}\nline 2\nline 3`
+            : `回答 ${i}\n\n` +
+              Array.from(
+                { length: 1 + (i % 4) },
+                (_, j) =>
+                  `段落 ${j}：${'这是用于检查历史阅读锚点的中文正文。'.repeat(2)}`,
+              ).join('\n\n'),
+        tool:
+          i % 3 !== 0
+            ? {
+                callId: `variable-${i}`,
+                name: 'bash',
+                command: `echo ${i}`,
+                tail: `输出 ${i}\nline 2\nline 3`,
+                outputLines: 3,
+              }
+            : undefined,
+        thinking: '',
+        status: 'done',
+        contentRef: null,
+        name: null,
+      })).map((message: any) => {
+        if (deferred && message.role === 'assistant') {
+          host.bodies[message.id] = message.text;
+          message.contentRef = message.id;
+          message.text = '';
+        }
+        return message;
+      });
+    }, deferred);
+    await recent.locator('[data-sidebar-path="beta.jsonl"]').click();
+    await expect(page.locator('.session-title')).toHaveText('添加测试');
+    const transcript = page.locator('.transcript');
+    await expect
+      .poll(() =>
+        transcript.evaluate(
+          (node) => node.scrollHeight - node.scrollTop - node.clientHeight,
+        ),
+      )
+      .toBeLessThan(3);
+    await expect(
+      page.locator('.message-item[data-message-id="variable-159"]'),
+    ).toContainText('回答 159');
+    await expect
+      .poll(() =>
+        transcript.evaluate(
+          (node) => node.scrollHeight - node.scrollTop - node.clientHeight,
+        ),
+      )
+      .toBeLessThan(3);
+    const area = (await transcript.boundingBox())!;
+    await page.mouse.move(area.x + 4, area.y + area.height / 2);
+    // 检查每帧正文坐标，而非只检查最终 scrollTop；否则一帧跳动后恢复会被漏掉。
+    for (let step = 0; step < 16; step++) {
+      await transcript.evaluate((node) => {
+        const host = window as any;
+        const edge = node.getBoundingClientRect().top;
+        const anchor = Array.from(
+          node.querySelectorAll<HTMLElement>('.message-item'),
+        ).find((item) => item.getBoundingClientRect().bottom > edge + 40)!;
+        const top = anchor.getBoundingClientRect().top;
+        host.anchorSamples = [];
+        host.anchorDone = false;
+        let frames = 0;
+        const sample = () => {
+          host.anchorSamples.push({
+            index: anchor.dataset.index,
+            shift: anchor.getBoundingClientRect().top - top,
+            scroll: node.scrollTop,
+          });
+          if (++frames < 20) requestAnimationFrame(sample);
+          else host.anchorDone = true;
+        };
+        requestAnimationFrame(sample);
+      });
+      await page.mouse.wheel(0, -240);
+      await page.waitForFunction(() => (window as any).anchorDone);
+      const samples = await page.evaluate(
+        () =>
+          (window as any).anchorSamples as {
+            index: string;
+            shift: number;
+            scroll: number;
+          }[],
+      );
+      expect(
+        Math.max(...samples.map((s) => s.shift)),
+        JSON.stringify({ step, samples }),
+      ).toBeLessThanOrEqual(242);
+      expect(
+        Math.min(...samples.map((s) => s.shift)),
+        JSON.stringify({ step, samples }),
+      ).toBeGreaterThanOrEqual(-2);
+      expect(
+        samples.at(-1)!.shift,
+        JSON.stringify({ step, samples }),
+      ).toBeCloseTo(240, 0);
+    }
+    await expect(
+      page.getByRole('button', { name: '回到底部', exact: true }),
+    ).toBeVisible();
+  });
+}
+
+test('growing a message across the viewport edge preserves its reading position', async ({
+  page,
+}) => {
+  await mock(page, 0);
+  await page.addInitScript(() => {
+    const host = window as any;
+    host.growingMessage = {
+      id: 'growing',
+      role: 'assistant',
+      status: 'streaming',
+      text: Array.from({ length: 100 }, (_, i) => `正在阅读的第 ${i} 行`).join(
+        '\n',
+      ),
+      thinking: '',
+      contentRef: null,
+      name: null,
+    };
+    host.historyMessages = [host.growingMessage];
+  });
+  await page.goto('/');
+  const transcript = page.locator('.transcript');
+  await expect
+    .poll(() =>
+      transcript.evaluate(
+        (node) => node.scrollHeight - node.scrollTop - node.clientHeight,
+      ),
+    )
+    .toBeLessThan(3);
+  await transcript.hover();
+  await page.mouse.wheel(0, -240);
+  await expect(
+    page.getByRole('button', { name: '回到底部', exact: true }),
+  ).toBeVisible();
+  // wheel 返回时原生滚动可能尚未执行；先等手势落地，再记录追加正文前的锚点。
+  await expect
+    .poll(() =>
+      transcript.evaluate(
+        (node) => node.scrollHeight - node.scrollTop - node.clientHeight,
+      ),
+    )
+    .toBeGreaterThan(230);
+  const content = page.locator('.streaming-text');
+  const before = await content.evaluate((node) => ({
+    top: node.getBoundingClientRect().top,
+    height: node.getBoundingClientRect().height,
+  }));
+  expect(before.top).toBeLessThan((await transcript.boundingBox())!.y);
+  await page.evaluate(() => {
+    const host = window as any;
+    host.emitEvents([
+      {
+        type: 'message',
+        message: {
+          ...host.growingMessage,
+          text: host.growingMessage.text + '\n' + '追加正文\n'.repeat(50),
+        },
+      },
+    ]);
+  });
+  await expect
+    .poll(() => content.evaluate((node) => node.getBoundingClientRect().height))
+    .toBeGreaterThan(before.height + 500);
+  // 覆盖 ResizeObserver 交付和后续跟随帧，不能只在正文刚更新时断言。
+  await content.evaluate(
+    () =>
+      new Promise<void>((resolve) => {
+        let frames = 0;
+        const sample = () =>
+          ++frames === 12 ? resolve() : requestAnimationFrame(sample);
+        requestAnimationFrame(sample);
+      }),
+  );
+  expect(
+    await content.evaluate((node) => node.getBoundingClientRect().top),
+  ).toBeCloseTo(before.top, 0);
+});
+
+test('large histories initially mount only the latest server page', async ({
+  page,
+}) => {
   await mock(page, 10000);
   await page.goto('/');
-  await page
-    .getByRole('button', { name: '选择项目文件夹', exact: true })
-    .last()
-    .click();
-  await expect(page.getByText('已连接', { exact: true })).toBeVisible();
-  await expect(page.locator('.message').first()).toBeVisible();
-  expect(await page.locator('.message').count()).toBeLessThan(40);
-  await page.locator('.transcript').evaluate((element) => {
-    element.scrollTop = element.scrollHeight / 2;
-  });
-  await page.mouse.move(700, 350);
-  await page.mouse.wheel(0, -800);
-  await expect(page.getByRole('button', { name: '回到底部' })).toBeVisible();
-  expect(errors).toEqual([]);
-  const durations = await page.evaluate(() => (window as any).longTasks);
-  console.log('browser long tasks (ms)', durations);
+  await expect(page.locator('.message-item')).toHaveCount(50);
+  await expect(page.locator('.message-item').last()).toContainText('消息 9999');
+  await expect(page.locator('.virtual-item, .virtual-space')).toHaveCount(0);
 });
 
 test('sidebar context menus rename, archive and restore projects and sessions across reload', async ({

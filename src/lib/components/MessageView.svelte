@@ -15,8 +15,10 @@
     toolViews,
     ontoggletool,
     read,
+    onchange,
   }: {
     message: Message;
+    onchange?: (message: Message, trigger: HTMLButtonElement) => void;
     onfull: (message: Message) => void;
     onload: (message: Message) => Promise<void>;
     onerror: (message: string) => void;
@@ -33,7 +35,7 @@
       : markdown(message.text),
   );
   onMount(() => {
-    if (!message.text && message.contentRef)
+    if (message.role !== 'toolResult' && !message.text && message.contentRef)
       void onload(message).catch((error) => onerror(String(error)));
     return () => clearTimeout(copyTimer);
   });
@@ -96,7 +98,13 @@
   class:summary={message.role === 'compactionSummary'}
 >
   {#if message.role === 'toolResult'}
-    <ToolMessage {message} views={toolViews} ontoggle={ontoggletool} {read} />
+    <ToolMessage
+      {message}
+      views={toolViews}
+      ontoggle={ontoggletool}
+      {read}
+      {onchange}
+    />
   {:else}
     {#if message.delivery}<div class="delivery-status" role="status">
         {message.delivery.mode === 'steer' ? '引导消息' : '后续消息'} · {message
@@ -128,7 +136,8 @@
     {#if message.status === 'error'}<small class="error-text"
         >回答未完成，请检查连接或模型配置。</small
       >{/if}
-    {#if message.status !== 'streaming' && message.text}<div
+    <!-- 工具调用旁可能有仅含空白的助手消息，不为其显示无内容可复制的操作栏。 -->
+    {#if message.status !== 'streaming' && message.text.trim()}<div
         class="message-actions"
       >
         <button

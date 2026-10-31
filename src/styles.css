@@ -1088,7 +1088,81 @@ button svg {
   font-size: 10px;
   padding: 3px 6px;
 }
-/* 虚拟列表项必须绝对定位，宽度稳定；每项内部间距计入 ResizeObserver 高度。 */
+/* 普通文档流不回收已读节点；历史前插由列表统一恢复锚点。 */
+/* 右侧独立审阅区域；列表实例保留，宽度变化只在开关时恢复一次锚点。 */
+.transcript-workspace {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+}
+.transcript-workspace.has-change > .transcript {
+  flex: 1 1 50%;
+  min-width: 0;
+  padding-inline: 24px;
+}
+.change-panel {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 50%;
+  min-width: 0;
+  border-inline-start: 1px solid var(--border);
+  background: var(--bg);
+}
+.change-panel-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border);
+}
+.change-panel-header strong {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-size: 13px;
+}
+.change-panel-header button {
+  flex-shrink: 0;
+}
+.change-panel-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+.change-panel .tool-code {
+  max-height: none;
+  overflow: visible;
+}
+.tool-change-summary {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 14px;
+}
+.change-added {
+  color: var(--diff-added);
+}
+.change-removed {
+  color: var(--diff-removed);
+}
+@media (max-width: 900px) {
+  /* 窄窗口保留对话节点及原宽度，仅隐藏阅读区；关闭即返回原位置。 */
+  .transcript-workspace.has-change {
+    position: relative;
+  }
+  .transcript-workspace.has-change > .transcript {
+    visibility: hidden;
+    flex: 1;
+    padding-inline: max(32px, calc((100% - 800px) / 2));
+  }
+  .change-panel {
+    position: absolute;
+    inset: 0;
+    z-index: 5;
+  }
+}
 .transcript {
   flex: 1;
   min-height: 0;
@@ -1099,14 +1173,9 @@ button svg {
   overflow-anchor: none;
   outline: none;
 }
-.virtual-space {
-  position: relative;
-  width: 100%;
-}
-.virtual-item {
-  position: absolute;
-  top: 0;
-  left: 0;
+.message-list,
+.message-item {
+  display: flow-root;
   width: 100%;
 }
 .message {
@@ -1242,9 +1311,10 @@ button svg {
 }
 .tool-step {
   border: 1px solid var(--border);
-  border-radius: 11px;
-  /* clip 保留圆角裁切，同时让标题相对外层对话吸顶。 */
-  overflow: clip;
+  border-radius: 12px;
+  background: var(--bg);
+  /* 保持祖先不裁切，让吸顶标题在整张工具卡片内可见。 */
+  overflow: visible;
   font-size: 12px;
 }
 .tool-step.tool-failed {
@@ -1253,40 +1323,56 @@ button svg {
 .tool-heading {
   position: relative;
   z-index: 3;
-  background: var(--bg);
+  background: var(--sidebar);
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 9px;
+  gap: 8px;
   text-align: left;
   width: 100%;
+  min-height: 44px;
   border: 0;
-  border-radius: 0;
-  padding: 10px 12px;
+  border-radius: 11px;
+  padding: 10px 14px;
 }
-.tool-step:has(.tool-code-line:nth-child(20))
-  .tool-heading[aria-expanded='true'] {
+.tool-heading:disabled {
+  opacity: 1;
+  cursor: default;
+  color: inherit;
+}
+.tool-heading:focus-visible {
+  outline-offset: -3px;
+}
+/* 折行后的少量原始行也可能占据多屏，吸顶不再依赖原始行数。 */
+.tool-heading[aria-expanded='true'] {
   position: sticky;
   top: 0;
 }
 .tool-name {
   color: var(--accent);
   font-weight: 600;
+  flex-shrink: 0;
 }
 .tool-command,
 .tool-path {
-  font-family: Consolas, monospace;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  font-family: 'Cascadia Code', Consolas, monospace;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  line-height: 1.65;
   min-width: 0;
-  flex: 1;
+  flex: 1 1 120px;
 }
 .tool-range {
   color: var(--muted);
 }
 .tool-state {
   margin-left: auto;
+  padding: 2px 7px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
   color: var(--muted);
+  font-size: 11px;
   white-space: nowrap;
 }
 .tool-failed .tool-state {
@@ -1303,34 +1389,66 @@ button svg {
 .tool-expanded .tool-code {
   scroll-margin-top: 60px;
 }
-.tool-expanded,
-.tool-preview {
+.tool-expanded {
   border-top: 1px solid var(--border);
 }
-.tool-code {
-  overflow: auto;
+/* 末尾保留普通入口，中段收起统一由吸顶标题提供。 */
+.tool-footer {
+  display: flex;
+  justify-content: flex-end;
+  padding: 6px 10px;
+  border-top: 1px solid var(--border);
   background: var(--sidebar);
-  overscroll-behavior: auto;
-  max-width: 100%;
+  box-shadow: 0 -3px 10px #00000008;
 }
-.tool-code.virtual-code {
-  height: min(420px, 60dvh);
+.tool-collapse {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 32px;
+  color: var(--accent);
+}
+.tool-code {
+  overflow-y: auto;
+  overflow-x: hidden;
+  max-height: min(380px, 50dvh);
+  background: var(--bg);
+  /* 防止正文边界处的触控板惯性突然带动对话。 */
+  overscroll-behavior-y: contain;
+  max-width: 100%;
+  min-width: 0;
+  padding: 10px 0;
+  scrollbar-width: thin;
+  scrollbar-gutter: stable;
+}
+.tool-code:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -3px;
 }
 .tool-code-lines {
   font:
-    12px/21px Consolas,
+    12px/22px 'Cascadia Code',
+    Consolas,
     'Microsoft YaHei',
     monospace;
   margin: 0;
-  padding: 0 10px;
-  width: max-content;
-  min-width: 100%;
-  white-space: pre;
+  width: 100%;
+  white-space: pre-wrap;
+  /* 连续路径、URL 和压缩 JSON 也必须在容器内折行，保留原始缩进。 */
+  overflow-wrap: anywhere;
+  tab-size: 4;
 }
 .tool-code-line {
   display: block;
-  height: 21px;
-  min-width: 100%;
+  min-height: 22px;
+  padding: 0 14px;
+  border-inline-start: 2px solid transparent;
+}
+.tool-code-line.diff-added {
+  border-inline-start-color: var(--diff-added);
+}
+.tool-code-line.diff-removed {
+  border-inline-start-color: var(--diff-removed);
 }
 .diff-added {
   color: var(--diff-added);
@@ -1366,7 +1484,8 @@ button svg {
 }
 .tool-expand-hint,
 .tool-load-more {
-  margin: 3px 5px;
+  margin: 5px 8px;
+  color: var(--accent);
 }
 .tool details {
   border: 1px solid var(--border);
@@ -1417,8 +1536,11 @@ button svg {
   border-top: 1px solid var(--border);
 }
 .older-row {
+  min-height: 44px;
   text-align: center;
   padding: 5px 0 15px;
+  color: var(--muted);
+  font-size: 12px;
 }
 .scroll-bottom {
   position: absolute;
