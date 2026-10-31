@@ -567,7 +567,13 @@ pub fn save(dir: &Path, input: ModelSettings) -> Result<ModelSettings> {
         if !overrides.is_empty() || old.get("modelOverrides").is_some() {
             next["modelOverrides"] = Value::Object(overrides);
         }
-        models["providers"][&p.id] = next;
+        // 仅有认证的服务商不应生成空配置；否则移除端点后再次保存会复活为 Pi 拒绝的 {}。
+        // 同时清理旧版本已写入的空条目，认证仍由上方的独立动作管理。
+        if next.as_object().is_some_and(|o| o.is_empty()) {
+            models["providers"].as_object_mut().unwrap().remove(&p.id);
+        } else {
+            models["providers"][&p.id] = next;
+        }
     }
     if let (Some(pid), Some(mid)) = (&input.default_provider, &input.default_model) {
         if let Some(p) = input.providers.iter().find(|p| &p.id == pid) {
@@ -735,6 +741,93 @@ mod tests {
             "CONFIG_CONFLICT"
         );
     }
+    #[test]
+    fn auth_only_providers_do_not_create_empty_model_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let auth = json!({
+            "EE": {"type": "api_key", "key": "test-only"},
+            "openai": {"type": "oauth", "access": "test-only", "refresh": "test-only", "expires": 1}
+        });
+        fs::write(dir.path().join("auth.json"), auth.to_string()).unwrap();
+        let form = load(dir.path()).unwrap();
+        let saved = save(dir.path(), form).unwrap();
+        assert_eq!(saved.providers.len(), 2);
+        let models = parse(&raw(dir.path()).unwrap()[0], "models.json").unwrap();
+        assert_eq!(models["providers"], json!({}));
+        assert_eq!(
+            parse(&raw(dir.path()).unwrap()[1], "auth.json").unwrap(),
+            auth
+        );
+    }
+
+    #[test]
+    fn removing_endpoint_preserves_optional_auth_without_resurrecting_config() {
+        for clear_credential in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            fs::write(
+                dir.path().join("models.json"),
+                json!({"providers": {"EE": {
+                    "baseUrl": "https://example.test/v1", "api": "openai-responses",
+                    "models": [{"id": "m"}]
+                }}})
+                .to_string(),
+            )
+            .unwrap();
+            fs::write(
+                dir.path().join("auth.json"),
+                r#"{"EE":{"type":"api_key","key":"test-only"}}"#,
+            )
+            .unwrap();
+            fs::write(
+                dir.path().join("settings.json"),
+                r#"{"modelThinkingLevels":{"EE/m":"high","other/m":"low"}}"#,
+            )
+            .unwrap();
+            let mut form = load(dir.path()).unwrap();
+            form.providers[0].removed = true;
+            form.providers[0].clear_credential = clear_credential;
+            let saved = save(dir.path(), form).unwrap();
+            assert_eq!(saved.providers.len(), usize::from(!clear_credential));
+            // 保存返回的快照会重新包含保留的认证；连续保存也不能把端点写回来。
+            let saved = save(dir.path(), saved).unwrap();
+            save(dir.path(), saved).unwrap();
+            let bytes = raw(dir.path()).unwrap();
+            let models = parse(&bytes[0], "models.json").unwrap();
+            let auth = parse(&bytes[1], "auth.json").unwrap();
+            let settings = parse(&bytes[2], "settings.json").unwrap();
+            assert!(models["providers"].get("EE").is_none());
+            assert_eq!(auth.get("EE").is_none(), clear_credential);
+            assert!(settings["modelThinkingLevels"].get("EE/m").is_none());
+            assert_eq!(settings["modelThinkingLevels"]["other/m"], "low");
+        }
+    }
+
+    #[test]
+    fn saving_repairs_legacy_empty_provider_and_preserves_other_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let other = json!({"headers": {"X-Test": "keep"}, "future": true});
+        fs::write(
+            dir.path().join("models.json"),
+            json!({"future": true, "providers": {"EE": {}, "other": other}}).to_string(),
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join("auth.json"),
+            r#"{"EE":{"type":"api_key","key":"test-only"}}"#,
+        )
+        .unwrap();
+        save(dir.path(), load(dir.path()).unwrap()).unwrap();
+        let bytes = raw(dir.path()).unwrap();
+        let models = parse(&bytes[0], "models.json").unwrap();
+        assert!(models["providers"].get("EE").is_none());
+        assert_eq!(models["providers"]["other"], other);
+        assert_eq!(models["future"], true);
+        assert_eq!(
+            parse(&bytes[1], "auth.json").unwrap()["EE"]["key"],
+            "test-only"
+        );
+    }
+
     #[test]
     fn locks_validation_and_oauth_protection() {
         let dir = tempfile::tempdir().unwrap();

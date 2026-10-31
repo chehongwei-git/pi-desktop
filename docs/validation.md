@@ -51,6 +51,14 @@ TAURI_BUNDLER_TOOLS_GITHUB_MIRROR=https://v4.gh-proxy.org/https://github.com npm
 - macOS 本机 Chrome 模拟 IPC 浏览器流程：新增端点、发现模型、编辑能力和 max 映射、保存及离开草稿保护通过。临时浏览器配置已移除。
 - 本次为前端与交互文档修改，未重新验证 Windows/Linux 原生环境。
 
+## 删除端点后空服务商回写修复（macOS）
+
+- Rust 单元测试 27 项通过，新增仅认证服务商保存、移除端点后保留/清除认证并连续保存、旧版空配置修复与其他配置保留的回归覆盖。
+- 前端测试 140 项通过；`npm run check` 无错误和警告，`npm run build` 通过。
+- `node scripts/verify-model-config.mjs` 通过：隔离目录保留 EE 认证而不写入 EE provider，真实 Pi 加载与本地刷新成功，未调用生成模型。
+- 修改的 Rust 文件通过 stable rustfmt 检查，`git diff --check` 通过。全仓库 `cargo fmt --check` 仍被 rpc.rs、runtime.rs 中已有格式差异阻塞，本次未修改这些文件。
+- 本次未执行 Windows/Linux 实机验证或重新打包安装器。
+
 ## 尚待验收与已知限制
 
 - Pi 1.4.0 的真实模型发送、真实 CLI 历史恢复、工具和扩展交互仍需使用者实机验收；模拟协议不等同于完整用户环境。

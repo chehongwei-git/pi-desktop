@@ -34,7 +34,11 @@ try {
   );
   await writeFile(
     join(directory, 'auth.json'),
-    JSON.stringify({ 'desktop-test': { type: 'api_key', key: 'test-only' } }),
+    // 移除端点后可以保留认证，但 models.json 中不能因此重建空 provider。
+    JSON.stringify({
+      'desktop-test': { type: 'api_key', key: 'test-only' },
+      EE: { type: 'api_key', key: 'retained-test-only' },
+    }),
   );
   await writeFile(
     join(directory, 'settings.json'),
