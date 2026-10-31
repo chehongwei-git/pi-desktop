@@ -16,6 +16,8 @@
   import ExtensionDialog from './lib/components/ExtensionDialog.svelte';
   import BuiltinCommandDialog from './lib/components/BuiltinCommandDialog.svelte';
   import SidebarSession from './lib/components/SidebarSession.svelte';
+  import SidebarContextMenu from './lib/components/SidebarContextMenu.svelte';
+  import SidebarCollection from './lib/components/SidebarCollection.svelte';
   const desktop = new Desktop();
   let displayProject = $derived(desktop.newChatProject ?? desktop.project);
   let sidebar = $state(true);
@@ -24,6 +26,24 @@
   let pinnedOpen = $state(true);
   let projectsOpen = $state(true);
   let recentOpen = $state(true);
+  let sidebarCollection = $state<'archived' | null>(null);
+  let collectionTrigger: HTMLElement | null = null;
+  function openCollection(event: MouseEvent, collection: 'archived'): void {
+    collectionTrigger = event.currentTarget as HTMLElement;
+    sidebarCollection = collection;
+    sidebar = window.innerWidth > 900;
+  }
+  async function closeCollection(): Promise<void> {
+    sidebarCollection = null;
+    await tick();
+    if (sidebar) collectionTrigger?.focus({ preventScroll: true });
+    else
+      document
+        .querySelector<HTMLButtonElement>(
+          '.conversation-workspace [aria-label="展开侧栏"]',
+        )
+        ?.focus({ preventScroll: true });
+  }
   let showAllProjects = $state(false);
   let draggingProject = $state('');
   let dropProject = $state('');
@@ -183,6 +203,7 @@
   }
   /** 新对话可在输入框上方重新选择工作目录。 */
   function newChat(project = desktop.project): void {
+    sidebarCollection = null;
     desktop.requestSwitch('开始新对话', async () => {
       desktop.prepareNewChat(project);
     });
@@ -206,6 +227,7 @@
   function selectSession(project: string, path: string): void {
     desktop.requestSwitch('打开历史会话', async () => {
       await desktop.openSession(project, path);
+      sidebarCollection = null;
       sidebar = window.innerWidth > 900;
     });
   }
@@ -283,6 +305,7 @@
 </script>
 
 <svelte:window onkeydown={keydown} onfocus={focus} />
+<SidebarContextMenu {desktop} />
 {#snippet sessionItem(session: SessionSummary, showProject = false)}
   <SidebarSession
     {session}
@@ -390,6 +413,9 @@
               <div class="project-row">
                 <button
                   class="project-current"
+                  data-sidebar-kind="project"
+                  data-sidebar-path={project.path}
+                  data-sidebar-label={desktop.projectName(project.path)}
                   class:active={desktop.projectKey(project.path) ===
                     desktop.projectKey(displayProject)}
                   class:project-dragging={draggingProject === project.path}
@@ -425,8 +451,7 @@
                     ><Icon name="down" size={13} /></span
                   >
                   <Icon name="folder" size={17} /><span class="project-name"
-                    >{project.path.split(/[\\/]/).filter(Boolean).pop() ||
-                      project.path}</span
+                    >{desktop.projectName(project.path)}</span
                   >
                   <small>{project.sessions.length}</small>
                 </button>
@@ -493,6 +518,13 @@
             </div>{/each}
         {/if}
       </section>
+      <div class="section-label">
+        <button
+          class="text-button"
+          aria-current={sidebarCollection === 'archived' ? 'page' : undefined}
+          onclick={(event) => openCollection(event, 'archived')}>已归档</button
+        >
+      </div>
     </nav>
     <button
       class="sidebar-settings"
@@ -505,251 +537,308 @@
     >
   </aside>
   <main class="main-pane">
-    <header class="topbar">
-      <div class="topbar-left">
+    {#if desktop.sidebarFeedback || desktop.sidebarError}
+      <div
+        class="banner"
+        class:error-banner={!!desktop.sidebarError}
+        class:notice-banner={!desktop.sidebarError}
+      >
+        {#if desktop.sidebarError}<span role="alert"
+            >{desktop.sidebarError}</span
+          >{:else}<span role="status">{desktop.sidebarFeedback}</span>{/if}
+        {#if desktop.sidebarUndo}<button
+            disabled={desktop.sidebarSaving}
+            onclick={() => {
+              void desktop.undoSidebar().catch((error) => {
+                desktop.sidebarError = errorMessage(error);
+              });
+            }}>撤销</button
+          >{/if}
+        <button
+          class="icon-button"
+          aria-label="关闭历史管理提示"
+          onclick={() => {
+            desktop.sidebarFeedback = '';
+            desktop.sidebarError = '';
+            desktop.sidebarUndo = null;
+          }}><Icon name="close" size={15} /></button
+        >
+      </div>
+    {/if}
+    {#if sidebarCollection}
+      <div class="collection-navigation">
         {#if !sidebar}<button
             class="icon-button"
             aria-label="展开侧栏"
             onclick={() => {
               sidebar = true;
             }}><Icon name="panel" /></button
-          >{/if}<span class="product-name">Pi</span><select
-          class="model-select"
-          aria-label="模型"
-          value={modelKey}
-          disabled={!!desktop.openingSession ||
-            desktop.connection !== 'ready' ||
-            desktop.run !== 'idle'}
-          onchange={(event) => {
-            void desktop.guard(() =>
-              desktop.setModel(event.currentTarget.value),
-            );
-          }}
-          ><option value=""
-            >{desktop.connection === 'starting'
-              ? '正在连接…'
-              : '选择模型'}</option
-          >{#each desktop.models as model}<option
-              value={`${model.provider}/${model.id}`}
-              >{model.name} · {model.provider}</option
-            >{/each}</select
-        >{#if desktop.levels.length > 1}<select
-            class="thinking-select"
-            aria-label="思考级别"
-            value={desktop.snapshot.thinkingLevel ?? 'off'}
-            disabled={!!desktop.openingSession || desktop.run !== 'idle'}
-            onchange={(event) => {
-              const level = event.currentTarget.value;
-              void desktop.guard(async () => {
-                await desktop.action({ type: 'set_thinking', level });
-                await desktop.syncState();
-              });
-            }}
-            >{#each desktop.levels as level}<option value={level}
-                >{level}</option
-              >{/each}</select
+          >{/if}<span>项目与会话</span>{#if runLabel}<span role="status"
+            >{runLabel}</span
           >{/if}
       </div>
-      <div class="topbar-right">
-        <span
-          class="connection"
-          class:connected={desktop.connection === 'ready'}
-          ><span class="status-dot"></span>{desktop.connection === 'ready'
-            ? '已连接'
-            : desktop.connection === 'starting'
-              ? '连接中'
-              : desktop.connection === 'failed'
-                ? '连接失败'
-                : '未连接'}</span
-        >
-        <div class="session-menu-wrap">
-          <button
-            class="icon-button"
-            aria-label="会话菜单"
-            onclick={() => {
-              sessionMenu = !sessionMenu;
-            }}><Icon name="more" /></button
-          >{#if sessionMenu}<div class="session-menu">
-              <button
-                disabled={desktop.newChatProject !== null ||
-                  !!desktop.openingSession ||
-                  !desktop.snapshot.sessionFile}
-                onclick={() => {
-                  void desktop.guard(copyPath);
-                }}>复制会话路径</button
-              ><button
-                disabled={desktop.newChatProject !== null ||
-                  !!desktop.openingSession ||
-                  desktop.run !== 'idle' ||
-                  !desktop.snapshot.sessionFile}
-                onclick={() => {
-                  renameValue = desktop.snapshot.sessionName ?? '';
-                  renameOpen = true;
-                  sessionMenu = false;
-                }}>重命名当前会话</button
-              ><button
-                disabled={!!desktop.openingSession ||
-                  desktop.connection === 'disconnected'}
-                onclick={() => {
-                  sessionMenu = false;
-                  void desktop.guard(() => desktop.disconnect());
-                }}>断开 Pi</button
-              >
-            </div>{/if}
-        </div>
-      </div>
-    </header>
-    {#if displayProject || desktop.newChatProject !== null || desktop.openingSession}
-      <div class="conversation-heading">
-        <h1 class="session-title" title={desktop.sessionTitle}>
-          {desktop.sessionTitle}
-        </h1>
-      </div>
+      <SidebarCollection
+        {desktop}
+        onclose={() => {
+          void closeCollection();
+        }}
+      />
     {/if}
-    {#if desktop.error}<div class="banner error-banner" role="alert">
-        <span>{desktop.error}</span><button
-          class="text-button"
-          onclick={() => {
-            settingsOpen = true;
-          }}>设置</button
-        >{#if desktop.project}<button
-            class="text-button"
-            onclick={() =>
-              desktop.requestSwitch('重新连接', () =>
-                desktop.connect(desktop.project),
-              )}>重新连接</button
-          >{/if}<button
-          class="icon-button"
-          aria-label="关闭错误"
-          onclick={() => {
-            desktop.error = '';
-          }}><Icon name="close" size={15} /></button
-        >
-      </div>{/if}
-    {#if desktop.notice}<div class="banner notice-banner" role="status">
-        <span>{desktop.notice}</span>{#if desktop.run === 'aborting'}<button
-            class="text-button"
-            onclick={() => {
-              void desktop.guard(() => desktop.disconnect(true));
-            }}>强制关闭</button
-          >{/if}<button
-          class="icon-button"
-          aria-label="关闭提示"
-          onclick={() => {
-            desktop.notice = '';
-          }}><Icon name="close" size={15} /></button
-        >
-      </div>{/if}
-    <div class="conversation" class:empty aria-busy={!!desktop.openingSession}>
-      {#if desktop.openingSession}
-        <div class="session-loading" role="status" aria-label="正在加载会话">
-          <span class="loading-indicator" aria-hidden="true"
-            ><Icon name="refresh" size={20} /></span
-          >
-        </div>
-      {:else if empty}<div class="welcome">
-          <div class="welcome-logo"><Icon name="pi" size={40} /></div>
-          <h1>
-            {displayProject ? '今天想做些什么？' : '让 Pi 与你的项目一起工作'}
-          </h1>
-          <p>
-            {displayProject
-              ? displayProject
-              : '直接新建对话，或选择项目文件夹开始。'}
-          </p>
-          {#if !displayProject}<button
-              class="choose-project"
-              onclick={chooseProject}
-              ><Icon name="folder" size={18} />选择项目文件夹</button
-            >{:else if desktop.connection === 'disconnected' || desktop.connection === 'failed'}<button
-              class="choose-project"
+    <div
+      class="conversation-workspace"
+      class:collection-hidden={sidebarCollection !== null}
+      inert={sidebarCollection !== null}
+    >
+      <header class="topbar">
+        <div class="topbar-left">
+          {#if !sidebar}<button
+              class="icon-button"
+              aria-label="展开侧栏"
               onclick={() => {
-                void desktop.connect(desktop.project);
-              }}>连接 Pi</button
+                sidebar = true;
+              }}><Icon name="panel" /></button
+            >{/if}<span class="product-name">Pi</span><select
+            class="model-select"
+            aria-label="模型"
+            value={modelKey}
+            disabled={!!desktop.openingSession ||
+              desktop.connection !== 'ready' ||
+              desktop.run !== 'idle'}
+            onchange={(event) => {
+              void desktop.guard(() =>
+                desktop.setModel(event.currentTarget.value),
+              );
+            }}
+            ><option value=""
+              >{desktop.connection === 'starting'
+                ? '正在连接…'
+                : '选择模型'}</option
+            >{#each desktop.models as model}<option
+                value={`${model.provider}/${model.id}`}
+                >{model.name} · {model.provider}</option
+              >{/each}</select
+          >{#if desktop.levels.length > 1}<select
+              class="thinking-select"
+              aria-label="思考级别"
+              value={desktop.snapshot.thinkingLevel ?? 'off'}
+              disabled={!!desktop.openingSession || desktop.run !== 'idle'}
+              onchange={(event) => {
+                const level = event.currentTarget.value;
+                void desktop.guard(async () => {
+                  await desktop.action({ type: 'set_thinking', level });
+                  await desktop.syncState();
+                });
+              }}
+              >{#each desktop.levels as level}<option value={level}
+                  >{level}</option
+                >{/each}</select
             >{/if}
         </div>
-      {:else}{#key `${desktop.runtimeId}:${desktop.snapshot.sessionFile ?? ''}`}<Transcript
-            messages={desktop.messages}
-            hasMore={desktop.hasMore}
-            loading={desktop.loadingHistory}
-            onolder={() => desktop.refreshHistory(desktop.before)}
-            onfull={(message) => {
-              void showFull(message);
-            }}
-            toolViews={desktop.toolViews}
-            ontoggletool={(id, section) => desktop.toggleTool(id, section)}
-            read={(id, offset) => desktop.readContent(id, offset)}
-            onvisible={(ids) => desktop.pinVisible(ids)}
-            onload={(message) => desktop.loadPreview(message)}
-            onerror={(message) => {
-              desktop.error = message;
-            }}
-          />{/key}{/if}
-      <div class="composer-area">
-        {#if desktop.extensions[0]}
-          {@const request = desktop.extensions[0]}
-          {#key request.id}
-            <ExtensionDialog
-              {request}
-              onrespond={(value) => {
-                void desktop.guard(() => desktop.respond(request, value));
+        <div class="topbar-right">
+          <span
+            class="connection"
+            class:connected={desktop.connection === 'ready'}
+            ><span class="status-dot"></span>{desktop.connection === 'ready'
+              ? '已连接'
+              : desktop.connection === 'starting'
+                ? '连接中'
+                : desktop.connection === 'failed'
+                  ? '连接失败'
+                  : '未连接'}</span
+          >
+          <div class="session-menu-wrap">
+            <button
+              class="icon-button"
+              aria-label="会话菜单"
+              onclick={() => {
+                sessionMenu = !sessionMenu;
+              }}><Icon name="more" /></button
+            >{#if sessionMenu}<div class="session-menu">
+                <button
+                  disabled={desktop.newChatProject !== null ||
+                    !!desktop.openingSession ||
+                    !desktop.snapshot.sessionFile}
+                  onclick={() => {
+                    void desktop.guard(copyPath);
+                  }}>复制会话路径</button
+                ><button
+                  disabled={desktop.newChatProject !== null ||
+                    !!desktop.openingSession ||
+                    desktop.run !== 'idle' ||
+                    !desktop.snapshot.sessionFile}
+                  onclick={() => {
+                    renameValue = desktop.snapshot.sessionName ?? '';
+                    renameOpen = true;
+                    sessionMenu = false;
+                  }}>重命名当前会话</button
+                ><button
+                  disabled={!!desktop.openingSession ||
+                    desktop.connection === 'disconnected'}
+                  onclick={() => {
+                    sessionMenu = false;
+                    void desktop.guard(() => desktop.disconnect());
+                  }}>断开 Pi</button
+                >
+              </div>{/if}
+          </div>
+        </div>
+      </header>
+      {#if displayProject || desktop.newChatProject !== null || desktop.openingSession}
+        <div class="conversation-heading">
+          <h1 class="session-title" title={desktop.sessionTitle}>
+            {desktop.sessionTitle}
+          </h1>
+        </div>
+      {/if}
+      {#if desktop.error}<div class="banner error-banner" role="alert">
+          <span>{desktop.error}</span><button
+            class="text-button"
+            onclick={() => {
+              settingsOpen = true;
+            }}>设置</button
+          >{#if desktop.project}<button
+              class="text-button"
+              onclick={() =>
+                desktop.requestSwitch('重新连接', () =>
+                  desktop.connect(desktop.project),
+                )}>重新连接</button
+            >{/if}<button
+            class="icon-button"
+            aria-label="关闭错误"
+            onclick={() => {
+              desktop.error = '';
+            }}><Icon name="close" size={15} /></button
+          >
+        </div>{/if}
+      {#if desktop.notice}<div class="banner notice-banner" role="status">
+          <span>{desktop.notice}</span>{#if desktop.run === 'aborting'}<button
+              class="text-button"
+              onclick={() => {
+                void desktop.guard(() => desktop.disconnect(true));
+              }}>强制关闭</button
+            >{/if}<button
+            class="icon-button"
+            aria-label="关闭提示"
+            onclick={() => {
+              desktop.notice = '';
+            }}><Icon name="close" size={15} /></button
+          >
+        </div>{/if}
+      <div
+        class="conversation"
+        class:empty
+        aria-busy={!!desktop.openingSession}
+      >
+        {#if desktop.openingSession}
+          <div class="session-loading" role="status" aria-label="正在加载会话">
+            <span class="loading-indicator" aria-hidden="true"
+              ><Icon name="refresh" size={20} /></span
+            >
+          </div>
+        {:else if empty}<div class="welcome">
+            <div class="welcome-logo"><Icon name="pi" size={40} /></div>
+            <h1>
+              {displayProject ? '今天想做些什么？' : '让 Pi 与你的项目一起工作'}
+            </h1>
+            <p>
+              {displayProject
+                ? displayProject
+                : '直接新建对话，或选择项目文件夹开始。'}
+            </p>
+            {#if !displayProject}<button
+                class="choose-project"
+                onclick={chooseProject}
+                ><Icon name="folder" size={18} />选择项目文件夹</button
+              >{:else if desktop.connection === 'disconnected' || desktop.connection === 'failed'}<button
+                class="choose-project"
+                onclick={() => {
+                  void desktop.connect(desktop.project);
+                }}>连接 Pi</button
+              >{/if}
+          </div>
+        {:else}{#key `${desktop.runtimeId}:${desktop.snapshot.sessionFile ?? ''}`}<Transcript
+              messages={desktop.messages}
+              hasMore={desktop.hasMore}
+              loading={desktop.loadingHistory}
+              onolder={() => desktop.refreshHistory(desktop.before)}
+              onfull={(message) => {
+                void showFull(message);
+              }}
+              toolViews={desktop.toolViews}
+              ontoggletool={(id, section) => desktop.toggleTool(id, section)}
+              read={(id, offset) => desktop.readContent(id, offset)}
+              onvisible={(ids) => desktop.pinVisible(ids)}
+              onload={(message) => desktop.loadPreview(message)}
+              onerror={(message) => {
+                desktop.error = message;
+              }}
+            />{/key}{/if}
+        <div class="composer-area">
+          {#if desktop.extensions[0]}
+            {@const request = desktop.extensions[0]}
+            {#key request.id}
+              <ExtensionDialog
+                {request}
+                onrespond={(value) => {
+                  void desktop.guard(() => desktop.respond(request, value));
+                }}
+              />
+            {/key}
+          {/if}
+          {#if runLabel}<div class="run-status" role="status">
+              <span class="working status-dot"></span>{runLabel}
+            </div>{/if}
+          {#each Object.entries(desktop.statuses).filter(([, value]) => value) as [key, value] (key)}<div
+              class="extension-status"
+            >
+              {value}
+            </div>{/each}
+          {#each Object.entries(desktop.widgets).filter(([, value]) => value.length) as [key, value] (key)}<details
+              class="widget"
+            >
+              <summary>{key}</summary>
+              <pre>{value.join('\n')}</pre>
+            </details>{/each}
+          {#if desktop.queued.length}<div class="queue-hint">
+              已排队 {desktop.queued.length} 条消息
+            </div>{/if}
+          {#if desktop.recovered.length}<div class="recovered-drafts">
+              <span>可恢复草稿</span
+              >{#each desktop.recovered as text, index}<button
+                  title={text}
+                  onclick={() => {
+                    if (desktop.draft) desktop.recovered.push(desktop.draft);
+                    desktop.draft = text;
+                    desktop.recovered.splice(index, 1);
+                  }}>草稿 {index + 1}</button
+                >{/each}
+            </div>{/if}
+          {#if desktop.newChatProject !== null || empty}
+            <ProjectPicker
+              projects={desktop.projects}
+              project={displayProject}
+              disabled={!!desktop.openingSession ||
+                desktop.connection === 'starting'}
+              onselect={selectNewProject}
+              oncreate={() => {
+                void createNewProject();
               }}
             />
-          {/key}
-        {/if}
-        {#if runLabel}<div class="run-status" role="status">
-            <span class="working status-dot"></span>{runLabel}
-          </div>{/if}
-        {#each Object.entries(desktop.statuses).filter(([, value]) => value) as [key, value] (key)}<div
-            class="extension-status"
-          >
-            {value}
-          </div>{/each}
-        {#each Object.entries(desktop.widgets).filter(([, value]) => value.length) as [key, value] (key)}<details
-            class="widget"
-          >
-            <summary>{key}</summary>
-            <pre>{value.join('\n')}</pre>
-          </details>{/each}
-        {#if desktop.queued.length}<div class="queue-hint">
-            已排队 {desktop.queued.length} 条消息
-          </div>{/if}
-        {#if desktop.recovered.length}<div class="recovered-drafts">
-            <span>可恢复草稿</span
-            >{#each desktop.recovered as text, index}<button
-                title={text}
-                onclick={() => {
-                  if (desktop.draft) desktop.recovered.push(desktop.draft);
-                  desktop.draft = text;
-                  desktop.recovered.splice(index, 1);
-                }}>草稿 {index + 1}</button
-              >{/each}
-          </div>{/if}
-        {#if desktop.newChatProject !== null || empty}
-          <ProjectPicker
-            projects={desktop.projects}
-            project={displayProject}
-            disabled={!!desktop.openingSession ||
-              desktop.connection === 'starting'}
-            onselect={selectNewProject}
-            oncreate={() => {
-              void createNewProject();
+          {/if}
+          <CommandComposer
+            {desktop}
+            onsend={(mode) => {
+              void desktop.guard(async () => {
+                await desktop.send(mode);
+              });
             }}
           />
-        {/if}
-        <CommandComposer
-          {desktop}
-          onsend={(mode) => {
-            void desktop.guard(async () => {
-              await desktop.send(mode);
-            });
-          }}
-        />
-        <p class="composer-footnote">
-          Pi 在本地项目中工作，请检查重要改动。{#if desktop.version}<span
-              >Pi {desktop.version}</span
-            >{/if}
-        </p>
+          <p class="composer-footnote">
+            Pi 在本地项目中工作，请检查重要改动。{#if desktop.version}<span
+                >Pi {desktop.version}</span
+              >{/if}
+          </p>
+        </div>
       </div>
     </div>
   </main>

@@ -29,6 +29,9 @@
 <div class="session-row" class:active>
   <button
     class="history-item"
+    data-sidebar-kind="session"
+    data-sidebar-path={session.path}
+    data-sidebar-label={label}
     class:active
     aria-current={active ? 'page' : undefined}
     title={session.warning ?? `${label}\n${session.cwd}`}

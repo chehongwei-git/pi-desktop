@@ -67,9 +67,18 @@ mod tests {
         assert_eq!(settings.zoom, 100);
         settings.zoom = 120;
         settings.pinned_sessions = vec!["session.jsonl".into()];
+        settings.sidebar_items = vec![crate::types::SidebarItem {
+            kind: "project".into(),
+            path: "/alpha".into(),
+            name: Some("项目别名".into()),
+            state: Some("archived".into()),
+        }];
         settings.project_order = vec!["/beta".into(), "/alpha".into()];
         save(dir.path(), &settings).unwrap();
         assert_eq!(load(dir.path()).unwrap().zoom, 120);
+        let saved = load(dir.path()).unwrap();
+        assert_eq!(saved.sidebar_items[0].name.as_deref(), Some("项目别名"));
+        assert_eq!(saved.sidebar_items[0].state.as_deref(), Some("archived"));
         assert_eq!(
             load(dir.path()).unwrap().project_order,
             vec!["/beta", "/alpha"]

@@ -1,4 +1,10 @@
 /** IPC 业务 DTO；与 Rust types.rs 对齐。组件不能自行构造或发送原始 Pi RPC。 */
+export interface SidebarItem {
+  kind: 'project' | 'session';
+  path: string;
+  name?: string;
+  state?: 'archived' | 'deleted';
+}
 export interface Settings {
   schemaVersion: number;
   piPath: string;
@@ -8,6 +14,7 @@ export interface Settings {
   recentProjects: string[];
   projectOrder: string[];
   pinnedSessions: string[];
+  sidebarItems?: SidebarItem[];
   theme: 'system' | 'light' | 'dark';
   zoom: number;
 }

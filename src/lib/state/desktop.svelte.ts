@@ -15,6 +15,7 @@ import {
   type RunState,
   type SessionSummary,
   type Settings,
+  type SidebarItem,
   type Snapshot,
   type Wakeup,
 } from '../types';
@@ -39,11 +40,147 @@ export class Desktop {
     this.toolViews[id] = { ...view, [section]: !view[section] };
   }
   sessions = $state<SessionSummary[]>([]);
+  sidebarSaving = $state(false);
+  sidebarFeedback = $state('');
+  sidebarError = $state('');
+  sidebarUndo = $state<{
+    kind: SidebarItem['kind'];
+    path: string;
+    state: SidebarItem['state'];
+  } | null>(null);
+  sidebarLabel(item: Pick<SidebarItem, 'kind' | 'path'>): string {
+    if (item.kind === 'project') return this.projectName(item.path);
+    const session = this.sessions.find(
+      (entry) => this.sessionKey(entry.path) === this.sessionKey(item.path),
+    );
+    return (
+      this.sidebarItem('session', item.path)?.name ||
+      session?.name ||
+      session?.preview ||
+      item.path.split(/[\\/]/).at(-1) ||
+      item.path
+    );
+  }
+  /** 历史 deleted 状态兼容为归档，后续保存时统一写 archived。 */
+  get archivedItems(): SidebarItem[] {
+    return (this.settings.sidebarItems ?? []).filter((item) => !!item.state);
+  }
+  sidebarProject(item: Pick<SidebarItem, 'kind' | 'path'>): string {
+    if (item.kind === 'project') return item.path;
+    return (
+      this.sessions.find(
+        (entry) => this.sessionKey(entry.path) === this.sessionKey(item.path),
+      )?.cwd ?? ''
+    );
+  }
+  sidebarParent(
+    item: Pick<SidebarItem, 'kind' | 'path'>,
+  ): SidebarItem | undefined {
+    if (item.kind !== 'session') return;
+    const session = this.sessions.find(
+      (entry) => this.sessionKey(entry.path) === this.sessionKey(item.path),
+    );
+    return session ? this.sidebarItem('project', session.cwd) : undefined;
+  }
+  async undoSidebar(): Promise<void> {
+    const undo = this.sidebarUndo;
+    if (!undo || this.sidebarSaving) return;
+    await this.manageSidebar(undo.kind, undo.path, { state: undo.state });
+    this.sidebarUndo = null;
+    this.sidebarFeedback = '已撤销上一步操作';
+  }
+  sidebarItem(
+    kind: SidebarItem['kind'],
+    path: string,
+  ): SidebarItem | undefined {
+    const key =
+      kind === 'project' ? this.projectKey(path) : this.sessionKey(path);
+    return this.settings.sidebarItems?.find(
+      (item) =>
+        item.kind === kind &&
+        (kind === 'project'
+          ? this.projectKey(item.path)
+          : this.sessionKey(item.path)) === key,
+    );
+  }
+  projectName(path: string): string {
+    return (
+      this.sidebarItem('project', path)?.name ||
+      path.split(/[\\/]/).filter(Boolean).at(-1) ||
+      path
+    );
+  }
+  get visibleSessions(): SessionSummary[] {
+    return this.sessions
+      .filter(
+        (session) =>
+          !this.sidebarItem('session', session.path)?.state &&
+          !this.sidebarItem('project', session.cwd)?.state,
+      )
+      .map((session) => ({
+        ...session,
+        name: this.sidebarItem('session', session.path)?.name || session.name,
+      }));
+  }
+  /** 归档只保存桌面元数据，原会话和源码均保留；恢复不丢失历史。 */
+  async manageSidebar(
+    kind: SidebarItem['kind'],
+    path: string,
+    change: { name?: string; state?: SidebarItem['state'] },
+  ): Promise<void> {
+    if (this.sidebarSaving) return;
+    this.sidebarSaving = true;
+    try {
+      const previous = this.sidebarItem(kind, path);
+      const item = { ...previous, kind, path, ...change };
+      if (item.state === 'deleted') item.state = 'archived';
+      if (item.name !== undefined) {
+        item.name = item.name.trim();
+        if (!item.name || item.name.length > 200)
+          throw new Error('名称须为 1 至 200 个字符。');
+      }
+      const sidebarItems = (this.settings.sidebarItems ?? [])
+        .map((entry) => ({ ...entry }))
+        .filter(
+          (entry) =>
+            entry !== previous &&
+            !(
+              entry.kind === kind &&
+              (kind === 'project'
+                ? this.projectKey(entry.path) === this.projectKey(path)
+                : this.sessionKey(entry.path) === this.sessionKey(path))
+            ),
+        );
+      sidebarItems.push(item);
+      for (const entry of sidebarItems) {
+        if (entry.state === 'deleted') entry.state = 'archived';
+      }
+      await this.api.save({ ...$state.snapshot(this.settings), sidebarItems });
+      this.settings.sidebarItems = sidebarItems;
+      if ('state' in change) {
+        this.sidebarError = '';
+        this.sidebarUndo = {
+          kind,
+          path,
+          state: previous?.state ? 'archived' : undefined,
+        };
+        const label = this.sidebarLabel(item);
+        const parent = this.sidebarParent(item);
+        this.sidebarFeedback = item.state
+          ? `已归档“${label}”`
+          : `已恢复“${label}”${parent?.state ? '；所属项目仍被隐藏，恢复项目后将在侧栏显示' : ''}`;
+      } else {
+        this.notice = '名称已更新';
+      }
+    } finally {
+      this.sidebarSaving = false;
+    }
+  }
   loadingSessions = $state(false);
   pinSaving = $state(false);
   get pinnedSessions(): SessionSummary[] {
     const sessions = new Map(
-      this.sessions.map((session) => [session.path, session]),
+      this.visibleSessions.map((session) => [session.path, session]),
     );
     return this.settings.pinnedSessions.flatMap((path) => {
       const session = sessions.get(path);
@@ -85,7 +222,7 @@ export class Desktop {
     );
   }
   get recentSessions(): SessionSummary[] {
-    return [...this.sessions].sort((a, b) => this.compareSessions(a, b));
+    return [...this.visibleSessions].sort((a, b) => this.compareSessions(a, b));
   }
   /** 保存完整项目顺序，搜索和折叠只改变可见范围。 */
   async moveProject(
@@ -129,7 +266,7 @@ export class Desktop {
       string,
       { path: string; sessions: SessionSummary[] }
     >();
-    for (const session of this.sessions) {
+    for (const session of this.visibleSessions) {
       if (!session.cwd) continue;
       const key = this.projectKey(session.cwd);
       if (!groups.has(key))
@@ -137,7 +274,11 @@ export class Desktop {
       groups.get(key)!.sessions.push(session);
     }
     for (const path of [this.project, ...this.settings.recentProjects]) {
-      if (path && !groups.has(this.projectKey(path)))
+      if (
+        path &&
+        !this.sidebarItem('project', path)?.state &&
+        !groups.has(this.projectKey(path))
+      )
         groups.set(this.projectKey(path), { path, sessions: [] });
     }
     for (const group of groups.values()) {
@@ -206,6 +347,7 @@ export class Desktop {
         this.sessionKey(this.snapshot.sessionFile ?? ''),
     );
     return (
+      this.sidebarItem('session', this.snapshot.sessionFile ?? '')?.name ||
       this.snapshot.sessionName ||
       session?.name ||
       this.currentSessionTitle ||
@@ -225,7 +367,13 @@ export class Desktop {
     const session = this.sessions.find(
       (item) => this.sessionKey(item.path) === this.sessionKey(path),
     );
-    return session?.name || session?.preview || session?.timestamp || '';
+    return (
+      this.sidebarItem('session', path)?.name ||
+      session?.name ||
+      session?.preview ||
+      session?.timestamp ||
+      ''
+    );
   }
   before = $state(0);
   hasMore = $state(false);
@@ -278,7 +426,11 @@ export class Desktop {
           : defaultSettings.zoom,
       };
       await this.refreshSessions();
-      await this.connect(this.settings.recentProjects[0] ?? '');
+      await this.connect(
+        this.settings.recentProjects.find(
+          (path) => !this.sidebarItem('project', path)?.state,
+        ) ?? '',
+      );
     } catch (error) {
       this.error = errorMessage(error);
     }

@@ -38,6 +38,14 @@ impl From<std::io::Error> for AppError {
 }
 pub type Result<T> = std::result::Result<T, AppError>;
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SidebarItem {
+    pub kind: String,
+    pub path: String,
+    pub name: Option<String>,
+    pub state: Option<String>,
+}
+
 /// 应用配置仅存启动方式和界面偏好；Pi 凭据始终留在 Pi 目录。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
@@ -50,6 +58,7 @@ pub struct Settings {
     pub recent_projects: Vec<String>,
     pub project_order: Vec<String>,
     pub pinned_sessions: Vec<String>,
+    pub sidebar_items: Vec<SidebarItem>,
     pub theme: String,
     pub zoom: u32,
 }
@@ -65,6 +74,7 @@ impl Default for Settings {
             recent_projects: vec![],
             project_order: vec![],
             pinned_sessions: vec![],
+            sidebar_items: vec![],
             theme: "system".into(),
             zoom: 100,
         }

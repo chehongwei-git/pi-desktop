@@ -8,6 +8,85 @@ function fixture(action: Bridge['action']) {
   return new Desktop({ ...bridge, action });
 }
 describe('desktop business behavior', () => {
+  it('persists sidebar names, archive and trash states and restores original catalog items', async () => {
+    const save = vi.fn().mockResolvedValue(undefined);
+    const desktop = new Desktop({ ...bridge, save });
+    desktop.sessions = [
+      { path: 'a', cwd: 'C:/alpha', name: 'Original', timestamp: '' },
+      { path: 'b', cwd: 'C:/beta', name: 'Beta', timestamp: '' },
+    ] as typeof desktop.sessions;
+    desktop.settings.pinnedSessions = ['a'];
+    await desktop.manageSidebar('session', 'a', { name: 'Renamed' });
+    expect(desktop.recentSessions.find((s) => s.path === 'a')?.name).toBe(
+      'Renamed',
+    );
+    expect(desktop.sessions[0].name).toBe('Original');
+    await desktop.manageSidebar('project', 'c:\\alpha', {
+      name: 'Project alias',
+      state: 'archived',
+    });
+    expect(desktop.projectName('C:/alpha')).toBe('Project alias');
+    expect(desktop.pinnedSessions).toHaveLength(0);
+    expect(desktop.projects.map((p) => p.path)).toEqual(['C:/beta']);
+    await desktop.manageSidebar('project', 'C:/alpha', { state: undefined });
+    expect(desktop.pinnedSessions[0].name).toBe('Renamed');
+    await desktop.manageSidebar('session', 'a', { state: 'deleted' });
+    expect(desktop.recentSessions.map((s) => s.path)).toEqual(['b']);
+    await desktop.manageSidebar('session', 'a', { state: undefined });
+    expect(desktop.pinnedSessions[0].name).toBe('Renamed');
+    save.mockRejectedValueOnce(new Error('disk full'));
+    await expect(
+      desktop.manageSidebar('session', 'a', { state: 'deleted' }),
+    ).rejects.toThrow('disk full');
+    expect(desktop.pinnedSessions).toHaveLength(1);
+    expect(desktop.sidebarSaving).toBe(false);
+  });
+  it('includes legacy trash in archives and normalizes it only after a successful save', async () => {
+    const save = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('disk full'))
+      .mockResolvedValue(undefined);
+    const desktop = new Desktop({ ...bridge, save });
+    desktop.settings.sidebarItems = [
+      { kind: 'project', path: '/old', state: 'deleted', name: '旧记录' },
+      { kind: 'session', path: 'a', state: 'archived' },
+    ];
+    expect(desktop.archivedItems).toHaveLength(2);
+    await expect(
+      desktop.manageSidebar('session', 'a', { state: undefined }),
+    ).rejects.toThrow('disk full');
+    expect(desktop.sidebarItem('project', '/old')?.state).toBe('deleted');
+    await desktop.manageSidebar('session', 'a', { state: undefined });
+    expect(desktop.sidebarItem('project', '/old')?.state).toBe('archived');
+    expect(desktop.archivedItems).toHaveLength(1);
+    await desktop.manageSidebar('project', '/old', { state: undefined });
+    await desktop.undoSidebar();
+    expect(desktop.sidebarItem('project', '/old')?.state).toBe('archived');
+  });
+  it('undoes lifecycle transitions without changing the active session, draft or messages', async () => {
+    const save = vi.fn().mockResolvedValue(undefined);
+    const desktop = new Desktop({ ...bridge, save });
+    desktop.project = '/alpha';
+    desktop.snapshot = { sessionFile: 'a' };
+    desktop.draft = '正在编辑的内容';
+    const original = desktop.messages;
+    await desktop.manageSidebar('session', 'a', { state: 'archived' });
+    await desktop.manageSidebar('session', 'a', { state: 'deleted' });
+    await desktop.undoSidebar();
+    expect(desktop.sidebarItem('session', 'a')?.state).toBe('archived');
+    expect(desktop.sidebarUndo).toBeNull();
+    await desktop.manageSidebar('session', 'a', { state: undefined });
+    save.mockRejectedValueOnce(new Error('disk full'));
+    await expect(desktop.undoSidebar()).rejects.toThrow('disk full');
+    expect(desktop.sidebarItem('session', 'a')?.state).toBeUndefined();
+    expect(desktop.sidebarUndo?.state).toBe('archived');
+    await desktop.undoSidebar();
+    expect(desktop.sidebarItem('session', 'a')?.state).toBe('archived');
+    expect(desktop.snapshot.sessionFile).toBe('a');
+    expect(desktop.newChatProject).toBeNull();
+    expect(desktop.draft).toBe('正在编辑的内容');
+    expect(desktop.messages).toBe(original);
+  });
   it('prepares project drafts locally and creates exactly once on the first send', async () => {
     const action = vi.fn().mockImplementation(async (_runtime, command) => {
       if (command.type === 'state')

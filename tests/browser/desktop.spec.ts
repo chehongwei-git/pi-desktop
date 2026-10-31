@@ -56,6 +56,10 @@ async function mock(
           });
           if (command === 'get_settings') return settings;
           if (command === 'save_settings') {
+            if (host.failSaveOnce) {
+              host.failSaveOnce = false;
+              throw new Error('模拟保存失败');
+            }
             Object.assign(settings, args.settings);
             localStorage.setItem('mock-settings', JSON.stringify(settings));
             return;
@@ -1927,4 +1931,240 @@ test('10000 messages mount a bounded visible window', async ({ page }) => {
   expect(errors).toEqual([]);
   const durations = await page.evaluate(() => (window as any).longTasks);
   console.log('browser long tasks (ms)', durations);
+});
+
+test('sidebar context menus rename, archive and restore projects and sessions across reload', async ({
+  page,
+}) => {
+  await mock(page, 2, true);
+  await page.goto('/');
+  const tree = page.getByRole('region', { name: '工作项目', exact: true });
+  let alpha = tree.locator(
+    '[data-sidebar-kind="project"][data-sidebar-path="C:/work/alpha"]',
+  );
+  await alpha.click({ button: 'right' });
+  await page.getByRole('menuitem', { name: '重命名', exact: true }).click();
+  await page
+    .getByRole('textbox', { name: '名称', exact: true })
+    .fill('核心项目');
+  await page.getByRole('button', { name: '保存', exact: true }).click();
+  await expect(alpha).toContainText('核心项目');
+  await alpha.click();
+  const session = tree.locator(
+    '[data-sidebar-kind="session"][data-sidebar-path="alpha.jsonl"]',
+  );
+  await session.click({ button: 'right' });
+  await page.getByRole('menuitem', { name: '重命名', exact: true }).click();
+  await page
+    .getByRole('textbox', { name: '名称', exact: true })
+    .fill('排查登录');
+  await page.getByRole('button', { name: '保存', exact: true }).click();
+  await expect(session).toContainText('排查登录');
+  await session.click({ button: 'right' });
+  await page.getByRole('menuitem', { name: '归档', exact: true }).click();
+  await expect(session).toHaveCount(0);
+  await page.reload();
+  await page.getByRole('button', { name: '已归档', exact: true }).click();
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  const archive = page.getByRole('region', { name: '已归档', exact: true });
+  await expect(archive).toContainText('排查登录');
+  await archive
+    .getByRole('button', { name: '恢复会话 排查登录', exact: true })
+    .click();
+  await page.getByRole('button', { name: '返回对话', exact: true }).click();
+  await alpha.click({ button: 'right' });
+  await expect(
+    page.getByRole('menuitem', { name: '移入回收站', exact: true }),
+  ).toHaveCount(0);
+  await page.getByRole('menuitem', { name: '归档', exact: true }).click();
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  await expect(alpha).toHaveCount(0);
+  await page.reload();
+  await expect(alpha).toHaveCount(0);
+  await page.getByRole('button', { name: '已归档', exact: true }).click();
+  const trash = page.getByRole('region', { name: '已归档', exact: true });
+  await expect(trash).toContainText('核心项目');
+  await trash
+    .getByRole('button', { name: '恢复项目 核心项目', exact: true })
+    .click();
+  await page.getByRole('button', { name: '返回对话', exact: true }).click();
+  await expect(alpha).toContainText('核心项目');
+  await alpha.click({ button: 'right' });
+  await page.keyboard.press('Escape');
+  await expect(page.getByRole('menu')).toHaveCount(0);
+});
+
+test('history management preserves transcript and draft, filters and restores keyboard focus with undo', async ({
+  page,
+}) => {
+  await mock(page, 2, true);
+  await page.goto('/');
+  const recent = page.getByRole('region', { name: '最近', exact: true });
+  const session = recent.locator('[data-sidebar-path="alpha.jsonl"]');
+  await session.click();
+  const input = page.getByRole('textbox', { name: '消息输入', exact: true });
+  await input.fill('保留草稿');
+  await page.locator('.transcript').evaluate((node) => {
+    (window as any).savedTranscript = node;
+  });
+  await session.click({ button: 'right' });
+  await page.getByRole('menuitem', { name: '归档', exact: true }).click();
+  await page.getByRole('button', { name: '已归档', exact: true }).click();
+  const archive = page.getByRole('region', { name: '已归档', exact: true });
+  await expect(archive.getByRole('heading', { level: 1 })).toBeFocused();
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  await archive
+    .getByRole('textbox', { name: '搜索已归档', exact: true })
+    .fill('不存在');
+  await expect(archive).toContainText('没有匹配的内容');
+  await archive.getByRole('button', { name: '清除筛选', exact: true }).click();
+  await archive.getByRole('button', { name: /^项目 \d+$/ }).click();
+  await expect(archive).toContainText('没有匹配的内容');
+  await archive.getByRole('button', { name: /^会话 \d+$/ }).click();
+  const restore = archive.getByRole('button', {
+    name: '恢复会话 修复登录',
+    exact: true,
+  });
+  await restore.focus();
+  await page.keyboard.press('Enter');
+  await expect(archive).toContainText('还没有归档内容');
+  await expect(archive.getByRole('heading', { level: 1 })).toBeFocused();
+  await page.getByRole('button', { name: '撤销', exact: true }).click();
+  await expect(restore).toBeVisible();
+  await archive.getByRole('button', { name: '返回对话', exact: true }).click();
+  await expect(input).toHaveValue('保留草稿');
+  expect(
+    await page
+      .locator('.transcript')
+      .evaluate((node) => node === (window as any).savedTranscript),
+  ).toBe(true);
+  await page.getByRole('button', { name: '已归档', exact: true }).click();
+  await expect(
+    page.getByRole('region', { name: '已归档', exact: true }),
+  ).toContainText('修复登录');
+  await page.screenshot({ path: 'test-results/history-management-light.png' });
+});
+
+test('history management explains hidden parents and keeps failed restores retryable on narrow screens', async ({
+  page,
+}) => {
+  await mock(page, 2, true);
+  await page.goto('/');
+  await page.evaluate(() => {
+    localStorage.setItem(
+      'mock-settings',
+      JSON.stringify({
+        sidebarItems: [
+          { kind: 'project', path: 'C:/work/alpha', state: 'deleted' },
+          { kind: 'session', path: 'alpha.jsonl', state: 'archived' },
+        ],
+      }),
+    );
+  });
+  await page.reload();
+  await page.getByRole('button', { name: '已归档', exact: true }).click();
+  const archive = page.getByRole('region', { name: '已归档', exact: true });
+  await expect(archive).toContainText('所属项目已归档');
+  await page.evaluate(() => {
+    (window as any).failSaveOnce = true;
+  });
+  const restore = archive.getByRole('button', {
+    name: '恢复会话 修复登录',
+    exact: true,
+  });
+  await restore.click();
+  await expect(page.getByRole('alert')).toContainText('模拟保存失败');
+  await expect(restore).toBeEnabled();
+  await restore.click();
+  await expect(
+    page.getByRole('status').filter({ hasText: '所属项目仍被隐藏' }),
+  ).toBeVisible();
+  await page.getByRole('button', { name: '已归档', exact: true }).click();
+  await page.setViewportSize({ width: 600, height: 720 });
+  await page.locator('.sidebar-brand button').click();
+  const trash = page.getByRole('region', { name: '已归档', exact: true });
+  await expect(
+    trash.getByRole('button', { name: '恢复项目 alpha', exact: true }),
+  ).toBeVisible();
+  expect(
+    await page.evaluate(
+      () => document.documentElement.scrollWidth <= window.innerWidth,
+    ),
+  ).toBe(true);
+  await page.evaluate(() => {
+    document.documentElement.dataset.theme = 'dark';
+  });
+  await page.screenshot({
+    path: 'test-results/history-management-dark-narrow.png',
+  });
+  await trash
+    .getByRole('button', { name: '恢复项目 alpha', exact: true })
+    .click();
+  await expect(trash).toContainText('还没有归档内容');
+  await page.getByRole('button', { name: '返回对话', exact: true }).click();
+  await expect(
+    page.getByRole('button', { name: '展开侧栏', exact: true }),
+  ).toBeFocused();
+});
+
+test('archives classify by type and project, search across pages and bound initial rows', async ({
+  page,
+}) => {
+  await mock(page, 2, true);
+  await page.goto('/');
+  await page.evaluate(() =>
+    localStorage.setItem(
+      'mock-settings',
+      JSON.stringify({
+        sidebarItems: [
+          {
+            kind: 'project',
+            path: 'C:/work/alpha',
+            name: '核心项目',
+            state: 'archived',
+          },
+          { kind: 'session', path: 'alpha.jsonl', state: 'archived' },
+          { kind: 'session', path: 'beta.jsonl', state: 'deleted' },
+          ...Array.from({ length: 70 }, (_, i) => ({
+            kind: 'session',
+            path: `unknown-${i}.jsonl`,
+            name: `历史 ${i}`,
+            state: 'archived',
+          })),
+        ],
+      }),
+    ),
+  );
+  await page.reload();
+  await expect(
+    page.getByRole('button', { name: '回收站', exact: true }),
+  ).toHaveCount(0);
+  await page.getByRole('button', { name: '已归档', exact: true }).click();
+  const archive = page.getByRole('region', { name: '已归档', exact: true });
+  await expect(archive.locator('[data-restore]')).toHaveCount(50);
+  await archive.getByRole('button', { name: '显示更多（剩余 23 项）' }).click();
+  await expect(archive.locator('[data-restore]')).toHaveCount(73);
+  await archive
+    .getByRole('combobox', { name: '所属项目' })
+    .selectOption('c:/work/alpha');
+  await expect(archive.locator('[data-restore]')).toHaveCount(2);
+  await archive.getByRole('button', { name: '会话 72', exact: true }).click();
+  await expect(archive.locator('[data-restore]')).toHaveCount(1);
+  await archive.getByRole('textbox', { name: '搜索已归档' }).fill('核心项目');
+  await expect(
+    archive.getByRole('button', { name: '恢复会话 修复登录', exact: true }),
+  ).toBeVisible();
+  await archive.getByRole('button', { name: '清除筛选', exact: true }).click();
+  await expect(archive.locator('[data-restore]')).toHaveCount(50);
+  await archive.getByRole('textbox', { name: '搜索已归档' }).fill('历史 69');
+  await expect(archive.locator('[data-restore]')).toHaveCount(1);
+  await expect(archive).toContainText('未识别项目');
+  await archive
+    .getByRole('button', { name: '恢复会话 历史 69', exact: true })
+    .click();
+  await expect(archive).toContainText('没有匹配的内容');
+  const saved = await page.evaluate(
+    () => JSON.parse(localStorage.getItem('mock-settings')!).sidebarItems,
+  );
+  expect(saved.some((item: any) => item.state === 'deleted')).toBe(false);
 });
