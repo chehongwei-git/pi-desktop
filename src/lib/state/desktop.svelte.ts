@@ -1110,6 +1110,9 @@ export class Desktop {
     this.stats = null;
     this.currentSessionTitle = title;
     if (path) this.newChatModel = null;
+    // 仅创建成功才消费本地草稿；打开历史、创建取消或失败均保留它。
+    if (!path && this.newChatProject !== null)
+      this.drafts.delete(this.draftKey());
     this.newChatProject = null;
     this.toolViews = {};
     await this.drain();

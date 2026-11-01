@@ -253,6 +253,58 @@ describe('desktop business behavior', () => {
       ),
     ).toBe(true);
   });
+  it.each([false, true])(
+    'consumes the local new-chat draft after creation and preserves session drafts (prompt failure=%s)',
+    async (failPrompt) => {
+      let sessionFile = 'old.jsonl';
+      const action = vi.fn().mockImplementation(async (_runtime, command) => {
+        if (command.type === 'new_session') sessionFile = 'new.jsonl';
+        if (command.type === 'switch_session') sessionFile = command.path;
+        if (command.type === 'state') return { cwd: 'alpha', sessionFile };
+        if (command.type === 'history')
+          return { messages: [], before: 0, hasMore: false };
+        if (command.type === 'prompt' && failPrompt)
+          throw new Error('send failed');
+        return { cancelled: false };
+      });
+      const desktop = new Desktop({
+        ...bridge,
+        action,
+        sessions: async () => [],
+        events: async () => ({ runtimeId: 'r', sequence: 0, events: [] }),
+      });
+      desktop.connection = 'ready';
+      desktop.runtimeId = 'r';
+      desktop.project = 'alpha';
+      desktop.snapshot = { cwd: 'alpha', sessionFile };
+      desktop.draft = '原会话草稿';
+      desktop.prepareNewChat();
+      expect(desktop.draft).toBe('');
+      desktop.draft = '首条消息';
+      if (failPrompt)
+        await expect(desktop.send()).rejects.toThrow('send failed');
+      else await desktop.send();
+      expect(desktop.draft).toBe(failPrompt ? '首条消息' : '');
+      desktop.prepareNewChat();
+      expect(desktop.draft).toBe('');
+      await desktop.openSession('alpha', 'new.jsonl');
+      expect(desktop.draft).toBe(failPrompt ? '首条消息' : '');
+      if (failPrompt) {
+        failPrompt = false;
+        await desktop.send();
+        expect(desktop.draft).toBe('');
+      }
+      expect(
+        action.mock.calls.filter(
+          ([, command]) => command.type === 'new_session',
+        ),
+      ).toHaveLength(1);
+      await desktop.openSession('alpha', 'old.jsonl');
+      expect(desktop.draft).toBe('原会话草稿');
+      desktop.prepareNewChat();
+      expect(desktop.draft).toBe('');
+    },
+  );
   it('cancels pending and newly arriving plan dialogs during stop', async () => {
     let finish!: (value: unknown) => void;
     const action = vi.fn().mockImplementation(async (_runtime, command) => {

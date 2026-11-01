@@ -1005,13 +1005,6 @@
                     renameOpen = true;
                     sessionMenu = false;
                   }}>重命名当前会话</button
-                ><button
-                  disabled={!!desktop.openingSession ||
-                    desktop.connection === 'disconnected'}
-                  onclick={() => {
-                    sessionMenu = false;
-                    void desktop.guard(() => desktop.disconnect());
-                  }}>断开 Pi</button
                 >
               </div>{/if}
           </div>

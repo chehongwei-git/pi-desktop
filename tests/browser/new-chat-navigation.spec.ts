@@ -66,6 +66,11 @@ test('returns from a new-chat draft to existing sessions', async ({ page }) => {
         }
         if (command === 'perform') {
           switch (args.action.type) {
+            case 'new_session':
+              sessionFile = 'new.jsonl';
+              return { cancelled: false };
+            case 'prompt':
+              return {};
             case 'switch_session':
               // A switch hook may cancel a redundant restore of the active session.
               if (sessionFile === args.action.path) return { cancelled: true };
@@ -115,6 +120,7 @@ test('returns from a new-chat draft to existing sessions', async ({ page }) => {
   await input.fill('Existing draft');
   await page.getByRole('button', { name: /^新对话/ }).click();
   await expect(page.locator('.welcome')).toBeVisible();
+  await expect(input).toHaveValue('');
   await expect(todo).toHaveCount(0);
   await expect(status).toHaveCount(0);
   await input.fill('New draft');
@@ -139,5 +145,25 @@ test('returns from a new-chat draft to existing sessions', async ({ page }) => {
   await expect(
     page.getByText('History: other.jsonl', { exact: true }),
   ).toBeVisible();
+  await page.getByRole('button', { name: '会话菜单', exact: true }).click();
+  await expect(
+    page.getByRole('button', { name: '复制会话路径', exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole('button', { name: '断开 Pi', exact: true }),
+  ).toHaveCount(0);
+  await page.getByRole('button', { name: '会话菜单', exact: true }).click();
+  await page.getByRole('button', { name: /^新对话/ }).click();
+  await expect(input).toHaveValue('New draft');
+  await input.press('Enter');
+  await expect(input).toHaveValue('');
+  await expect(page.locator('.session-loading')).toHaveCount(0);
+  await page.getByRole('button', { name: /^新对话/ }).click();
+  await expect(page.locator('.welcome')).toBeVisible();
+  await expect(input).toHaveValue('');
+  await recent
+    .getByRole('button', { name: 'original project', exact: true })
+    .click();
+  await expect(input).toHaveValue('Existing draft');
   expect(errors).toEqual([]);
 });
