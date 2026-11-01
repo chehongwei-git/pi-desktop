@@ -11,6 +11,7 @@
   import CommandComposer from './lib/components/CommandComposer.svelte';
   import Icon from './lib/components/Icon.svelte';
   import Transcript from './lib/components/Transcript.svelte';
+  import { conversationActivity } from './lib/conversation-activity';
   import Modal from './lib/components/Modal.svelte';
   import SettingsDialog from './lib/components/SettingsDialog.svelte';
   import ExtensionDialog from './lib/components/ExtensionDialog.svelte';
@@ -326,14 +327,15 @@
     !desktop.openingSession &&
       (desktop.newChatProject !== null || desktop.messages.length === 0),
   );
-  let runLabel = $derived(
-    {
-      idle: '',
-      running: 'Pi 正在处理',
-      retrying: '正在重试',
-      compacting: '正在压缩上下文',
-      aborting: '正在停止任务',
-    }[desktop.run],
+  // 本地新草稿与会话加载期间不显示后台旧会话的活动。
+  let activity = $derived(
+    desktop.newChatProject === null && !desktop.openingSession
+      ? conversationActivity(
+          desktop.run,
+          desktop.messages,
+          desktop.extensions.length > 0,
+        )
+      : null,
   );
   onMount(() => {
     try {
@@ -1093,9 +1095,7 @@
             onclick={() => {
               void setSidebar(true);
             }}><Icon name="panel" /></button
-          >{/if}<span>项目与会话</span>{#if runLabel}<span role="status"
-            >{runLabel}</span
-          >{/if}
+          >{/if}<span>项目与会话</span>
       </div>
       <SidebarCollection
         {desktop}
@@ -1204,6 +1204,7 @@
           </div>
         {:else}{#key `${desktop.runtimeId}:${desktop.snapshot.sessionFile ?? ''}`}<Transcript
               messages={desktop.messages}
+              {activity}
               resumeFollow={resumeFollow + desktop.sentMessageRevision}
               hasMore={desktop.hasMore}
               loading={desktop.loadingHistory}
@@ -1240,14 +1241,6 @@
               />
             {/key}
           {/if}
-          {#if runLabel}<div
-              class="run-status"
-              class:stopping={desktop.run === 'aborting'}
-              role="status"
-            >
-              <span class="activity-indicator" aria-hidden="true"></span>
-              <strong>{runLabel}</strong>
-            </div>{/if}
           <!-- 新对话只是本地草稿，后台扩展状态仍属于原会话；返回时继续展示。 -->
           {#if desktop.newChatProject === null && !desktop.openingSession}
             {#each Object.entries(desktop.statuses).filter(([, value]) => value) as [key, value] (key)}<div
@@ -1258,7 +1251,25 @@
             {#each Object.entries(desktop.widgets).filter(([, value]) => value.length) as [key, value] (key)}
               {#if key === 'plan-todos'}
                 {#key `${desktop.runtimeId}:${desktop.snapshot.sessionFile ?? ''}`}
-                  <PlanTodos lines={value} />
+                  <PlanTodos
+                    lines={value}
+                    running={desktop.run !== 'idle'}
+                    disabled={desktop.connection !== 'ready' ||
+                      desktop.submitting}
+                    oncontinue={desktop.commands.some(
+                      (command) => command.name === 'todos',
+                    )
+                      ? () => desktop.planAction('continue')
+                      : undefined}
+                    onstop={desktop.commands.some(
+                      (command) => command.name === 'todos',
+                    )
+                      ? () =>
+                          desktop.run !== 'idle'
+                            ? desktop.stop()
+                            : desktop.planAction('stop')
+                      : undefined}
+                  />
                 {/key}
               {:else}<details class="widget">
                   <summary>{key}</summary>

@@ -18,7 +18,7 @@
 | 扩展对话 | select、confirm、input、editor | 取消、超时、一次性回应 |
 | 扩展通知 | notify、setStatus、setWidget、setTitle、set_editor_text | 字符串 widget，填充保留已有草稿 |
 
-桥接源码编入 Rust 产物，启动时写入私有临时目录，并通过 `pi --extension` 加载；进程退出后删除。只运行现有 Pi，不附带或另起 Node/Bun/SDK 宿主、不监听端口、不改用户全局扩展配置。内部命令执行前检查注册，关联 RPC disposition 与 extension_error 判断结果，超时不重发。Pi 本身的安装要求仍由其发行方式决定。
+桥接源码编入 Rust 产物，启动时写入私有临时目录，并通过 `pi --extension` 加载；进程退出后删除。只运行现有 Pi，不附带或另起 Node/Bun/SDK 宿主、不监听端口、不改用户全局扩展配置。内部命令执行前检查注册，关联 RPC disposition 与 extension_error 判断结果，超时不重发。Pi 本身的安装要求仍由其发行方式决定。项目不附带需安装到 Pi agent 目录的配套扩展，不自动安装、复制、更新或覆盖用户扩展文件，不修改 Pi 安装源码。用户已有扩展的命令、交互和计划卡片继续兼容；桥接和模型配置冒烟在临时 agent 目录中运行，不操作真实用户扩展目录。
 
 `/settings`、`/model`、`/thinking`、`/resume`、`/fork`、`/tree` 采用输入框内联菜单；其余可执行命令采用桌面原生弹层。内联菜单搜索本地执行，最多挂载 40 条候选，支持键盘与“更多选项”浏览。`/settings` 与侧栏桌面连接设置分开，目前只包含自动压缩和两种排队模式。完整终端设置、scoped-models、import、share、bug、trust、login、logout、changelog 仍未适配；设置页已提供独立 API Key 管理，OAuth login/logout 命令仍未适配；HTML 导出已支持，JSONL 导出未支持。树导航支持直接切换和生成摘要后切换，摘要可能调用模型并产生费用；尚未实现完整终端树标签编辑。未适配的 8 个内置命令不出现在斜杠菜单，hotkeys 也按产品要求隐藏；导出分类仅显示 export。桥接命令未注册时隐藏对应 reload/tree 菜单项。
 

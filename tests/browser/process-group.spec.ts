@@ -16,6 +16,32 @@ for (const width of [1200, 480]) {
     await page.goto('/process-fixture');
     const heading = page.locator('.process-heading');
     await expect(heading).toHaveCount(1);
+    // 活动提示位于对话内，等待时静止，正文光标接续且完成后清除。
+    const activity = page.locator('.transcript .conversation-activity');
+    await page.getByRole('button', { name: '开始运行', exact: true }).click();
+    await expect(activity).toContainText('Pi 正在处理');
+    await expect(activity.locator('.activity-dots span')).toHaveCount(3);
+    await expect(heading.locator('.activity-indicator')).toHaveCount(0);
+    await page.getByRole('button', { name: '切换等待', exact: true }).click();
+    await expect(activity).toContainText('等待你的操作');
+    await expect(activity.locator('.activity-dots span').first()).toHaveCSS(
+      'animation-name',
+      'none',
+    );
+    await page.getByRole('button', { name: '切换等待', exact: true }).click();
+    await page.emulateMedia({ reducedMotion: 'reduce' });
+    await expect(activity.locator('.activity-dots span').first()).toHaveCSS(
+      'animation-name',
+      'none',
+    );
+    await page.emulateMedia({ reducedMotion: 'no-preference' });
+    await page.screenshot({ path: `test-results/activity-${width}-light.png` });
+    await page.getByRole('button', { name: '开始正文', exact: true }).click();
+    await expect(activity.locator('.activity-line')).toHaveCount(0);
+    await expect(page.locator('.streaming-text .cursor')).toBeVisible();
+    await page.getByRole('button', { name: '完成任务', exact: true }).click();
+    await expect(activity).toBeEmpty();
+    await expect(page.locator('.cursor')).toHaveCount(0);
     await expect(page.locator('[data-message-id="blank"]')).toHaveCount(0);
     await expect(heading).toContainText('耗时 23 秒');
     await expect(heading).toContainText('1 次工具调用');

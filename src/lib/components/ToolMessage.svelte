@@ -96,8 +96,8 @@
       else ontoggle(message.id, 'output');
     }}
   >
-    <span class="status-dot" class:working={current.status === 'running'}
-    ></span>
+    <!-- 工具保留静态状态点；唯一活动动画放在对话末尾。 -->
+    <span class="status-dot" aria-hidden="true"></span>
     <strong class="tool-name">{name}</strong>
     {#if tool?.command}<span class="tool-command" title={tool.command}
         >{#if commandHtml}{@html commandHtml}{:else}{tool.command}{/if}</span

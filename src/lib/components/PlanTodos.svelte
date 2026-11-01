@@ -1,21 +1,62 @@
 <!-- Plan 扩展仍是完成状态的唯一来源；此处只解析展示，不提供可误操作的复选框。 -->
 <script lang="ts">
   import Icon from './Icon.svelte';
-  let { lines }: { lines: string[] } = $props();
+  let {
+    lines,
+    running = false,
+    disabled = false,
+    oncontinue,
+    onstop,
+  }: {
+    lines: string[];
+    running?: boolean;
+    disabled?: boolean;
+    oncontinue?: () => Promise<void>;
+    onstop?: () => Promise<void>;
+  } = $props();
+  let busy = $state(false);
+  let error = $state('');
+  let info = $derived(
+    lines
+      .filter((line) => line.startsWith('ℹ '))
+      .map((line) => line.slice(2))
+      .join(' · '),
+  );
+  /** 按钮只提交一次；错误留在计划旁，用户草稿不参与命令发送。 */
+  async function act(action: () => Promise<void>): Promise<void> {
+    if (busy) return;
+    busy = true;
+    error = '';
+    try {
+      await action();
+    } catch (cause) {
+      error = String(cause);
+    } finally {
+      busy = false;
+    }
+  }
   let expanded = $state(false);
   const listId = $props.id();
   let toggle = $state<HTMLButtonElement>();
   // 未识别的非空行也保留，避免扩展格式演进后悄悄丢失计划内容。
   let steps = $derived(
     lines
-      .filter((line) => line.trim())
+      .filter((line) => line.trim() && !line.startsWith('ℹ '))
       .map((line) => {
-        const match = /^\s*([☑☐])\s*(.*)$/.exec(line);
-        return { text: match ? match[2] : line, completed: match?.[1] === '☑' };
+        const match = /^\s*([☑☐⊘])\s*(.*)$/.exec(line);
+        return {
+          text: match ? match[2] : line,
+          completed: match?.[1] === '☑',
+          skipped: match?.[1] === '⊘',
+        };
       }),
   );
   let completed = $derived(steps.filter((step) => step.completed).length);
-  let current = $derived(steps.findIndex((step) => !step.completed));
+  let skipped = $derived(steps.filter((step) => step.skipped).length);
+  let processed = $derived(completed + skipped);
+  let current = $derived(
+    steps.findIndex((step) => !step.completed && !step.skipped),
+  );
 </script>
 
 {#if steps.length}
@@ -25,7 +66,9 @@
         ><Icon name={current === -1 ? 'check' : 'checklist'} size={17} /></span
       >
       <strong>执行计划</strong>
-      <span class="plan-count">{completed} / {steps.length}</span>
+      <span class="plan-count"
+        >{processed} / {steps.length}{skipped ? ' 已处理' : ''}</span
+      >
       <button
         bind:this={toggle}
         type="button"
@@ -40,17 +83,34 @@
         >
       </button>
     </div>
-    <progress value={completed} max={steps.length} aria-label="计划完成进度"
-      >{completed} / {steps.length}</progress
+    <progress value={processed} max={steps.length} aria-label="计划完成进度"
+      >{processed} / {steps.length}</progress
     >
     <div class="plan-current" aria-live="polite" aria-atomic="true">
       {#if current === -1}<Icon name="check" size={14} /><span
-          >全部步骤已完成</span
+          >{skipped
+            ? `计划已结束 · ${completed} 步完成，${skipped} 步受限`
+            : '全部步骤已完成'}</span
         >
-      {:else}<span class="current-label">接下来 · {current + 1}</span><span
-          class="current-text">{steps[current].text}</span
-        >{/if}
+      {:else}<span class="current-label"
+          >{running ? '正在执行' : '接下来'} · {current + 1}</span
+        ><span class="current-text">{steps[current].text}</span>{/if}
     </div>
+    {#if info}<p class="plan-info" role="status">{info}</p>{/if}
+    {#if current !== -1 && (oncontinue || onstop)}
+      <div class="plan-actions">
+        {#if !running && oncontinue}<button
+            disabled={disabled || busy}
+            onclick={() => act(oncontinue!)}
+            >{busy ? '正在提交…' : '继续执行'}</button
+          >{/if}
+        {#if onstop}<button
+            disabled={disabled || busy}
+            onclick={() => act(onstop!)}>停止计划</button
+          >{/if}
+      </div>
+    {/if}
+    {#if error}<p class="plan-info" role="alert">{error}</p>{/if}
     <!-- 可滚动的只读步骤区需要键盘焦点以便方向键滚动；Escape 返回展开入口。 -->
     <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
     <div
@@ -76,10 +136,16 @@
           >
             <span
               class="step-state"
-              aria-label={step.completed ? '已完成' : '未完成'}
+              aria-label={step.completed
+                ? '已完成'
+                : step.skipped
+                  ? '受限未完成'
+                  : '未完成'}
             >
-              {#if step.completed}<Icon name="check" size={13} />{:else}<span
-                  class="step-dot"
+              {#if step.completed}<Icon
+                  name="check"
+                  size={13}
+                />{:else if step.skipped}⊘{:else}<span class="step-dot"
                 ></span>{/if}
             </span>
             <span class="step-number" aria-hidden="true">{index + 1}.</span>
@@ -92,6 +158,24 @@
 {/if}
 
 <style>
+  .plan-info {
+    margin: 6px 0 0;
+    color: var(--muted);
+    overflow-wrap: anywhere;
+  }
+  .plan-actions {
+    display: flex;
+    gap: 8px;
+    margin-top: 6px;
+  }
+  .plan-actions button {
+    margin-left: 0;
+    border: 1px solid var(--border);
+  }
+  button:disabled {
+    opacity: 0.5;
+    cursor: default;
+  }
   .plan-card {
     padding: 10px 12px;
     margin-bottom: 10px;

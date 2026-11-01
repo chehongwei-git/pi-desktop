@@ -51,7 +51,6 @@
 <section class="process-group" aria-label="处理过程">
   <button
     class="process-heading"
-    class:running
     bind:this={heading}
     aria-expanded={expanded}
     aria-controls={id}
@@ -60,21 +59,12 @@
     <span class:open={expanded} class="chevron"
       ><Icon name="down" size={14} /></span
     >
-    {#if running}
-      <span
-        class="activity-indicator"
-        class:paused={info?.pausedAt != null}
-        aria-hidden="true"
-      ></span>
-    {/if}
     <span class="process-label"
-      >{running
-        ? '正在处理'
-        : info?.state === 'stopped'
-          ? '已停止'
-          : info?.state === 'error'
-            ? '未完成'
-            : '处理过程'}</span
+      >{info?.state === 'stopped'
+        ? '已停止'
+        : info?.state === 'error'
+          ? '未完成'
+          : '处理过程'}</span
     >
     {#if tools}<span class="process-meta">· {tools} 次工具调用</span>{/if}
     {#if duration}<span class="process-meta"
@@ -128,19 +118,9 @@
     cursor: pointer;
     min-height: 36px;
   }
-  /* 仅运行中的入口强调底色和轮廓，历史过程保持轻量，避免长对话处处抢眼。 */
-  .process-heading.running {
-    padding: 8px 12px;
-    border: 1px solid var(--accent);
-    background: var(--accent-soft);
-    color: var(--accent);
-    gap: 8px;
-  }
-  .process-heading.running:hover {
-    background: var(--selected);
-  }
-  .running .process-label {
-    font-weight: 600;
+  /* 过程入口只负责详情导航；运行反馈统一在对话末尾展示。 */
+  .process-heading:hover {
+    background: var(--hover);
   }
   .process-meta {
     color: var(--muted);

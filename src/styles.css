@@ -1299,42 +1299,6 @@ button svg {
   font-size: 12px;
   padding: 6px 5px;
 }
-/* 运行反馈使用明确轮廓与持续可见的文字，动画只辅助表达，不暗示完成进度。 */
-.run-status {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  min-height: 40px;
-  margin-bottom: 8px;
-  padding: 9px 12px;
-  border-inline-start: 3px solid var(--accent);
-  border-radius: 8px;
-  color: var(--accent);
-  background: var(--accent-soft);
-  font-size: 13px;
-}
-.run-status strong {
-  font-weight: 600;
-}
-.run-status.stopping {
-  color: var(--warning);
-  background: var(--warning-soft);
-  border-inline-start-color: var(--warning);
-}
-/* 共用纯 CSS 指示器，无计时器；暂停和减少动画时保留静态环形标识。 */
-.activity-indicator {
-  display: inline-block;
-  flex: 0 0 auto;
-  width: 16px;
-  height: 16px;
-  border: 2px solid currentColor;
-  border-inline-end-color: transparent;
-  border-radius: 50%;
-  animation: loading-spin 1s linear infinite;
-}
-.activity-indicator.paused {
-  animation-play-state: paused;
-}
 .widget {
   font-size: 12px;
   color: var(--muted);

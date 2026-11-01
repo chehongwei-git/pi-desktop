@@ -8,6 +8,31 @@ function fixture(action: Bridge['action']) {
   return new Desktop({ ...bridge, action });
 }
 describe('desktop business behavior', () => {
+  it('sends plan controls once without consuming text or image drafts', async () => {
+    let release!: () => void;
+    const action = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          release = resolve;
+        }),
+    );
+    const desktop = fixture(action as Bridge['action']);
+    desktop.connection = 'ready';
+    desktop.draft = '保留草稿';
+    const pending = desktop.planAction('continue');
+    await desktop.planAction('continue');
+    expect(action).toHaveBeenCalledOnce();
+    expect(action).toHaveBeenCalledWith('', {
+      type: 'prompt',
+      message: '/todos continue',
+    });
+    release();
+    await pending;
+    expect(desktop.draft).toBe('保留草稿');
+    desktop.run = 'running';
+    await desktop.planAction('continue');
+    expect(action).toHaveBeenCalledOnce();
+  });
   it('clears ordinary feedback only on valid submission and preserves plan status', async () => {
     const action = vi.fn().mockResolvedValue({});
     const desktop = fixture(action);
@@ -1099,7 +1124,25 @@ describe('desktop business behavior', () => {
       .mockResolvedValueOnce({
         runtimeId: 'r',
         sequence: 1,
-        events: [{ type: 'reset' }],
+        events: [
+          {
+            type: 'extension',
+            request: {
+              method: 'setWidget',
+              widgetKey: 'plan-todos',
+              widgetLines: ['☐ 旧计划'],
+            },
+          },
+          { type: 'reset' },
+          {
+            type: 'extension',
+            request: {
+              method: 'setWidget',
+              widgetKey: 'plan-todos',
+              widgetLines: ['☐ 新计划'],
+            },
+          },
+        ],
       })
       .mockResolvedValue({ runtimeId: 'r', sequence: 1, events: [] });
     const desktop = new Desktop({
@@ -1114,6 +1157,7 @@ describe('desktop business behavior', () => {
     await desktop.switchSession('new');
     expect(events).toHaveBeenCalledTimes(2);
     expect(desktop.messages[0].text).toBe('preserved');
+    expect(desktop.widgets['plan-todos']).toEqual(['☐ 新计划']);
   });
   it('submits a dialog response only once across cancellation races', async () => {
     const action = vi.fn().mockResolvedValue(null);

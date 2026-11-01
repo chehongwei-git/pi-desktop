@@ -3,12 +3,15 @@
   import { onMount, tick } from 'svelte';
   import MessageView from './MessageView.svelte';
   import ProcessGroup from './ProcessGroup.svelte';
+  import ConversationActivity from './ConversationActivity.svelte';
+  import type { ConversationActivity as Activity } from '../conversation-activity';
   import { processRows } from '../process-groups';
   import ChangePanel from './ChangePanel.svelte';
   import Icon from './Icon.svelte';
   import type { ContentPage, Message } from '../types';
   let {
     messages,
+    activity = null,
     resumeFollow = 0,
     hasMore = false,
     loading = false,
@@ -22,6 +25,8 @@
     read,
   }: {
     messages: Message[];
+    /** 活动提示属于列表内容，复用底部跟随且不干扰上翻阅读。 */
+    activity?: Activity | null;
     /** 消息提交成功或确认扩展操作时恢复跟随；普通进度更新不能打断阅读。 */
     resumeFollow?: number;
     hasMore?: boolean;
@@ -274,6 +279,7 @@
           </div>
         {/if}
       {/each}
+      <ConversationActivity {activity} />
     </div>
   </div>
   {#if change}

@@ -1,10 +1,59 @@
 /** 验证扩展文本展示、进度刷新与用户展开状态，完成状态始终只读。 */
 import '@testing-library/jest-dom/vitest';
 import { cleanup, fireEvent, render } from '@testing-library/svelte';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import PlanTodos from './PlanTodos.svelte';
 afterEach(cleanup);
 describe('plan todos', () => {
+  it('finishes processed progress without claiming a restricted step succeeded', () => {
+    const view = render(PlanTodos, {
+      lines: [
+        '☑ 实现完成',
+        '⊘ 最后验证（未完成：缺少环境）',
+        'ℹ 计划已结束，部分步骤受条件限制未完成',
+      ],
+      oncontinue: vi.fn(),
+      onstop: vi.fn(),
+    });
+    expect(view.getByRole('progressbar')).toHaveAttribute('value', '2');
+    expect(view.getByText('2 / 2 已处理')).toBeVisible();
+    expect(view.getByText('计划已结束 · 1 步完成，1 步受限')).toBeVisible();
+    expect(view.queryByText('全部步骤已完成')).not.toBeInTheDocument();
+    expect(
+      view.queryByRole('button', { name: '继续执行' }),
+    ).not.toBeInTheDocument();
+  });
+  it('separates execution feedback from steps and prevents duplicate continuation', async () => {
+    let release!: () => void;
+    const oncontinue = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          release = resolve;
+        }),
+    );
+    const onstop = vi.fn().mockResolvedValue(undefined);
+    const view = render(PlanTodos, {
+      lines: ['☑ 前四步', '☐ 最后验证', 'ℹ 等待处理：测试环境缺失'],
+      oncontinue,
+      onstop,
+    });
+    expect(view.getByText('1 / 2', { selector: 'span' })).toBeVisible();
+    expect(view.getByRole('status')).toHaveTextContent('测试环境缺失');
+    await fireEvent.click(view.getByRole('button', { name: '继续执行' }));
+    expect(view.getByRole('button', { name: '正在提交…' })).toBeDisabled();
+    expect(oncontinue).toHaveBeenCalledOnce();
+    release();
+    await view.rerender({
+      lines: ['☑ 前四步', '☐ 最后验证'],
+      running: true,
+      oncontinue,
+      onstop,
+    });
+    expect(
+      view.queryByRole('button', { name: '继续执行' }),
+    ).not.toBeInTheDocument();
+    expect(view.getByText('正在执行 · 2')).toBeVisible();
+  });
   it('summarizes progress and the first unfinished step without showing technical keys', async () => {
     const view = render(PlanTodos, {
       lines: ['☑ 已完成检查', '☐ 实现界面', '☐ 执行验证'],

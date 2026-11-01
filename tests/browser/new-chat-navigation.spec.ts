@@ -15,6 +15,7 @@ test('returns from a new-chat draft to existing sessions', async ({ page }) => {
             '☑ 检查项目',
             '☐ 原会话待办：完成方案',
             '☐ 验证最终实现',
+            'ℹ 执行停滞，请检查后继续',
           ],
         },
       },
@@ -39,6 +40,7 @@ test('returns from a new-chat draft to existing sessions', async ({ page }) => {
       warning: null,
     }));
     const snapshot = () => ({ sessionFile, cwd, isStreaming: false });
+    (window as any).planControls = [];
     (window as any).__TAURI_INTERNALS__ = {
       transformCallback: (callback: (event: unknown) => void) => {
         // 模拟宿主扩展事件唤醒，连接完成后才触发拉取。
@@ -74,6 +76,8 @@ test('returns from a new-chat draft to existing sessions', async ({ page }) => {
               sessionFile = 'new.jsonl';
               return { cancelled: false };
             case 'prompt':
+              if (args.action.message.startsWith('/todos '))
+                (window as any).planControls.push(args.action.message);
               return {};
             case 'switch_session':
               // A switch hook may cancel a redundant restore of the active session.
@@ -103,7 +107,15 @@ test('returns from a new-chat draft to existing sessions', async ({ page }) => {
             case 'thinking_levels':
               return { levels: [] };
             case 'commands':
-              return { commands: [] };
+              return {
+                commands: [
+                  {
+                    name: 'todos',
+                    description: 'Show plan',
+                    source: 'extension',
+                  },
+                ],
+              };
           }
         }
         throw new Error(`Unexpected command: ${command}`);
@@ -123,7 +135,15 @@ test('returns from a new-chat draft to existing sessions', async ({ page }) => {
   await todo.getByRole('button', { name: '展开全部' }).click();
   await expect(todo.getByRole('listitem')).toHaveCount(3);
   await expect(todo).toContainText('原会话待办：完成方案');
+  await expect(todo.getByRole('status')).toHaveText('执行停滞，请检查后继续');
   await input.fill('Existing draft');
+  await todo.getByRole('button', { name: '继续执行', exact: true }).click();
+  await expect(input).toHaveValue('Existing draft');
+  await todo.getByRole('button', { name: '停止计划', exact: true }).click();
+  expect(await page.evaluate(() => (window as any).planControls)).toEqual([
+    '/todos continue',
+    '/todos stop',
+  ]);
   await page.getByRole('button', { name: /^新对话/ }).click();
   await expect(page.locator('.welcome')).toBeVisible();
   await expect(input).toHaveValue('');

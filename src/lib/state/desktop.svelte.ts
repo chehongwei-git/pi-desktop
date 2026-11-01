@@ -627,6 +627,12 @@ export class Desktop {
         const previous = this.run;
         reduceEvents(this, batch.events);
         for (const event of batch.events) {
+          // reset 是会话边界，按事件顺序清理；不能在批次末尾保留旧会话 widget。
+          if (event.type === 'reset') {
+            this.widgets = {};
+            this.statuses = {};
+            this.extensions = [];
+          }
           if (event.type === 'extension') this.extension(event.request);
           if (event.type === 'notice') this.notice = event.message;
           if (event.type === 'metadata') {
@@ -1145,6 +1151,23 @@ export class Desktop {
       this.refreshStats(),
     ]);
     await this.applyProjectModel();
+  }
+  /** 计划命令直接走 RPC，保留当前草稿和图片；只接受空闲状态下的显式操作。 */
+  async planAction(action: 'continue' | 'stop'): Promise<void> {
+    if (
+      this.connection !== 'ready' ||
+      this.openingSession ||
+      this.newChatProject !== null ||
+      this.run !== 'idle' ||
+      this.submitting
+    )
+      return;
+    this.submitting = true;
+    try {
+      await this.action({ type: 'prompt', message: `/todos ${action}` });
+    } finally {
+      this.submitting = false;
+    }
   }
   /** 停止先清队列再 abort；5 秒后提供强制断开入口，保留草稿和当前消息。 */
   async stop(): Promise<void> {

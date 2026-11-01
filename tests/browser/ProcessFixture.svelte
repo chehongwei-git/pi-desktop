@@ -1,6 +1,10 @@
 <script lang="ts">
   import Transcript from '../../src/lib/components/Transcript.svelte';
-  import type { Message } from '../../src/lib/types';
+  import type { Message, RunState } from '../../src/lib/types';
+  import { conversationActivity } from '../../src/lib/conversation-activity';
+  let run = $state<RunState>('idle');
+  let waiting = $state(false);
+  let activity = $derived(conversationActivity(run, messages, waiting));
   const process = {
     id: 'reply-1',
     startedAt: 1000,
@@ -98,9 +102,37 @@
 <div>
   <button onclick={append}>追加过程内容</button>
   <button onclick={prepend}>补载同组历史</button>
+  <button
+    onclick={() => {
+      run = 'running';
+    }}>开始运行</button
+  >
+  <button
+    onclick={() => {
+      waiting = !waiting;
+    }}>切换等待</button
+  >
+  <button
+    onclick={() => {
+      messages.push({
+        ...base,
+        id: 'stream',
+        role: 'assistant',
+        text: '流式回复',
+        status: 'streaming',
+      });
+    }}>开始正文</button
+  >
+  <button
+    onclick={() => {
+      run = 'idle';
+      messages = messages.map((m) => ({ ...m, status: 'done' }));
+    }}>完成任务</button
+  >
 </div>
 <Transcript
   {messages}
+  {activity}
   {toolViews}
   ontoggletool={(id, section) => {
     toolViews[id] = { ...toolViews[id], [section]: !toolViews[id]?.[section] };
