@@ -296,7 +296,7 @@
     const match = /^\/(settings|model|thinking|resume|fork|tree)\s*$/.exec(
       desktop.draft.trim(),
     );
-    if (match && open(match[1])) return;
+    if (match && !desktop.images.length && open(match[1])) return;
     onsend(mode);
   }
   // 连接或会话变化时关闭菜单，旧页面不能作用于新会话。
@@ -309,8 +309,22 @@
   });
 </script>
 
+{#if desktop.recoveredImages.length}<div
+    role="group"
+    aria-label="可恢复的图片消息"
+  >
+    {#each desktop.recoveredImages as draft, index}<button
+        type="button"
+        onclick={() => desktop.restoreImages(index)}
+        >恢复图片消息（{draft.images.length} 张）{draft.text.slice(
+          0,
+          60,
+        )}</button
+      >{/each}
+  </div>{/if}
 <Composer
   bind:value={desktop.draft}
+  bind:images={desktop.images}
   historyKey={JSON.stringify([
     desktop.runtimeId,
     desktop.project,

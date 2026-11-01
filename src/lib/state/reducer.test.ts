@@ -60,6 +60,32 @@ describe('conversation projection', () => {
     ]);
     expect(state.messages.some((message) => message.delivery)).toBe(false);
   });
+  it('matches image-only queue placeholders by content rather than empty text', () => {
+    const pending = (id: string): Message => ({
+      ...message(id, '', 'done'),
+      role: 'user',
+      images: [{ id, mimeType: 'image/png', data: 'payload' }],
+      delivery: { mode: 'steer', state: 'queued' },
+    });
+    const state: Transcript = {
+      messages: [pending('a'), pending('b')],
+      run: 'running',
+    };
+    reduceEvents(state, [
+      {
+        type: 'message',
+        message: {
+          ...message('actual', '', 'done'),
+          role: 'user',
+          images: [{ id: 'b', mimeType: 'image/png', contentRef: 'body' }],
+        },
+      },
+    ]);
+    expect(state.messages.map((message) => message.id)).toEqual([
+      'a',
+      'actual',
+    ]);
+  });
   it('settled idle state is distinct from an accepted prompt', () => {
     const state: Transcript = { messages: [], run: 'running' };
     reduceEvents(state, [{ type: 'run', state: 'retrying' }]);

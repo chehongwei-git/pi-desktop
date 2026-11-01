@@ -180,7 +180,7 @@ for await (const line of readline.createInterface({
         type: 'message_end',
         message: {
           role: 'user',
-          content: [{ type: 'text', text: request.message }],
+          content: [{ type: 'text', text: request.message }, ...(request.images ?? [])],
         },
       });
       emit({

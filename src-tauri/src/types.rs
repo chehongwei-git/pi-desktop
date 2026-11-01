@@ -116,6 +116,15 @@ pub struct SessionSummary {
     pub warning: Option<String>,
 }
 
+/// 图片通过私有正文引用按需读取，ID 用内容摘要关联排队占位。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MessageImage {
+    pub id: String,
+    pub mime_type: String,
+    pub content_ref: String,
+}
+
 /// 正文由宿主私有临时文件托管；前端列表只接收有界预览。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -124,6 +133,8 @@ pub struct Message {
     pub role: String,
     pub text: String,
     pub thinking: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<MessageImage>,
     pub content_ref: Option<String>,
     #[serde(default)]
     pub truncated: bool,
@@ -139,6 +150,8 @@ pub struct Message {
 pub enum Action {
     Prompt {
         message: String,
+        #[serde(default)]
+        images: Vec<Value>,
         mode: Option<String>,
     },
     Stop,

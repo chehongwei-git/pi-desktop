@@ -25,7 +25,7 @@ try {
               contextWindow: 200000,
               maxTokens: 32000,
               input: ['text', 'image'],
-              reasoning: true,
+              reasoning: defaultThinking !== 'off',
               thinkingLevelMap: { high: 'high', xhigh: null, max: 'max' },
             },
           ],
@@ -108,7 +108,8 @@ try {
   const state = await request('get_state');
   if (
     state.model?.id !== 'test-model' ||
-    state.thinkingLevel !== defaultThinking
+    state.thinkingLevel !== defaultThinking ||
+    state.model.reasoning !== (defaultThinking !== 'off')
   )
     throw new Error('模型或默认思考等级未加载');
   const available = await request('get_available_models');
@@ -120,15 +121,59 @@ try {
     !model.input.includes('image')
   )
     throw new Error('模型参数未加载');
+  // 真实桥接覆盖关闭→指定强度→关闭，同时检查 Pi 实际模型能力。
+  for (const level of ['high', 'off', defaultThinking]) {
+    await request('prompt', {
+      message: `/pi-desktop-thinking-v1 ${JSON.stringify({ level })}`,
+    });
+    const current = await request('get_state');
+    if (
+      current.thinkingLevel !== level ||
+      current.model.reasoning !== (level !== 'off')
+    )
+      throw new Error('思考能力与强度未同步');
+  }
+  await request('prompt', {
+    message: '/pi-desktop-thinking-v1 {"level":"max"}',
+  });
   const levels = await request('get_available_thinking_levels');
   if (!levels.levels.includes('max') || levels.levels.includes('xhigh'))
     throw new Error('等级映射不符合配置');
+  await request('prompt', {
+    message: `/pi-desktop-thinking-v1 ${JSON.stringify({ level: defaultThinking })}`,
+  });
   await request('prompt', { message: '/pi-desktop-models-v1' });
   if (extensionErrors.length) throw new Error('桥接刷新出错');
   const after = await request('get_state');
   if (after.sessionId !== state.sessionId) throw new Error('刷新改变了会话');
+  // 移除全部显式映射后重载，验证桌面缺省映射能通过真实 Pi 的强度收缩规则。
+  await writeFile(
+    join(directory, 'models.json'),
+    JSON.stringify({
+      providers: {
+        'desktop-test': {
+          api: 'openai-responses',
+          baseUrl: 'http://127.0.0.1:1/v1',
+          models: [{ id: 'test-model', reasoning: false }],
+        },
+      },
+    }),
+  );
+  await request('prompt', { message: '/pi-desktop-models-v1' });
+  for (const level of ['xhigh', 'max', 'off']) {
+    await request('prompt', {
+      message: '/pi-desktop-thinking-v1 ' + JSON.stringify({ level }),
+    });
+    const current = await request('get_state');
+    if (
+      current.thinkingLevel !== level ||
+      current.model.reasoning !== (level !== 'off')
+    )
+      throw new Error('无显式映射时扩展强度未生效');
+  }
+  if (extensionErrors.length) throw new Error('扩展强度应用失败');
   console.log(
-    `真实 Pi 模型参数、图片能力、${defaultThinking} 默认等级、禁用 xhigh 与模型刷新通过；未调用模型。`,
+    `真实 Pi 模型参数、图片能力、${defaultThinking} 默认等级、禁用 xhigh、模型刷新及无映射 xhigh/max 切换通过；未调用模型。`,
   );
 } finally {
   for (const p of pending.values()) clearTimeout(p.timer);

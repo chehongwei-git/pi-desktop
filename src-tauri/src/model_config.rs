@@ -221,9 +221,13 @@ fn read_model(
         .filter(|k| **k != "id")
         .filter_map(|k| m.get(*k).map(|v| ((*k).into(), v.clone())))
         .collect();
-    // 自定义模型不再继承 Pi 的“不支持思考”；已有显式关闭或等级选择仍然保留。
+    // 自定义模型以最终强度决定能力；无独立等级时跟随全局默认。
     if !override_only {
-        values.entry("reasoning".into()).or_insert(json!(true));
+        let thinking = settings["modelThinkingLevels"][format!("{provider}/{id}")]
+            .as_str()
+            .or_else(|| settings["defaultThinkingLevel"].as_str())
+            .unwrap_or("off");
+        values.insert("reasoning".into(), json!(thinking != "off"));
     }
     ModelConfig {
         id: id.into(),
@@ -232,7 +236,9 @@ fn read_model(
         default_thinking: settings["modelThinkingLevels"][format!("{provider}/{id}")]
             .as_str()
             .map(str::to_owned)
-            .or_else(|| (!override_only).then(|| "off".into())),
+            .or_else(|| {
+                (!override_only && settings["defaultThinkingLevel"].is_null()).then(|| "off".into())
+            }),
     }
 }
 fn set_optional(v: &mut Value, key: &str, value: &Option<String>) {
@@ -339,24 +345,17 @@ fn validate(input: &ModelSettings) -> Result<()> {
                     return Err(fail(format!("模型 {} 的最大输出不能大于上下文长度", m.id)));
                 }
             }
-            if let Some(l) = &m.default_thinking {
-                if !m.override_only
-                    && ["xhigh", "max"].contains(&l.as_str())
-                    && !m
-                        .values
+            let effective_thinking = m.default_thinking.as_ref().or_else(|| {
+                (!m.override_only)
+                    .then_some(input.default_thinking_level.as_ref())
+                    .flatten()
+            });
+            if let Some(l) = effective_thinking {
+                if l != "off"
+                    && m.values
                         .get("thinkingLevelMap")
                         .and_then(|v| v.get(l))
-                        .is_some_and(Value::is_string)
-                {
-                    return Err(fail("自定义模型的 xhigh/max 默认等级需要显式服务端映射"));
-                }
-                if l != "off" && m.values.get("reasoning") == Some(&json!(false)) {
-                    return Err(fail("未开启思考能力，不能设置非 off 的模型默认等级"));
-                }
-                if m.values
-                    .get("thinkingLevelMap")
-                    .and_then(|v| v.get(l))
-                    .is_some_and(Value::is_null)
+                        .is_some_and(Value::is_null)
                 {
                     return Err(fail("模型默认思考等级已被禁用"));
                 }
@@ -409,7 +408,7 @@ fn write_atomic(dir: &Path, name: &str, bytes: &[u8]) -> Result<()> {
     tmp.persist(target).map_err(|e| AppError::from(e.error))?;
     Ok(())
 }
-fn merge_model(old: &Value, m: &ModelConfig) -> Value {
+fn merge_model(old: &Value, m: &ModelConfig, global_thinking: &Option<String>) -> Value {
     let mut out = if old.is_object() {
         old.clone()
     } else {
@@ -423,6 +422,23 @@ fn merge_model(old: &Value, m: &ModelConfig) -> Value {
     }
     if !m.override_only {
         out["id"] = json!(m.id);
+        // Pi 在扩展加载前解析启动默认等级；为选中的扩展默认值补齐映射，防止静默降级。
+        if let Some(level) = m.default_thinking.as_ref().or(global_thinking.as_ref()) {
+            if ["xhigh", "max"].contains(&level.as_str()) {
+                if out.get("thinkingLevelMap").is_none() {
+                    out["thinkingLevelMap"] = json!({});
+                }
+                if out["thinkingLevelMap"].get(level).is_none() {
+                    out["thinkingLevelMap"][level] = json!(level);
+                }
+            }
+        }
+        // 保存时再次归一化，防止旧客户端或全局等级修改留下冲突字段。
+        out["reasoning"] = json!(m
+            .default_thinking
+            .as_ref()
+            .or(global_thinking.as_ref())
+            .is_some_and(|level| level != "off"));
     }
     out
 }
@@ -536,7 +552,7 @@ pub fn save(dir: &Path, input: ModelSettings) -> Result<ModelSettings> {
                     .cloned()
                     .unwrap_or(Value::Null)
             };
-            let value = merge_model(&previous, m);
+            let value = merge_model(&previous, m, &input.default_thinking_level);
             if m.override_only {
                 overrides.insert(m.id.clone(), value);
             } else {
@@ -749,7 +765,7 @@ mod tests {
         );
     }
     #[test]
-    fn custom_models_default_to_reasoning_with_thinking_off_and_keep_explicit_choices() {
+    fn custom_models_disable_reasoning_when_thinking_is_off() {
         let dir = tempfile::tempdir().unwrap();
         fs::write(
             dir.path().join("models.json"),
@@ -769,7 +785,7 @@ mod tests {
         let form = load(dir.path()).unwrap();
         assert_eq!(form.default_thinking_level.as_deref(), Some("off"));
         let models = &form.providers[0].models;
-        assert_eq!(models[0].values["reasoning"], true);
+        assert_eq!(models[0].values["reasoning"], false);
         assert_eq!(models[0].default_thinking.as_deref(), Some("off"));
         assert_eq!(models[1].values["reasoning"], false);
         assert!(!models[2].values.contains_key("reasoning"));
@@ -778,12 +794,43 @@ mod tests {
         let bytes = raw(dir.path()).unwrap();
         assert_eq!(
             parse(&bytes[0], "models.json").unwrap()["providers"]["test"]["models"][0]["reasoning"],
-            true
+            false
         );
         assert_eq!(
             parse(&bytes[2], "settings.json").unwrap()["modelThinkingLevels"]["test/new"],
             "off"
         );
+    }
+
+    #[test]
+    fn strength_controls_reasoning_across_save_reload_and_global_inheritance() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("models.json"),
+            r#"{"providers":{"test":{"api":"openai-responses","baseUrl":"https://example.test/v1","models":[{"id":"m","reasoning":false}]}}}"#).unwrap();
+        let mut form = load(dir.path()).unwrap();
+        for level in ["xhigh", "max", "high", "off", "medium"] {
+            form.providers[0].models[0].default_thinking = Some(level.into());
+            form = save(dir.path(), form).unwrap();
+            assert_eq!(
+                form.providers[0].models[0].values["reasoning"],
+                level != "off"
+            );
+            let stored = parse(&raw(dir.path()).unwrap()[0], "models.json").unwrap();
+            assert_eq!(
+                stored["providers"]["test"]["models"][0]["reasoning"],
+                level != "off"
+            );
+        }
+        form.providers[0].models[0].default_thinking = None;
+        for level in ["xhigh", "max", "high", "off"] {
+            form.default_thinking_level = Some(level.into());
+            form = save(dir.path(), form).unwrap();
+            assert!(form.providers[0].models[0].default_thinking.is_none());
+            assert_eq!(
+                form.providers[0].models[0].values["reasoning"],
+                level != "off"
+            );
+        }
     }
 
     #[test]

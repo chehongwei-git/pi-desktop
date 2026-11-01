@@ -4,6 +4,7 @@
   import { openUrl } from '@tauri-apps/plugin-opener';
   import { markdown, highlight, safeExternal } from '../markdown';
   import ToolMessage from './ToolMessage.svelte';
+  import MessageImage from './MessageImage.svelte';
   import type { ContentPage, Message } from '../types';
   import Icon from './Icon.svelte';
   /** onfull 打开分块正文，onload 只读取有界预览；不向组件暴露本地路径。 */
@@ -114,6 +115,9 @@
             ? '等待处理'
             : '等待当前任务完成'}
       </div>{/if}
+    {#each message.images ?? [] as image, index (`${image.id}-${index}`)}
+      <MessageImage {image} {read} />
+    {/each}
     {#if message.thinking}<details class="thinking">
         <summary>思考过程</summary>
         <pre>{message.thinking}</pre>

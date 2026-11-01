@@ -113,11 +113,21 @@ impl Handle {
     /// 业务动作转换为白名单命令；停止必须先清队列，避免 abort 继续排队任务。
     pub async fn action(&self, action: Action) -> Result<Value> {
         match action {
-            Action::Prompt { message, mode } => {
-                if message.trim().is_empty() {
+            Action::Prompt { message, images, mode } => {
+                crate::images::validate(&images)?;
+                if message.trim().is_empty() && images.is_empty() {
                     return Err(AppError::new("EMPTY", "消息不能为空"));
                 }
+                // 仅带图时检查能力；Pi 仍负责最终解码及提供商格式转换。
+                if !images.is_empty() {
+                    if message.trim_start().starts_with('/') { return Err(AppError::new("IMAGE", "图片不能与斜杠命令一起发送")); }
+                    let state = self.rpc(json!({"type":"get_state"}), Kind::Query).await?;
+                    if state["model"]["input"].as_array().is_some_and(|input| !input.iter().any(|v| v == "image")) {
+                        return Err(AppError::new("IMAGE", "当前模型不支持图片输入，请切换模型"));
+                    }
+                }
                 let mut cmd = json!({"type":"prompt","message":message});
+                if !images.is_empty() { cmd["images"] = images.into(); }
                 if let Some(mode) = mode {
                     if !["steer", "followUp"].contains(&mode.as_str()) {
                         return Err(AppError::new("MODE", "无效发送模式"));
@@ -198,8 +208,13 @@ impl Handle {
                     .await
             }
             Action::ThinkingLevels => {
-                self.rpc(json!({"type":"get_available_thinking_levels"}), Kind::Query)
-                    .await
+                let state = self.rpc(json!({"type":"get_state"}), Kind::Query).await?;
+                // 当前 reasoning=false 只表示关闭；按等级映射提供重新开启入口。
+                let map = &state["model"]["thinkingLevelMap"];
+                let levels: Vec<_> = crate::model_config::LEVELS.into_iter().filter(|level| {
+                    *level == "off" || map.get(*level) != Some(&Value::Null)
+                }).collect();
+                Ok(json!({"levels": levels}))
             }
             Action::SetModel { provider, model } => {
                 self.rpc(
@@ -209,9 +224,10 @@ impl Handle {
                 .await
             }
             Action::SetThinking { level } => {
-                self.rpc(
-                    json!({"type":"set_thinking_level","level":level}),
-                    Kind::Mutate,
+                self.bridge(
+                    "pi-desktop-thinking-v1",
+                    json!({"level":level}),
+                    Kind::Bridge,
                 )
                 .await
             }
@@ -638,6 +654,7 @@ mod tests {
             assert_eq!(cancelled["cancelled"], true);
             handle
                 .action(Action::Prompt {
+                    images: vec![json!({"type":"image","mimeType":"image/png","data":"iVBORw0KGgo="})],
                     message: "hello".into(),
                     mode: None,
                 })
@@ -670,6 +687,8 @@ mod tests {
                 .iter()
                 .any(|m| m["text"] == "你好\u{2028}RPC final"));
             assert_eq!(messages.iter().filter(|m| m["id"] == "tool-t1").count(), 1);
+            let image = &messages.iter().find(|m| m["role"] == "user" && m["text"] == "hello").unwrap()["images"][0];
+            assert_eq!(handle.content(image["contentRef"].as_str().unwrap().into(), 0).await.unwrap()["text"], "iVBORw0KGgo=");
             let queued = handle.action(Action::Stop).await.unwrap();
             assert_eq!(queued["steering"][0], "queued draft");
             handle.shutdown().await.unwrap();

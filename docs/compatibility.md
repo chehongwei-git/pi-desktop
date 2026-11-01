@@ -4,7 +4,7 @@
 
 | 能力 | 命令 / 事件 | 行为 |
 | --- | --- | --- |
-| 发送与停止 | prompt、clear_queue、abort | 请求 ID 关联，不自动重发；停止恢复清队列文本 |
+| 发送与停止 | prompt（含 images）、clear_queue、abort | 支持图片、steer/followUp；请求 ID 关联，不自动重发；停止结合本地记录恢复排队附件 |
 | 会话 | new_session、switch_session、set_session_name | 尊重扩展 cancelled，Pi 为唯一写入方 |
 | 历史 | get_entries、leafId/parentId | 原始当前分支，包含压缩摘要，不改写 context_edit |
 | 模型 | get_available_models、set_model、桌面共享配置仓库、模型发现 | 与 Pi 配置和凭据共用；支持参数、思考映射及默认值编辑，三种协议远端模型发现 |

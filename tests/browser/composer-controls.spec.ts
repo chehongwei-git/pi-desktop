@@ -43,7 +43,9 @@ test('switches models and thinking beside the input and preserves drafts', async
             case 'models':
               return { models };
             case 'thinking_levels':
-              return { levels: ['off', 'low', 'medium', 'high'] };
+              return {
+                levels: ['off', 'low', 'medium', 'high', 'xhigh', 'max'],
+              };
             case 'commands':
               return { commands: [] };
             case 'history':
@@ -146,10 +148,13 @@ test('switches models and thinking beside the input and preserves drafts', async
   await expect(
     composer.getByRole('menuitemradio', { checked: true }),
   ).toBeFocused();
+  await expect(
+    composer.getByRole('menuitemradio', { name: /极高 xhigh/ }),
+  ).toBeVisible();
   await page.keyboard.press('End');
   await page.keyboard.press('Enter');
   await expect(thinking).toBeEnabled();
-  await expect(thinking).toHaveText(/思考\s*高/);
+  await expect(thinking).toHaveText(/思考\s*最高/);
   await expect(thinking).toBeFocused();
   await expect(input).toHaveValue('检查草稿保留');
   await model.click();
@@ -157,7 +162,7 @@ test('switches models and thinking beside the input and preserves drafts', async
     .getByRole('button', { name: 'Claude Opus a', exact: true })
     .click();
   await expect(model).toBeEnabled();
-  await expect(thinking).toHaveText(/思考\s*高/);
+  await expect(thinking).toHaveText(/思考\s*最高/);
   await page.evaluate(() => {
     (window as any).failModel = true;
   });

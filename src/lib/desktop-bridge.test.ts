@@ -6,7 +6,12 @@ import desktopBridge from '../../src-tauri/bridge/desktop.mjs';
 type Context = {
   isIdle: () => boolean;
   reload: () => Promise<void>;
-  model?: { provider: string; id: string };
+  model?: {
+    provider: string;
+    id: string;
+    reasoning?: boolean;
+    thinkingLevelMap?: Record<string, string | null>;
+  };
   modelRegistry: {
     refresh: ReturnType<typeof vi.fn>;
     getError: () => string | undefined;
@@ -19,6 +24,11 @@ function fixture() {
     (args: string, ctx: Context) => Promise<void>
   >();
   const setModel = vi.fn().mockResolvedValue(true);
+  let level = 'off';
+  const setThinkingLevel = vi.fn((value: string) => {
+    level = value;
+  });
+  const events = new Map<string, (event: unknown, ctx: Context) => void>();
   desktopBridge({
     registerCommand(
       name: string,
@@ -27,6 +37,10 @@ function fixture() {
       handlers.set(name, command.handler);
     },
     setModel,
+    on: (event: string, handler: (event: unknown, ctx: Context) => void) =>
+      events.set(event, handler),
+    getThinkingLevel: () => level,
+    setThinkingLevel,
   });
   const ctx: Context = {
     isIdle: () => true,
@@ -42,9 +56,43 @@ function fixture() {
       }),
     },
   };
-  return { handlers, setModel, ctx };
+  return {
+    handlers,
+    setModel,
+    ctx,
+    events,
+    setThinkingLevel,
+    getLevel: () => level,
+  };
 }
 describe('Pi desktop bridge', () => {
+  it('enables reasoning for a selected strength and disables it for off', async () => {
+    const { handlers, ctx, getLevel, events } = fixture();
+    const apply = handlers.get('pi-desktop-thinking-v1')!;
+    for (const level of ['xhigh', 'max', 'high', 'off', 'medium']) {
+      await apply(JSON.stringify({ level }), ctx);
+      expect(getLevel()).toBe(level);
+      expect(ctx.model?.reasoning).toBe(level !== 'off');
+    }
+    ctx.model!.reasoning = false;
+    events.get('session_start')!({}, ctx);
+    expect(ctx.model!.reasoning).toBe(true);
+    ctx.model!.thinkingLevelMap = { high: null };
+    await expect(apply('{"level":"high"}', ctx)).rejects.toThrow('不支持');
+    expect(getLevel()).toBe('medium');
+  });
+  it('restores the previous capability and level after a failed application', async () => {
+    const { handlers, ctx, setThinkingLevel, getLevel } = fixture();
+    ctx.model!.reasoning = false;
+    setThinkingLevel.mockImplementationOnce(() => {
+      throw new Error('应用失败');
+    });
+    await expect(
+      handlers.get('pi-desktop-thinking-v1')!('{"level":"high"}', ctx),
+    ).rejects.toThrow('应用失败');
+    expect(getLevel()).toBe('off');
+    expect(ctx.model!.reasoning).toBe(false);
+  });
   it('never uses the stale context after reload', async () => {
     const { handlers, ctx } = fixture();
     const reload = vi.fn(async () => {

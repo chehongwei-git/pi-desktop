@@ -1,6 +1,7 @@
 //! 应用服务入口：Tauri 命令只表达业务意图；平台与协议实现不泄漏到 UI。
 mod diagnostics;
 mod history;
+mod images;
 mod model_config;
 mod model_discovery;
 mod new_session;

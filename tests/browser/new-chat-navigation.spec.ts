@@ -10,8 +10,12 @@ test('returns from a new-chat draft to existing sessions', async ({ page }) => {
         type: 'extension',
         request: {
           method: 'setWidget',
-          widgetKey: 'plantodo',
-          widgetLines: ['原会话待办：完成方案'],
+          widgetKey: 'plan-todos',
+          widgetLines: [
+            '☑ 检查项目',
+            '☐ 原会话待办：完成方案',
+            '☐ 验证最终实现',
+          ],
         },
       },
       {
@@ -111,11 +115,13 @@ test('returns from a new-chat draft to existing sessions', async ({ page }) => {
   const recent = page.getByRole('region', { name: '最近', exact: true });
   await expect(page.getByText('已连接', { exact: true })).toBeVisible();
   await page.evaluate(() => (window as any).wakeExtensions());
-  const todo = page.locator('.widget').filter({ hasText: 'plantodo' });
+  const todo = page.getByRole('region', { name: '执行计划', exact: true });
   const status = page.locator('.extension-status');
   await expect(todo).toBeVisible();
   await expect(status).toHaveText('⏸ plan');
-  await todo.locator('summary').click();
+  await expect(todo.getByRole('progressbar')).toHaveAttribute('value', '1');
+  await todo.getByRole('button', { name: '展开全部' }).click();
+  await expect(todo.getByRole('listitem')).toHaveCount(3);
   await expect(todo).toContainText('原会话待办：完成方案');
   await input.fill('Existing draft');
   await page.getByRole('button', { name: /^新对话/ }).click();
@@ -134,6 +140,33 @@ test('returns from a new-chat draft to existing sessions', async ({ page }) => {
   await expect(todo).toBeVisible();
   await expect(todo).toContainText('原会话待办：完成方案');
   await expect(status).toHaveText('⏸ plan');
+  await page.screenshot({
+    path: 'test-results/plan-card-light.png',
+    animations: 'disabled',
+  });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page
+    .getByRole('button', { name: '收起侧栏', exact: true })
+    .last()
+    .click();
+  await page.evaluate(() => {
+    document.documentElement.dataset.theme = 'dark';
+  });
+  const cardBounds = await todo.boundingBox();
+  expect(cardBounds!.x).toBeGreaterThanOrEqual(0);
+  expect(cardBounds!.x + cardBounds!.width).toBeLessThanOrEqual(390);
+  await todo.getByRole('button', { name: '展开全部' }).press('Enter');
+  const steps = todo.getByRole('group', { name: '计划步骤' });
+  await expect(steps).toBeVisible();
+  await steps.focus();
+  await steps.press('Escape');
+  await expect(todo.getByRole('button', { name: '展开全部' })).toBeFocused();
+  await page.screenshot({
+    path: 'test-results/plan-card-dark-narrow.png',
+    animations: 'disabled',
+  });
+  await page.setViewportSize({ width: 1200, height: 800 });
+  await page.getByRole('button', { name: '展开侧栏', exact: true }).click();
   await page.getByRole('button', { name: /^新对话/ }).click();
   await expect(input).toHaveValue('New draft');
   await expect(todo).toHaveCount(0);

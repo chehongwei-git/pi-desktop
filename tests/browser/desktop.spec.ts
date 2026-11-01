@@ -2154,8 +2154,83 @@ for (const width of [1200, 600]) {
         (node) => node === (window as any).savedTranscript,
       ),
     ).toBe(true);
+    const distance = () =>
+      transcript.evaluate(
+        (node) => node.scrollHeight - node.scrollTop - node.clientHeight,
+      );
+    if (width === 600) {
+      // 阅读计划时上翻，确认执行后也应主动恢复跟随。
+      await transcript.hover();
+      await page.mouse.wheel(0, -240);
+      await expect.poll(distance).toBeGreaterThan(200);
+    }
     await execute.click();
     await expect(choice).toHaveCount(0);
+    await expect.poll(distance).toBeLessThan(3);
+    const appendExecution = (step: number) =>
+      page.evaluate((step) => {
+        (window as any).emitEvents([
+          {
+            type: 'extension',
+            request: {
+              type: 'extension_ui_request',
+              method: 'setWidget',
+              widgetKey: 'plan-todos',
+              widgetLines: ['[x] 检查方案', '[ ] 执行修改'],
+            },
+          },
+          {
+            type: 'message',
+            message: {
+              id: `execution-${step}`,
+              role: 'assistant',
+              text: '执行进度\n'.repeat(40),
+              thinking: '',
+              status: 'done',
+              contentRef: null,
+              name: null,
+            },
+          },
+        ]);
+      }, step);
+    for (let step = 0; step < 3; step++) {
+      await appendExecution(step);
+      await expect(
+        transcript.locator(`[data-message-id="execution-${step}"]`),
+      ).toBeVisible();
+      await expect.poll(distance).toBeLessThan(3);
+      await expect(
+        page.getByRole('button', { name: '回到底部', exact: true }),
+      ).toHaveCount(0);
+    }
+    await transcript.hover();
+    await page.mouse.wheel(0, -240);
+    await expect.poll(distance).toBeGreaterThan(200);
+    const top = await transcript.evaluate((node) => node.scrollTop);
+    await appendExecution(3);
+    await expect(
+      transcript.locator('[data-message-id="execution-3"]'),
+    ).toHaveCount(1);
+    // 等待布局观察器与后续帧，确保流式追加不会把阅读位置拉回去。
+    await transcript.evaluate(
+      () =>
+        new Promise<void>((resolve) => {
+          let frames = 0;
+          const sample = () =>
+            ++frames === 12 ? resolve() : requestAnimationFrame(sample);
+          requestAnimationFrame(sample);
+        }),
+    );
+    expect(await transcript.evaluate((node) => node.scrollTop)).toBeCloseTo(
+      top,
+      0,
+    );
+    await expect(input).toHaveValue('保留计划修改草稿');
+    expect(
+      await transcript.evaluate(
+        (node) => node === (window as any).savedTranscript,
+      ),
+    ).toBe(true);
     await expect
       .poll(() =>
         page.evaluate(

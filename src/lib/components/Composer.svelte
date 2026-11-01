@@ -2,6 +2,7 @@
 <script lang="ts">
   import { tick, type Snippet } from 'svelte';
   import Icon from './Icon.svelte';
+  import ImageAttachments from './ImageAttachments.svelte';
   import { shouldSend } from '../state/reducer';
   import {
     categorizedCommands,
@@ -10,11 +11,13 @@
     commandSupport,
     type CommandCategory,
   } from '../commands';
-  import type { Command, HistoryPage, Message } from '../types';
+  import type { Command, HistoryPage, Message, MessageImage } from '../types';
+  import { imageAccept, readImages } from '../images';
   import { errorMessage } from '../client';
   /** 运行中 Enter/发送直接引导当前任务，后续消息与停止使用独立按钮。 */
   let {
     value = $bindable(''),
+    images = $bindable<MessageImage[]>([]),
     disabled = false,
     running = false,
     submitting = false,
@@ -35,6 +38,7 @@
     onhistory?: (before?: number) => Promise<HistoryPage>;
     onhistorytext?: (message: Message) => Promise<string>;
     value?: string;
+    images?: MessageImage[];
     disabled?: boolean;
     running?: boolean;
     submitting?: boolean;
@@ -55,6 +59,40 @@
     onstop: () => void;
   } = $props();
   let textarea: HTMLTextAreaElement;
+  let picker: HTMLInputElement;
+  let imageBusy = $state(false);
+  let dragging = $state(false);
+  let imageError = $state('');
+  let imageRequest = 0;
+  $effect(() => {
+    historyKey;
+    ++imageRequest;
+    imageBusy = false;
+    dragging = false;
+    imageError = '';
+  });
+  /** 切换会话后作废异步读取；附件失败不影响原有草稿。 */
+  async function addImages(files: File[]): Promise<void> {
+    if (disabled || submitting || menu || imageBusy || !files.length) return;
+    const request = ++imageRequest;
+    imageBusy = true;
+    imageError = '';
+    try {
+      const added = await readImages(files, images);
+      if (request === imageRequest) images = [...images, ...added];
+    } catch (cause) {
+      if (request === imageRequest) imageError = errorMessage(cause);
+    } finally {
+      if (request === imageRequest) imageBusy = false;
+    }
+  }
+  function paste(event: ClipboardEvent): void {
+    const files = Array.from(event.clipboardData?.files ?? []);
+    if (files.length) {
+      event.preventDefault();
+      void addImages(files);
+    }
+  }
   let composing = false;
   let historyMessages: Message[] = [];
   let historyIndex = -1;
@@ -211,7 +249,7 @@
       onchoose?.(command.name);
       return;
     }
-    if (enter && oncommand?.(command.name)) {
+    if (enter && !images.length && oncommand?.(command.name)) {
       textarea.focus();
       return;
     }
@@ -239,7 +277,13 @@
       complete(selected, true);
       return;
     }
-    if (!value.trim() || disabled || submitting) return;
+    if (
+      (!value.trim() && !images.length) ||
+      disabled ||
+      submitting ||
+      imageBusy
+    )
+      return;
     onsend(mode ?? (running ? 'steer' : undefined));
   }
   /** IME 回车由浏览器确认候选；只有非组合输入才 preventDefault 并发送。 */
@@ -315,7 +359,49 @@
   }
 </script>
 
-<div class="composer" class:disabled>
+<div
+  class="composer"
+  class:disabled
+  role="group"
+  aria-label="消息编辑器"
+  ondragover={(event) => {
+    if (event.dataTransfer?.types.includes('Files')) {
+      event.preventDefault();
+      if (!disabled && !submitting && !menu && !imageBusy) dragging = true;
+    }
+  }}
+  ondragleave={(event) => {
+    if (!event.currentTarget.contains(event.relatedTarget as Node | null))
+      dragging = false;
+  }}
+  ondrop={(event) => {
+    dragging = false;
+    if (event.dataTransfer?.files.length) {
+      event.preventDefault();
+      void addImages(Array.from(event.dataTransfer.files));
+    }
+  }}
+>
+  {#if dragging}<p role="status">松开以添加图片</p>{/if}
+  <input
+    bind:this={picker}
+    class="image-picker"
+    type="file"
+    accept={imageAccept}
+    multiple
+    aria-label="选择图片文件"
+    onchange={(event) => {
+      void addImages(Array.from(event.currentTarget.files ?? []));
+      event.currentTarget.value = '';
+    }}
+  />
+  {#if images.length}<ImageAttachments
+      bind:images
+      {historyKey}
+      onempty={() => textarea.focus()}
+    />{/if}
+  {#if imageBusy}<p role="status">正在读取图片…</p>{/if}
+  {#if imageError}<p role="alert">{imageError}</p>{/if}
   {#if matches.length || menu}<div
       class="slash-menu"
       role="listbox"
@@ -418,6 +504,7 @@
       dismissed = '';
     }}
     {disabled}
+    onpaste={paste}
     onkeydown={keydown}
     oncompositionstart={() => {
       composing = true;
@@ -431,7 +518,18 @@
   {#if historyBusy}<p role="status">正在读取历史提示词…</p>{/if}
   <div class="composer-bottom">
     <div class="composer-options">
-      {#if controls}{@render controls()}{/if}
+      <div class="composer-tools">
+        {#if controls}{@render controls()}{/if}
+        <button
+          type="button"
+          class="image-button"
+          aria-label="添加图片"
+          disabled={disabled || submitting || imageBusy || !!menu}
+          onclick={() => picker.click()}
+          title="添加图片，也可粘贴截图或拖入图片"
+          ><Icon name="image" size={19} /></button
+        >
+      </div>
       <span class="composer-hint"
         >{!menu && /^\/compact(?:\s|$)/.test(value)
           ? '语法：/compact [可选压缩要求] · Enter 直接执行压缩'
@@ -447,7 +545,10 @@
         <button
           class="text-button"
           title="排在当前任务完成后处理"
-          disabled={disabled || submitting || !value.trim()}
+          disabled={disabled ||
+            submitting ||
+            imageBusy ||
+            (!value.trim() && !images.length)}
           onclick={() => submit('followUp')}>完成后发送</button
         >
         <button
@@ -464,8 +565,9 @@
         aria-label={running ? '发送引导' : '发送消息'}
         title={running ? '发送引导，在下一个可处理节点生效' : '发送消息'}
         disabled={disabled ||
-          (!menu && !value.trim()) ||
+          (!menu && !value.trim() && !images.length) ||
           submitting ||
+          imageBusy ||
           (!!menu && !matches.length)}
         onclick={() => submit()}
         >{#if running}<span>发送引导</span>{/if}<Icon
@@ -478,6 +580,42 @@
 </div>
 
 <style>
+  /* 工具同行排列，提示另起一行；沿用模型控件的焦点顺序与主题配色。 */
+  .composer-tools {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 4px;
+    min-width: 0;
+  }
+  .image-button {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    width: 32px;
+    height: 32px;
+    padding: 0;
+    border: 1px solid transparent;
+    border-radius: 9px;
+    background: transparent;
+    color: var(--muted);
+  }
+  .image-button:hover:not(:disabled) {
+    color: var(--text);
+    background: var(--surface);
+    border-color: var(--border);
+  }
+  .image-button:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+  .image-button:disabled {
+    opacity: 0.4;
+  }
+  .image-picker {
+    display: none;
+  }
   .command-categories {
     display: flex;
     gap: 4px;

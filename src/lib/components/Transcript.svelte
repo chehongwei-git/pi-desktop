@@ -7,6 +7,7 @@
   import type { ContentPage, Message } from '../types';
   let {
     messages,
+    resumeFollow = 0,
     hasMore = false,
     loading = false,
     onolder,
@@ -19,6 +20,8 @@
     read,
   }: {
     messages: Message[];
+    /** 用户确认扩展操作时恢复跟随；普通进度更新不能打断阅读。 */
+    resumeFollow?: number;
     hasMore?: boolean;
     loading?: boolean;
     /** 请求结束、提交历史前调用，避免用网络请求开始时的旧位置恢复。 */
@@ -48,6 +51,8 @@
   let alive = true;
   let frame = 0;
   let lastScrollTop = 0;
+  let lastScrollHeight = 0;
+  let lastClientHeight = 0;
   let touchY = 0;
   let change = $state<Message>();
   let changeTrigger: HTMLButtonElement | undefined;
@@ -79,6 +84,8 @@
       }
       // 暂停期间不能提前覆盖位置，否则真实下滚事件会丢失方向信息。
       atBottom = isAtBottom();
+      lastScrollHeight = viewport.scrollHeight;
+      lastClientHeight = viewport.clientHeight;
       checkOlder();
     });
   }
@@ -134,9 +141,15 @@
     if (!alive || !viewport) return;
     const top = viewport.scrollTop;
     atBottom = isAtBottom();
-    if (top < lastScrollTop) pauseFollow();
+    // 操作区收起会使浏览器夹紧 scrollTop；布局变化本身不代表用户上翻。
+    const sameLayout =
+      viewport.scrollHeight === lastScrollHeight &&
+      viewport.clientHeight === lastClientHeight;
+    if (top < lastScrollTop && sameLayout) pauseFollow();
     else if (!pending && atBottom) follow = true;
     lastScrollTop = top;
+    lastScrollHeight = viewport.scrollHeight;
+    lastClientHeight = viewport.clientHeight;
     checkOlder();
   }
   onMount(() => {
@@ -157,6 +170,11 @@
       resize.disconnect();
       cancelAnimationFrame(frame);
     };
+  });
+  $effect(() => {
+    resumeFollow;
+    follow = true;
+    if (mounted) update();
   });
   $effect(() => {
     // 普通列表的所有节点都仍在使用，禁止正文缓存淘汰导致已读内容突然缩短。

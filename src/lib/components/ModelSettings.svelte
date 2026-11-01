@@ -11,6 +11,8 @@
     type Discovery,
   } from '../model-config';
   import ModelEditor from './ModelEditor.svelte';
+  import SettingsSelect from './SettingsSelect.svelte';
+  import { thinkingLabels } from '../model-config';
   let {
     desktop,
     dirty = $bindable(false),
@@ -193,8 +195,8 @@
     provider.models.push({
       id,
       overrideOnly,
-      // 新模型显式声明思考能力，默认关闭强度，避免继承 Pi 的 medium 默认值。
-      values: { ...(name ? { name } : {}), reasoning: true },
+      // 默认关闭时同时关闭能力，指定强度后再启用。
+      values: { ...(name ? { name } : {}), reasoning: false },
       defaultThinking: 'off',
     });
     visibleCount = provider.models.length;
@@ -261,14 +263,20 @@
               >{/each}
           </select></label
         >
-        <label
-          >全局默认思考等级<select bind:value={config.defaultThinkingLevel}
-            ><option value={null}>继承 Pi 默认</option
-            >{#each thinkingLevels as level}<option value={level}
-                >{level}</option
-              >{/each}</select
-          ></label
-        >
+        <SettingsSelect
+          label="全局默认思考等级"
+          value={config.defaultThinkingLevel}
+          options={[
+            { value: null, label: '继承 Pi 默认（关闭 · off）' },
+            ...thinkingLevels.map((level) => ({
+              value: level,
+              label: thinkingLabels[level],
+            })),
+          ]}
+          onchange={(value) => {
+            if (config) config.defaultThinkingLevel = value;
+          }}
+        />
         <p>
           模型会限制实际可用等级。修改默认值不会切换当前会话；现有 Pi
           进程可能需要重新连接以读取启动默认值。
@@ -343,18 +351,38 @@
                       (provider.name = e.currentTarget.value || null)}
                   /></label
                 >
-                <label
-                  >API 协议<select bind:value={provider.api}
-                    ><option value={null} disabled>选择协议</option><option
-                      value="openai-completions">OpenAI Chat Completions</option
-                    ><option value="openai-responses">OpenAI Responses</option
-                    ><option value="anthropic-messages"
-                      >Anthropic Messages</option
-                    >{#if provider.api && !['openai-completions', 'openai-responses', 'anthropic-messages'].includes(provider.api)}<option
-                        value={provider.api}>{provider.api}（已有配置）</option
-                      >{/if}</select
-                  ></label
-                >
+                <SettingsSelect
+                  label="API 协议"
+                  value={provider.api}
+                  options={[
+                    { value: null, label: '选择协议', disabled: true },
+                    {
+                      value: 'openai-completions',
+                      label: 'OpenAI Chat Completions',
+                    },
+                    { value: 'openai-responses', label: 'OpenAI Responses' },
+                    {
+                      value: 'anthropic-messages',
+                      label: 'Anthropic Messages',
+                    },
+                    ...(provider.api &&
+                    ![
+                      'openai-completions',
+                      'openai-responses',
+                      'anthropic-messages',
+                    ].includes(provider.api)
+                      ? [
+                          {
+                            value: provider.api,
+                            label: provider.api + '（已有配置）',
+                          },
+                        ]
+                      : []),
+                  ]}
+                  onchange={(value) => {
+                    if (provider) provider.api = value;
+                  }}
+                />
               </div>
               <label
                 >API 基础地址<input
@@ -487,7 +515,7 @@
             <section class="card">
               <h3>模型与能力</h3>
               <p>
-                新模型默认支持思考，强度为 off，可按服务端能力调整。
+                新模型默认关闭思考；指定强度后启用思考能力并应用对应强度。
                 图片、上下文和输出长度继承 Pi 默认。再次获取不会覆盖已有参数。
               </p>
               {#if !configured.length}<p class="empty-models">
@@ -505,7 +533,8 @@
                     {model.id}：本次远端列表未返回，配置仍保留。
                   </p>{/if}
                 <ModelEditor
-                  {model}
+                  bind:model={provider.models[provider.models.indexOf(model)]}
+                  globalThinking={config.defaultThinkingLevel}
                   onremove={() => {
                     if (provider)
                       provider.models = provider.models.filter(

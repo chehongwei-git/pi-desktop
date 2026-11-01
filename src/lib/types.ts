@@ -65,11 +65,20 @@ export interface ToolPresentation {
   } | null;
   fullOutputPath?: string | null;
 }
+/** 图片正文留在宿主；草稿才持有待发送的 Base64。 */
+export interface MessageImage {
+  id: string;
+  mimeType: string;
+  contentRef?: string;
+  data?: string;
+  name?: string;
+}
 export interface Message {
   id: string;
   role: string;
   text: string;
   thinking: string;
+  images?: MessageImage[];
   contentRef: string | null;
   /** 只有正文超出宿主预览上限时才需要全文入口。 */
   truncated?: boolean;
@@ -83,6 +92,7 @@ export interface Model {
   id: string;
   provider: string;
   name: string;
+  input?: ('text' | 'image')[];
 }
 export interface Snapshot {
   cwd?: string;
@@ -191,7 +201,12 @@ export type Wakeup =
   | { type: 'available'; runtimeId: string }
   | { type: 'failed'; runtimeId: string; error: AppError };
 export type Action =
-  | { type: 'prompt'; message: string; mode?: 'steer' | 'followUp' }
+  | {
+      type: 'prompt';
+      message: string;
+      images?: { type: 'image'; data: string; mimeType: string }[];
+      mode?: 'steer' | 'followUp';
+    }
   | {
       type:
         | 'stop'

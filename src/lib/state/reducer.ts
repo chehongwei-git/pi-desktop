@@ -27,7 +27,11 @@ export function reduceEvents(state: Transcript, events: AppEvent[]): void {
       let index = indexes.get(event.message.id);
       if (index === undefined && event.message.role === 'user') {
         const pending = state.messages.findIndex(
-          (message) => message.delivery && message.text === event.message.text,
+          (message) =>
+            message.delivery &&
+            message.text === event.message.text &&
+            (message.images ?? []).map((image) => image.id).join(',') ===
+              (event.message.images ?? []).map((image) => image.id).join(','),
         );
         if (pending >= 0) {
           index = pending;

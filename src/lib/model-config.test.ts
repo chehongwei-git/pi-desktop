@@ -19,7 +19,8 @@ function model(): ModelConfig {
 describe('model configuration rules', () => {
   it('distinguishes inheritance, explicit disable and extended levels', () => {
     const m = model();
-    expect(defaultLevels(m)).not.toContain('max');
+    expect(defaultLevels(m)).toContain('max');
+    expect(defaultLevels(m)).toContain('xhigh');
     setThinkingMapping(m, 'max', 'custom');
     expect(defaultLevels(m)).toContain('max');
     setThinkingMapping(m, 'high', 'disabled');
@@ -28,7 +29,8 @@ describe('model configuration rules', () => {
     expect(m.values.thinkingLevelMap).not.toHaveProperty('high');
     expect(defaultLevels(m)).toContain('high');
     m.values.reasoning = false;
-    expect(defaultLevels(m)).toEqual(['off']);
+    expect(defaultLevels(m)).toContain('high');
+    expect(defaultLevels(m)).toContain('off');
   });
   it('defers application while running and preserves pending changes on failure', async () => {
     const config = {

@@ -12,6 +12,7 @@ import {
   type ExtensionRequest,
   type HistoryPage,
   type Message,
+  type MessageImage,
   type Model,
   type RunState,
   type SessionStats,
@@ -331,6 +332,25 @@ export class Desktop {
   commands = $state<Command[]>([]);
   builtinRequest = $state<{ name: string; args: string } | null>(null);
   draft = $state('');
+  images = $state<MessageImage[]>([]);
+  recoveredImages = $state<{ text: string; images: MessageImage[] }[]>([]);
+  /** 恢复时交换当前草稿，避免覆盖用户尚未发送的工作。 */
+  restoreImages(index: number): void {
+    const [draft] = this.recoveredImages.splice(index, 1);
+    if (!draft) return;
+    if (this.draft || this.images.length)
+      this.recoveredImages.push({ text: this.draft, images: this.images });
+    this.draft = draft.text;
+    this.images = draft.images;
+  }
+  private imageDrafts = new Map<string, MessageImage[]>();
+  /** 图片草稿沿用文本的项目/会话键，退出应用后不持久保存。 */
+  private saveImageDraft(): void {
+    this.imageDrafts.set(this.draftKey(), this.images);
+  }
+  private restoreImageDraft(): void {
+    this.images = this.imageDrafts.get(this.draftKey()) ?? [];
+  }
   newChatProject = $state<string | null>(null);
   // 首次发送创建真实会话会恢复 Pi 默认模型，显式选择需在创建后再次应用。
   private newChatModel: string | null = null;
@@ -340,12 +360,16 @@ export class Desktop {
     if (this.openingSession || this.submitting) return;
     this.drafts.set(this.draftKey(), this.draft);
     const text = this.draft;
+    const images = this.images;
+    this.saveImageDraft();
     if (this.newChatProject !== project && !preserveDraft)
       this.newChatModel = null;
     this.newChatProject = project;
     this.draft = preserveDraft
       ? text
       : (this.drafts.get(this.draftKey()) ?? '');
+    if (preserveDraft) this.images = images;
+    else this.restoreImageDraft();
   }
   notice = $state('');
   modelConfigPending = $state(false);
@@ -504,6 +528,7 @@ export class Desktop {
   }
   private async connectProject(project: string): Promise<void> {
     this.drafts.set(this.draftKey(), this.draft);
+    this.saveImageDraft();
     const generation = ++this.generation;
     const modelRevision = this.modelConfigRevision;
     this.connection = 'starting';
@@ -539,6 +564,7 @@ export class Desktop {
       this.visible.clear();
       this.run = connected.snapshot.isStreaming ? 'running' : 'idle';
       this.draft = this.drafts.get(this.draftKey()) ?? '';
+      this.restoreImageDraft();
       this.settings.recentProjects = [
         this.project,
         ...this.settings.recentProjects.filter(
@@ -802,9 +828,11 @@ export class Desktop {
       this.sessionKey(path) === this.sessionKey(this.snapshot.sessionFile)
     ) {
       this.drafts.set(this.draftKey(), this.draft);
+      this.saveImageDraft();
       this.newChatProject = null;
       this.newChatModel = null;
       this.draft = this.drafts.get(this.draftKey()) ?? '';
+      this.restoreImageDraft();
       await this.applyProjectModel();
       return;
     }
@@ -933,13 +961,16 @@ export class Desktop {
   /** 发送接受前保留原草稿，超时绝不自动重发；用户消息由 Pi 权威事件插入。 */
   async send(mode?: 'steer' | 'followUp'): Promise<void> {
     if (
-      !this.draft.trim() ||
+      (!this.draft.trim() && !this.images.length) ||
       this.submitting ||
       this.openingSession ||
       this.connection !== 'ready'
     )
       return;
     const text = this.draft;
+    const images = this.images;
+    if (images.length && text.trimStart().startsWith('/'))
+      throw new Error('图片不能与斜杠命令一起发送，请修改文字或移除图片。');
     const builtin = parseBuiltin(text);
     if (builtin) {
       if (this.run !== 'idle') {
@@ -1005,6 +1036,7 @@ export class Desktop {
       } finally {
         // 创建失败或被扩展取消时保留项目选择与首条消息，不能发进原会话。
         this.draft = text;
+        this.images = images;
       }
       if (this.newChatProject !== null || this.connection !== 'ready') return;
       this.draft = text;
@@ -1019,6 +1051,12 @@ export class Desktop {
     }
     if (this.projectModel(this.project) && this.run === 'idle')
       await this.applyProjectModel();
+    if (
+      images.length &&
+      this.snapshot.model?.input &&
+      !this.snapshot.model.input.includes('image')
+    )
+      throw new Error('当前模型不支持图片输入，请切换到支持图片的模型。');
     const sessionFile = this.snapshot.sessionFile;
     const sentAt = new Date().toISOString();
     const delivery = mode ?? (this.run !== 'idle' ? 'steer' : undefined);
@@ -1034,6 +1072,7 @@ export class Desktop {
           role: 'user',
           text,
           thinking: '',
+          images,
           contentRef: null,
           status: 'done',
           name: null,
@@ -1043,11 +1082,26 @@ export class Desktop {
     }
     this.submitting = true;
     try {
-      await this.action({ type: 'prompt', message: text, mode: delivery });
+      await this.action({
+        type: 'prompt',
+        message: text,
+        mode: delivery,
+        ...(images.length
+          ? {
+              images: images.map((image) => ({
+                type: 'image' as const,
+                data: image.data!,
+                mimeType: image.mimeType,
+              })),
+            }
+          : {}),
+      });
       if (sessionFile) this.sentAt[this.sessionKey(sessionFile)] = sentAt;
       const pending = this.messages.find((message) => message.id === pendingId);
       if (pending?.delivery) pending.delivery.state = 'queued';
       if (this.draft === text) this.draft = '';
+      const sent = new Set(images.map((image) => image.id));
+      this.images = this.images.filter((image) => !sent.has(image.id));
       if (delivery)
         this.notice =
           delivery === 'steer'
@@ -1097,15 +1151,31 @@ export class Desktop {
           this.respond(request, { cancelled: true }),
         ),
       );
+      const pendingMessages = this.messages.filter(
+        (message) => message.delivery,
+      );
       const cleared = await this.api.action<{
         steering?: string[];
         followUp?: string[];
       }>(runtimeId, { type: 'stop' });
       if (generation !== this.generation) return;
-      this.recovered.push(
-        ...(cleared.steering ?? []),
-        ...(cleared.followUp ?? []),
-      );
+      // clear_queue 只返回文本，按模式及提交顺序消费，避免同文的纯文字消息抢走附件。
+      for (const [mode, texts] of [
+        ['steer', cleared.steering ?? []],
+        ['followUp', cleared.followUp ?? []],
+      ] as const) {
+        for (const text of texts) {
+          const index = pendingMessages.findIndex(
+            (message) =>
+              message.text === text && message.delivery?.mode === mode,
+          );
+          const message =
+            index >= 0 ? pendingMessages.splice(index, 1)[0] : undefined;
+          if (message?.images?.length)
+            this.recoveredImages.push({ text, images: message.images });
+          else this.recovered.push(text);
+        }
+      }
       this.messages = this.messages.filter((message) => !message.delivery);
       this.queued = [];
     } finally {
@@ -1134,6 +1204,7 @@ export class Desktop {
       ? this.sessionLabel(path) || this.openingSession?.title || ''
       : '';
     this.drafts.set(this.draftKey(), this.draft);
+    this.saveImageDraft();
     const result = await this.action<{ cancelled: boolean }>(
       path
         ? { type: 'switch_session', path }
@@ -1151,8 +1222,10 @@ export class Desktop {
     this.currentSessionTitle = title;
     if (path) this.newChatModel = null;
     // 仅创建成功才消费本地草稿；打开历史、创建取消或失败均保留它。
-    if (!path && this.newChatProject !== null)
+    if (!path && this.newChatProject !== null) {
       this.drafts.delete(this.draftKey());
+      this.imageDrafts.delete(this.draftKey());
+    }
     this.newChatProject = null;
     this.toolViews = {};
     await this.drain();
@@ -1169,6 +1242,7 @@ export class Desktop {
       this.refreshStats(),
     ]);
     this.draft = this.drafts.get(this.draftKey()) ?? '';
+    this.restoreImageDraft();
     await this.applyProjectModel();
     if (this.projectKey(previousProject) !== this.projectKey(this.project)) {
       this.settings.recentProjects = [
@@ -1294,7 +1368,13 @@ export class Desktop {
       if (runtime !== this.runtimeId || session !== this.snapshot.sessionFile)
         return;
     }
-    await this.action({ type: 'set_thinking', level });
+    try {
+      await this.action({ type: 'set_thinking', level });
+    } catch (cause) {
+      // 桥接可能在能力更新后失败，以 Pi 状态恢复控件；不保存失败的项目偏好。
+      await this.syncState();
+      throw cause;
+    }
     await this.syncState();
     if (runtime !== this.runtimeId || session !== this.snapshot.sessionFile)
       return;

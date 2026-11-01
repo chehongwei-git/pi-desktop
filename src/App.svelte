@@ -22,7 +22,9 @@
   import SidebarCollection from './lib/components/SidebarCollection.svelte';
   import MessageNotice from './lib/components/MessageNotice.svelte';
   import ContextUsage from './lib/components/ContextUsage.svelte';
+  import PlanTodos from './lib/components/PlanTodos.svelte';
   const desktop = new Desktop();
+  let resumeFollow = $state(0);
   let displayProject = $derived(desktop.newChatProject ?? desktop.project);
   let sidebar = $state(true);
   let settingsOpen = $state(false);
@@ -1044,6 +1046,7 @@
           </div>
         {:else}{#key `${desktop.runtimeId}:${desktop.snapshot.sessionFile ?? ''}`}<Transcript
               messages={desktop.messages}
+              {resumeFollow}
               hasMore={desktop.hasMore}
               loading={desktop.loadingHistory}
               onolder={(beforeInsert) =>
@@ -1067,6 +1070,13 @@
               <ExtensionDialog
                 {request}
                 onrespond={(value) => {
+                  // 确认扩展选项表示继续当前任务；取消和超时仍保留阅读位置。
+                  // 在当前组件内同步通知，避免异步响应误滚动切换后的会话。
+                  if (
+                    !value.cancelled &&
+                    (value.value !== undefined || value.confirmed === true)
+                  )
+                    resumeFollow++;
                   void desktop.guard(() => desktop.respond(request, value));
                 }}
               />
@@ -1082,12 +1092,16 @@
               >
                 {value}
               </div>{/each}
-            {#each Object.entries(desktop.widgets).filter(([, value]) => value.length) as [key, value] (key)}<details
-                class="widget"
-              >
-                <summary>{key}</summary>
-                <pre>{value.join('\n')}</pre>
-              </details>{/each}
+            {#each Object.entries(desktop.widgets).filter(([, value]) => value.length) as [key, value] (key)}
+              {#if key === 'plan-todos'}
+                {#key `${desktop.runtimeId}:${desktop.snapshot.sessionFile ?? ''}`}
+                  <PlanTodos lines={value} />
+                {/key}
+              {:else}<details class="widget">
+                  <summary>{key}</summary>
+                  <pre>{value.join('\n')}</pre>
+                </details>{/if}
+            {/each}
           {/if}
           {#if desktop.queued.length}<div class="queue-hint">
               已排队 {desktop.queued.length} 条消息

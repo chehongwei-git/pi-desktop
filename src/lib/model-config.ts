@@ -8,6 +8,16 @@ export const thinkingLevels = [
   'xhigh',
   'max',
 ] as const;
+/** 中文含义与协议等级并列展示，保存值仍使用原始标识。 */
+export const thinkingLabels: Record<string, string> = {
+  off: '关闭 · off',
+  minimal: '最低 · minimal',
+  low: '低 · low',
+  medium: '中 · medium',
+  high: '高 · high',
+  xhigh: '超高 · xhigh',
+  max: '最高 · max',
+};
 export type ThinkingLevel = (typeof thinkingLevels)[number];
 export interface ModelValues {
   name?: string;
@@ -77,13 +87,9 @@ export function setThinkingMapping(
   else delete model.values.thinkingLevelMap;
 }
 export function defaultLevels(model: ModelConfig): readonly string[] {
-  if (model.values.reasoning === false) return ['off'];
+  // reasoning 表示当前是否启用，不能用它阻止用户重新选择强度。
   const map = model.values.thinkingLevelMap;
   return thinkingLevels.filter(
-    (level) =>
-      map?.[level] !== null &&
-      (model.overrideOnly ||
-        !(level === 'xhigh' || level === 'max') ||
-        typeof map?.[level] === 'string'),
+    (level) => level === 'off' || map?.[level] !== null,
   );
 }

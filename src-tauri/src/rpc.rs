@@ -3,9 +3,10 @@ use crate::{
     history::{active_branch, text_content},
     storage::{preview, Store},
     tool::ToolPresentation,
-    types::{AppError, Message, Result},
+    types::{AppError, Message, MessageImage, Result},
 };
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use tokio::io::{AsyncBufRead, AsyncBufReadExt};
 
@@ -41,16 +42,22 @@ pub async fn record<R: AsyncBufRead + Unpin>(reader: &mut R) -> Result<Option<Va
 
 /// 树菜单使用平铺节点摘要，避免随会话长度增长的 JSON 嵌套与完整正文 IPC。
 pub fn tree_entries(data: &Value) -> Result<Value> {
-    let entries = data["entries"].as_array()
+    let entries = data["entries"]
+        .as_array()
         .ok_or_else(|| AppError::new("PROTOCOL", "Pi 树查询缺失 entries"))?;
-    let nodes: Vec<Value> = entries.iter().map(|entry| {
-        let text = if entry["message"]["content"].is_null() {
-            entry["summary"].as_str().unwrap_or("").to_string()
-        } else { text_content(&entry["message"]["content"]) };
-        json!({"id":entry["id"], "parentId":entry["parentId"],
+    let nodes: Vec<Value> = entries
+        .iter()
+        .map(|entry| {
+            let text = if entry["message"]["content"].is_null() {
+                entry["summary"].as_str().unwrap_or("").to_string()
+            } else {
+                text_content(&entry["message"]["content"])
+            };
+            json!({"id":entry["id"], "parentId":entry["parentId"],
             "label":entry["message"]["role"].as_str().or(entry["type"].as_str()).unwrap_or("entry"),
             "text":preview(&text, 720)})
-    }).collect();
+        })
+        .collect();
     Ok(json!({"nodes":nodes,"leafId":data["leafId"]}))
 }
 
@@ -135,8 +142,30 @@ impl Projection {
         } else {
             None
         };
+        // 图片不进入消息预览或事件正文，仅保留受控存储引用。
+        let mut images = vec![];
+        if role == "user" {
+            for block in value["content"].as_array().into_iter().flatten() {
+                if block["type"] != "image" {
+                    continue;
+                }
+                let mime = block["mimeType"].as_str().unwrap_or("");
+                let data = block["data"].as_str().unwrap_or("");
+                if !["image/png", "image/jpeg", "image/webp", "image/gif"].contains(&mime)
+                    || data.is_empty()
+                {
+                    continue;
+                }
+                images.push(MessageImage {
+                    id: format!("{:x}", Sha256::digest(data.as_bytes())),
+                    mime_type: mime.into(),
+                    content_ref: store.body(data)?,
+                });
+            }
+        }
         Ok(Message {
             id,
+            images,
             role,
             text: preview(&text, 64 * 1024),
             thinking: preview(&thinking, 64 * 1024),
@@ -179,6 +208,7 @@ impl Projection {
                     Message {
                         id,
                         role: "assistant".into(),
+                        images: vec![],
                         text: String::new(),
                         thinking: String::new(),
                         content_ref: None,
@@ -281,6 +311,7 @@ impl Projection {
                     Message {
                         id,
                         role: "toolResult".into(),
+                        images: vec![],
                         text: preview(&text, 64 * 1024),
                         thinking: String::new(),
                         content_ref,
@@ -363,6 +394,40 @@ impl Projection {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// 图片只在宿主存正文，实时与恢复均保留摘要引用。
+    #[test]
+    fn user_images_survive_live_and_history_without_inline_data() {
+        let mut projection = Projection::default();
+        let mut store = Store::new().unwrap();
+        let data = "a".repeat(100_000);
+        let user =
+            json!({"role":"user","content":[{"type":"image","mimeType":"image/png","data":data}]});
+        projection
+            .event(json!({"type":"message_end","message":user}), &mut store)
+            .unwrap();
+        let live = projection.messages[0].images[0].clone();
+        assert!(
+            serde_json::to_string(&projection.messages[0])
+                .unwrap()
+                .len()
+                < 1024
+        );
+        assert_eq!(
+            store.content(&live.content_ref, 0).unwrap()["text"]
+                .as_str()
+                .unwrap()
+                .len(),
+            65536
+        );
+        projection
+            .restore(
+                &json!({"entries":[{"id":"u","type":"message","message":user}],"leafId":"u"}),
+                &mut store,
+            )
+            .unwrap();
+        assert_eq!(projection.messages[0].images[0].id, live.id);
+        assert!(projection.messages[0].text.is_empty());
+    }
     /// 半个 UTF-8 字符/CRLF/Unicode 分隔符均不能拆成额外协议记录。
     #[tokio::test]
     async fn framing_keeps_unicode_and_rejects_invalid() {

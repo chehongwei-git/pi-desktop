@@ -213,6 +213,9 @@ impl Catalog {
                                 .chars()
                                 .take(100)
                                 .collect();
+                            if cached.summary.preview.is_empty() && entry["message"]["content"].as_array().is_some_and(|blocks| blocks.iter().any(|b| b["type"] == "image")) {
+                                cached.summary.preview = "[图片消息]".into();
+                            }
                         }
                     }
                     _ => {}
