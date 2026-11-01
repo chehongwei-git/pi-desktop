@@ -1082,17 +1082,20 @@
           {#if runLabel}<div class="run-status" role="status">
               <span class="working status-dot"></span>{runLabel}
             </div>{/if}
-          {#each Object.entries(desktop.statuses).filter(([, value]) => value) as [key, value] (key)}<div
-              class="extension-status"
-            >
-              {value}
-            </div>{/each}
-          {#each Object.entries(desktop.widgets).filter(([, value]) => value.length) as [key, value] (key)}<details
-              class="widget"
-            >
-              <summary>{key}</summary>
-              <pre>{value.join('\n')}</pre>
-            </details>{/each}
+          <!-- 新对话只是本地草稿，后台扩展状态仍属于原会话；返回时继续展示。 -->
+          {#if desktop.newChatProject === null && !desktop.openingSession}
+            {#each Object.entries(desktop.statuses).filter(([, value]) => value) as [key, value] (key)}<div
+                class="extension-status"
+              >
+                {value}
+              </div>{/each}
+            {#each Object.entries(desktop.widgets).filter(([, value]) => value.length) as [key, value] (key)}<details
+                class="widget"
+              >
+                <summary>{key}</summary>
+                <pre>{value.join('\n')}</pre>
+              </details>{/each}
+          {/if}
           {#if desktop.queued.length}<div class="queue-hint">
               已排队 {desktop.queued.length} 条消息
             </div>{/if}

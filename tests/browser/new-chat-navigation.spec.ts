@@ -5,6 +5,24 @@ test('returns from a new-chat draft to existing sessions', async ({ page }) => {
   page.on('pageerror', (error) => errors.push(error.message));
   await page.addInitScript(() => {
     let sessionFile = 'original.jsonl';
+    let extensionEvents = [
+      {
+        type: 'extension',
+        request: {
+          method: 'setWidget',
+          widgetKey: 'plantodo',
+          widgetLines: ['原会话待办：完成方案'],
+        },
+      },
+      {
+        type: 'extension',
+        request: {
+          method: 'setStatus',
+          statusKey: 'plan-mode',
+          statusText: '⏸ plan',
+        },
+      },
+    ];
     const cwd = '/workspace/project';
     const sessions = ['original', 'other'].map((id) => ({
       id,
@@ -18,7 +36,15 @@ test('returns from a new-chat draft to existing sessions', async ({ page }) => {
     }));
     const snapshot = () => ({ sessionFile, cwd, isStreaming: false });
     (window as any).__TAURI_INTERNALS__ = {
-      transformCallback: () => 1,
+      transformCallback: (callback: (event: unknown) => void) => {
+        // 模拟宿主扩展事件唤醒，连接完成后才触发拉取。
+        (window as any).wakeExtensions = () =>
+          callback({
+            index: 0,
+            message: { type: 'available', runtimeId: 'runtime' },
+          });
+        return 1;
+      },
       unregisterCallback: () => {},
       async invoke(command: string, args: any = {}) {
         if (command === 'get_settings')
@@ -33,8 +59,11 @@ test('returns from a new-chat draft to existing sessions', async ({ page }) => {
             version: '1.4.0',
             verified: true,
           };
-        if (command === 'next_events')
-          return { runtimeId: 'runtime', sequence: 0, events: [] };
+        if (command === 'next_events') {
+          const events = extensionEvents;
+          extensionEvents = [];
+          return { runtimeId: 'runtime', sequence: 1, events };
+        }
         if (command === 'perform') {
           switch (args.action.type) {
             case 'switch_session':
@@ -76,9 +105,18 @@ test('returns from a new-chat draft to existing sessions', async ({ page }) => {
   const input = page.getByRole('textbox', { name: '消息输入', exact: true });
   const recent = page.getByRole('region', { name: '最近', exact: true });
   await expect(page.getByText('已连接', { exact: true })).toBeVisible();
+  await page.evaluate(() => (window as any).wakeExtensions());
+  const todo = page.locator('.widget').filter({ hasText: 'plantodo' });
+  const status = page.locator('.extension-status');
+  await expect(todo).toBeVisible();
+  await expect(status).toHaveText('⏸ plan');
+  await todo.locator('summary').click();
+  await expect(todo).toContainText('原会话待办：完成方案');
   await input.fill('Existing draft');
   await page.getByRole('button', { name: /^新对话/ }).click();
   await expect(page.locator('.welcome')).toBeVisible();
+  await expect(todo).toHaveCount(0);
+  await expect(status).toHaveCount(0);
   await input.fill('New draft');
   await recent
     .getByRole('button', { name: 'original project', exact: true })
@@ -86,8 +124,14 @@ test('returns from a new-chat draft to existing sessions', async ({ page }) => {
   await expect(page.locator('.welcome')).toHaveCount(0);
   await expect(page.locator('.session-title')).toHaveText('original');
   await expect(input).toHaveValue('Existing draft');
+  // 返回原会话不能因为准备新草稿而丢失扩展待办。
+  await expect(todo).toBeVisible();
+  await expect(todo).toContainText('原会话待办：完成方案');
+  await expect(status).toHaveText('⏸ plan');
   await page.getByRole('button', { name: /^新对话/ }).click();
   await expect(input).toHaveValue('New draft');
+  await expect(todo).toHaveCount(0);
+  await expect(status).toHaveCount(0);
   await recent
     .getByRole('button', { name: 'other project', exact: true })
     .click();

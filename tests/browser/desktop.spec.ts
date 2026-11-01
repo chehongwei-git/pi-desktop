@@ -2031,6 +2031,152 @@ for (const kind of ['many lines', 'few wrapped lines', 'virtual rows']) {
   });
 }
 
+test('manual bottom scrolling resumes streaming follow and blank clicks keep it active', async ({
+  page,
+}) => {
+  await mock(page, 0);
+  await page.addInitScript(() => {
+    const host = window as any;
+    host.followMessage = {
+      id: 'follow-stream',
+      role: 'assistant',
+      status: 'streaming',
+      text: Array.from({ length: 100 }, (_, i) => `流式正文 ${i}`).join('\n'),
+      thinking: '',
+      contentRef: null,
+      name: null,
+    };
+    host.historyMessages = [host.followMessage];
+  });
+  await page.goto('/');
+  const transcript = page.locator('.transcript');
+  const arrow = page.getByRole('button', { name: '回到底部', exact: true });
+  const distance = () =>
+    transcript.evaluate(
+      (node) => node.scrollHeight - node.clientHeight - node.scrollTop,
+    );
+  await expect.poll(distance).toBeLessThan(3);
+  await transcript.hover();
+  await page.mouse.wheel(0, -240);
+  await expect.poll(distance).toBeGreaterThan(200);
+  await expect(arrow).toBeVisible();
+  // 暂停期间追加正文仍保持阅读位置。
+  const top = await transcript.evaluate((node) => node.scrollTop);
+  const append = () =>
+    page.evaluate(() => {
+      const host = window as any;
+      host.followMessage.text += '\n' + '新增流式正文\n'.repeat(12);
+      host.emitEvents([
+        { type: 'run', state: 'running' },
+        { type: 'message', message: { ...host.followMessage } },
+      ]);
+    });
+  await append();
+  await expect
+    .poll(() => transcript.evaluate((node) => node.scrollTop))
+    .toBe(top);
+  await transcript.evaluate((node) => {
+    node.scrollTop = node.scrollHeight;
+  });
+  await expect(arrow).toHaveCount(0);
+  // 空白处点击不代表上翻，也不能使跟随静默暂停。
+  await transcript.click({ position: { x: 4, y: 20 } });
+  for (let i = 0; i < 3; i++) {
+    await append();
+    await expect.poll(distance).toBeLessThan(3);
+    await expect(arrow).toHaveCount(0);
+  }
+});
+
+for (const width of [1200, 600]) {
+  test(`plan choices preserve reading space and keyboard focus at width ${width}`, async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width, height: 700 });
+    await mock(page, 100);
+    await page.goto('/');
+    if (width < 900) await page.locator('.sidebar-brand button').click();
+    const input = page.getByRole('textbox', { name: '消息输入', exact: true });
+    await expect(input).toBeEnabled();
+    await input.fill('保留计划修改草稿');
+    await input.focus();
+    await page.evaluate(() => {
+      const host = window as any;
+      host.savedTranscript = document.querySelector('.transcript');
+      host.emitEvents([
+        {
+          type: 'extension',
+          request: {
+            type: 'extension_ui_request',
+            id: 'compact-plan',
+            method: 'select',
+            title: 'Plan mode - what next?',
+            message: '详细执行说明。'.repeat(100),
+            options: [
+              'Execute the plan (track progress)',
+              'Stay in plan mode',
+              'Refine the plan',
+            ],
+          },
+        },
+      ]);
+    });
+    const choice = page.getByRole('region', { name: 'Plan mode - what next?' });
+    await expect(choice).toBeVisible();
+    await expect(input).toBeFocused();
+    const transcript = page.locator('.transcript');
+    const before = (await transcript.boundingBox())!;
+    // 窄屏输入器本身会换行；按操作区实际占用约束，避免混入输入器高度。
+    expect(before.height).toBeGreaterThan(240);
+    expect((await choice.boundingBox())!.height).toBeLessThan(170);
+    const execute = choice.getByRole('button', {
+      name: 'Execute the plan (track progress)',
+      exact: true,
+    });
+    await expect(execute).toBeInViewport({ ratio: 1 });
+    await execute.click({ trial: true });
+    await execute.focus();
+    await execute.press('Escape');
+    const expand = choice.getByRole('button', {
+      name: '展开操作（待选择）',
+      exact: true,
+    });
+    await expect(expand).toBeFocused();
+    await expect(execute).toBeHidden();
+    expect((await transcript.boundingBox())!.height).toBeGreaterThan(
+      before.height,
+    );
+    await expand.press('Enter');
+    await expect(execute).toBeVisible();
+    await expect(input).toHaveValue('保留计划修改草稿');
+    expect(
+      await transcript.evaluate(
+        (node) => node === (window as any).savedTranscript,
+      ),
+    ).toBe(true);
+    await execute.click();
+    await expect(choice).toHaveCount(0);
+    await expect
+      .poll(() =>
+        page.evaluate(
+          () =>
+            (window as any).ipcCalls.filter(
+              (call: any) =>
+                call.action?.type === 'extension_response' &&
+                call.action.id === 'compact-plan' &&
+                call.action.value.value === 'Execute the plan (track progress)',
+            ).length,
+        ),
+      )
+      .toBe(1);
+    expect(
+      await page.evaluate(
+        () => document.documentElement.scrollWidth <= innerWidth,
+      ),
+    ).toBe(true);
+  });
+}
+
 test('the first small upward wheel gesture leaves the bottom without snapping back', async ({
   page,
 }) => {

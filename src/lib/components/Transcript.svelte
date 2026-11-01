@@ -35,6 +35,13 @@
   let content: HTMLDivElement;
   let sentinel: HTMLDivElement;
   let follow = $state(true);
+  let atBottom = $state(true);
+  /** 滚动位置可能含小数像素，使用与浏览器取整相容的底部容差。 */
+  function isAtBottom(): boolean {
+    return (
+      viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight <= 2
+    );
+  }
   let pending = $state(false);
   let error = $state('');
   let mounted = false;
@@ -66,8 +73,12 @@
     cancelAnimationFrame(frame);
     frame = requestAnimationFrame(() => {
       if (!alive || !viewport) return;
-      if (follow && !pending) viewport.scrollTop = viewport.scrollHeight;
-      lastScrollTop = viewport.scrollTop;
+      if (follow && !pending) {
+        viewport.scrollTop = viewport.scrollHeight;
+        lastScrollTop = viewport.scrollTop;
+      }
+      // 暂停期间不能提前覆盖位置，否则真实下滚事件会丢失方向信息。
+      atBottom = isAtBottom();
       checkOlder();
     });
   }
@@ -122,13 +133,9 @@
   function scroll(): void {
     if (!alive || !viewport) return;
     const top = viewport.scrollTop;
+    atBottom = isAtBottom();
     if (top < lastScrollTop) pauseFollow();
-    else if (
-      !pending &&
-      top > lastScrollTop &&
-      viewport.scrollHeight - top - viewport.clientHeight <= 2
-    )
-      follow = true;
+    else if (!pending && atBottom) follow = true;
     lastScrollTop = top;
     checkOlder();
   }
@@ -166,6 +173,11 @@
     onscroll={scroll}
     onwheel={(event) => {
       if (event.deltaY < 0) pauseFollow();
+      else if (event.deltaY > 0 && !pending && isAtBottom()) {
+        // 到底后的滚轮可能不再产生 scroll 事件，仍应允许恢复跟随。
+        follow = true;
+        update();
+      }
     }}
     ontouchstart={(event) => {
       touchY = event.touches[0]?.clientY ?? 0;
@@ -174,9 +186,6 @@
       const next = event.touches[0]?.clientY ?? touchY;
       if (next > touchY) pauseFollow();
       touchY = next;
-    }}
-    onpointerdown={(event) => {
-      if (event.target === viewport) pauseFollow();
     }}
     onkeydown={(event) => {
       if (['PageUp', 'Home', 'ArrowUp'].includes(event.key)) pauseFollow();
@@ -226,13 +235,25 @@
       <ChangePanel message={change} {read} onclose={() => void showChange()} />
     {/key}
   {/if}
+  {#if !follow && !atBottom}<button
+      class="scroll-bottom icon-button"
+      title="回到底部"
+      aria-label="回到底部"
+      onclick={() => {
+        follow = true;
+        update();
+      }}><span class="rotate"><Icon name="arrow" size={18} /></span></button
+    >{/if}
 </div>
-{#if !follow}<button
-    class="scroll-bottom icon-button"
-    title="回到底部"
-    aria-label="回到底部"
-    onclick={() => {
-      follow = true;
-      update();
-    }}><span class="rotate"><Icon name="arrow" size={18} /></span></button
-  >{/if}
+
+<style>
+  /* 箭头始终贴近正文底部，不依赖输入器或 Plan 操作区的动态高度。 */
+  .transcript-workspace {
+    position: relative;
+    /* 将箭头与正文限制在输入区下层，避免挡住向上展开的模型菜单。 */
+    z-index: 0;
+  }
+  .scroll-bottom {
+    bottom: 16px;
+  }
+</style>
