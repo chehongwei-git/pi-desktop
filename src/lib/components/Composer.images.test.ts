@@ -3,11 +3,66 @@ import '@testing-library/jest-dom/vitest';
 import { cleanup, fireEvent, render, waitFor } from '@testing-library/svelte';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import Composer from './Composer.svelte';
+const native = vi.hoisted(() => ({ enabled: false, invoke: vi.fn() }));
+vi.mock('@tauri-apps/api/core', async (original) => ({
+  ...(await original<object>()),
+  isTauri: () => native.enabled,
+  invoke: native.invoke,
+}));
 afterEach(() => {
   cleanup();
+  native.enabled = false;
+  native.invoke.mockReset();
   vi.unstubAllGlobals();
 });
 describe('image composer', () => {
+  it('uses the native picker, prevents duplicate selection and ignores late results', async () => {
+    native.enabled = true;
+    let resolve!: (images: unknown[]) => void;
+    native.invoke.mockImplementation(
+      () =>
+        new Promise((done) => {
+          resolve = done;
+        }),
+    );
+    const view = render(Composer, {
+      historyKey: 'first',
+      onsend: vi.fn(),
+      onstop: vi.fn(),
+    });
+    const button = view.getByRole('button', { name: '添加图片' });
+    const htmlPicker = vi.spyOn(view.getByLabelText('选择图片文件'), 'click');
+    await fireEvent.click(button);
+    expect(native.invoke).toHaveBeenCalledWith('pick_images');
+    expect(button).toBeDisabled();
+    expect(htmlPicker).not.toHaveBeenCalled();
+    await view.rerender({ historyKey: 'second' });
+    resolve([
+      { id: 'old', name: 'old.png', mimeType: 'image/png', data: 'aA==' },
+    ]);
+    await waitFor(() => expect(button).toBeEnabled());
+    expect(view.queryByAltText('old.png')).not.toBeInTheDocument();
+  });
+  it('preserves text on native cancellation and reports read failures inline', async () => {
+    native.enabled = true;
+    native.invoke
+      .mockResolvedValueOnce([])
+      .mockRejectedValueOnce(new Error('图片读取失败'));
+    const view = render(Composer, {
+      value: '保留草稿',
+      onsend: vi.fn(),
+      onstop: vi.fn(),
+    });
+    const button = view.getByRole('button', { name: '添加图片' });
+    await fireEvent.click(button);
+    await waitFor(() => expect(button).toBeEnabled());
+    expect(view.queryByRole('alert')).not.toBeInTheDocument();
+    await fireEvent.click(button);
+    await waitFor(() =>
+      expect(view.getByRole('alert')).toHaveTextContent('图片读取失败'),
+    );
+    expect(view.getByRole('textbox')).toHaveValue('保留草稿');
+  });
   it.each(['choose', 'paste', 'drop'])(
     'adds and removes an image through %s and allows an image-only send',
     async (method) => {
@@ -19,7 +74,12 @@ describe('image composer', () => {
       const imageButton = view.getByRole('button', { name: '添加图片' });
       expect(imageButton.textContent?.trim()).toBe('');
       expect(imageButton.querySelector('svg')).toBeInTheDocument();
-      const choose = vi.spyOn(view.getByLabelText('选择图片文件'), 'click');
+      const picker = view.getByLabelText('选择图片文件');
+      expect(picker).toHaveAttribute(
+        'accept',
+        'image/png,image/jpeg,image/webp,image/gif,.png,.jpg,.jpeg,.webp,.gif',
+      );
+      const choose = vi.spyOn(picker, 'click');
       await fireEvent.click(imageButton);
       expect(choose).toHaveBeenCalledOnce();
       const file = new File(['png'], '截图.png', { type: 'image/png' });

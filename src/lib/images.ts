@@ -8,7 +8,15 @@ export const imageTypes = [
 ];
 export const imageLimit = 10 * 1024 * 1024;
 export const imagesLimit = 24 * 1024 * 1024;
-export const imageAccept = imageTypes.join(',');
+// 同时声明 MIME 与扩展名，兼容各平台文件选择器的类型过滤方式。
+export const imageAccept = [
+  ...imageTypes,
+  '.png',
+  '.jpg',
+  '.jpeg',
+  '.webp',
+  '.gif',
+].join(',');
 /** 先检查预算再读取，避免拖入大文件时无谓分配 Base64。 */
 export async function readImages(
   files: File[],

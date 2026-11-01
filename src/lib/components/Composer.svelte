@@ -1,6 +1,7 @@
 <!-- 输入器只有草稿与提交意图，不知道 RPC；组合输入、自动高度和发送模式在此收敛。 -->
 <script lang="ts">
   import { tick, type Snippet } from 'svelte';
+  import { isTauri, invoke } from '@tauri-apps/api/core';
   import Icon from './Icon.svelte';
   import ImageAttachments from './ImageAttachments.svelte';
   import { shouldSend } from '../state/reducer';
@@ -12,7 +13,7 @@
     type CommandCategory,
   } from '../commands';
   import type { Command, HistoryPage, Message, MessageImage } from '../types';
-  import { imageAccept, readImages } from '../images';
+  import { imageAccept, imagesLimit, readImages } from '../images';
   import { errorMessage } from '../client';
   /** 运行中 Enter/发送直接引导当前任务，后续消息与停止使用独立按钮。 */
   let {
@@ -80,6 +81,39 @@
     try {
       const added = await readImages(files, images);
       if (request === imageRequest) images = [...images, ...added];
+    } catch (cause) {
+      if (request === imageRequest) imageError = errorMessage(cause);
+    } finally {
+      if (request === imageRequest) imageBusy = false;
+    }
+  }
+  /** 桌面端使用原生扩展名过滤，避免 WebView 忽略 input 的 accept。 */
+  async function chooseImages(): Promise<void> {
+    if (disabled || submitting || menu || imageBusy) return;
+    if (!isTauri()) {
+      picker.click();
+      return;
+    }
+    const request = ++imageRequest;
+    imageBusy = true;
+    imageError = '';
+    try {
+      const added = await invoke<MessageImage[]>('pick_images');
+      if (request !== imageRequest || !added.length) return;
+      if (images.length + added.length > 8)
+        throw new Error('每条消息最多添加 8 张图片。');
+      // 精确计算 Base64 原始字节数，已有附件也计入本条消息预算。
+      const total = [...images, ...added].reduce((sum, image) => {
+        const data = image.data ?? '';
+        return (
+          sum +
+          (data.length * 3) / 4 -
+          (data.endsWith('==') ? 2 : data.endsWith('=') ? 1 : 0)
+        );
+      }, 0);
+      if (total > imagesLimit)
+        throw new Error('每条消息的图片总大小不能超过 24 MiB。');
+      images = [...images, ...added];
     } catch (cause) {
       if (request === imageRequest) imageError = errorMessage(cause);
     } finally {
@@ -525,8 +559,8 @@
           class="image-button"
           aria-label="添加图片"
           disabled={disabled || submitting || imageBusy || !!menu}
-          onclick={() => picker.click()}
-          title="添加图片，也可粘贴截图或拖入图片"
+          onclick={() => void chooseImages()}
+          title="添加图片（PNG、JPEG、WebP、GIF），也可粘贴截图或拖入图片"
           ><Icon name="image" size={19} /></button
         >
       </div>

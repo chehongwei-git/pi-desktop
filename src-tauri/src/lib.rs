@@ -1,6 +1,7 @@
 //! 应用服务入口：Tauri 命令只表达业务意图；平台与协议实现不泄漏到 UI。
 mod diagnostics;
 mod history;
+mod image_picker;
 mod images;
 mod model_config;
 mod model_discovery;
@@ -257,6 +258,14 @@ async fn discover_models(
     model_discovery::discover(&model_config::directory(&home), provider).await
 }
 
+/// 原生选择和读取合并为专用命令，不接受前端提供的文件路径。
+#[tauri::command]
+async fn pick_images(app: tauri::AppHandle) -> Result<Vec<Value>> {
+    tokio::task::spawn_blocking(move || image_picker::pick(app))
+        .await
+        .map_err(|_| AppError::new("IMAGE", "图片选择任务失败，请重试。"))?
+}
+
 /// 统一安装受限插件和命令；关闭窗口必须先 await 自有进程回收。
 pub fn run() {
     tauri::Builder::default()
@@ -278,6 +287,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             get_settings,
+            pick_images,
             save_settings,
             get_model_config,
             save_model_config,
