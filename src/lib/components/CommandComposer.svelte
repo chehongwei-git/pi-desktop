@@ -311,6 +311,15 @@
 
 <Composer
   bind:value={desktop.draft}
+  historyKey={JSON.stringify([
+    desktop.runtimeId,
+    desktop.project,
+    desktop.snapshot.sessionFile,
+    desktop.newChatProject,
+    desktop.openingSession?.path,
+  ])}
+  onhistory={(before) => desktop.promptHistory(before)}
+  onhistorytext={(message) => desktop.promptText(message)}
   disabled={!!desktop.openingSession ||
     ['starting', 'stopping'].includes(desktop.connection)}
   running={desktop.run !== 'idle'}

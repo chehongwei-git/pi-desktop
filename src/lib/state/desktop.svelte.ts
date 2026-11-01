@@ -890,6 +890,46 @@ export class Desktop {
       if (request === this.historyRequest) this.loadingHistory = false;
     }
   }
+  /** 提示词翻阅独立读取历史页，避免向正文插入消息而改变阅读位置。 */
+  async promptHistory(before?: number): Promise<HistoryPage> {
+    if (this.newChatProject !== null || this.openingSession)
+      return { messages: [], before: 0, hasMore: false };
+    const runtime = this.runtimeId;
+    const session = this.snapshot.sessionFile;
+    const page =
+      before === undefined
+        ? {
+            messages: [...this.messages],
+            before: this.before,
+            hasMore: this.hasMore,
+          }
+        : await this.action<HistoryPage>({ type: 'history', before });
+    if (runtime !== this.runtimeId || session !== this.snapshot.sessionFile)
+      throw new Error('会话已切换，历史读取已取消');
+    if (before !== undefined && page.hasMore && page.before >= before)
+      throw new Error('历史游标未前进，请重试');
+    return {
+      ...page,
+      messages: page.messages.filter(
+        (message) =>
+          message.role === 'user' && message.delivery?.state !== 'sending',
+      ),
+    };
+  }
+  /** 只有选中的提示词才读取全文；分块使用宿主偏移，不能用字符数推算。 */
+  async promptText(message: Message): Promise<string> {
+    if (!message.contentRef || (message.text && !message.truncated))
+      return message.text;
+    const chunks: string[] = [];
+    let offset = 0;
+    while (true) {
+      const page = await this.readContent(message.contentRef, offset);
+      chunks.push(page.text);
+      if (page.done) return chunks.join('');
+      if (page.next <= offset) throw new Error('正文读取未前进，请重试');
+      offset = page.next;
+    }
+  }
   /** 发送接受前保留原草稿，超时绝不自动重发；用户消息由 Pi 权威事件插入。 */
   async send(mode?: 'steer' | 'followUp'): Promise<void> {
     if (

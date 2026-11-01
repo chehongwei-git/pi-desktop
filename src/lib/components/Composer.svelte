@@ -10,7 +10,8 @@
     commandSupport,
     type CommandCategory,
   } from '../commands';
-  import type { Command } from '../types';
+  import type { Command, HistoryPage, Message } from '../types';
+  import { errorMessage } from '../client';
   /** 运行中 Enter/发送直接引导当前任务，后续消息与停止使用独立按钮。 */
   let {
     value = $bindable(''),
@@ -26,7 +27,13 @@
     oncommand,
     onsend,
     onstop,
+    historyKey = '',
+    onhistory,
+    onhistorytext,
   }: {
+    historyKey?: string;
+    onhistory?: (before?: number) => Promise<HistoryPage>;
+    onhistorytext?: (message: Message) => Promise<string>;
     value?: string;
     disabled?: boolean;
     running?: boolean;
@@ -49,6 +56,90 @@
   } = $props();
   let textarea: HTMLTextAreaElement;
   let composing = false;
+  let historyMessages: Message[] = [];
+  let historyIndex = -1;
+  let historyBefore = 0;
+  let historyMore = false;
+  let historyInitialized = false;
+  let historyRequest = 0;
+  let recalled = '';
+  let historyBusy = $state(false);
+  let historyError = $state('');
+  /** 修改草稿或切换上下文后立即作废读取；迟到结果不能覆盖用户输入。 */
+  function resetHistory(): void {
+    ++historyRequest;
+    historyMessages = [];
+    historyIndex = -1;
+    historyInitialized = false;
+    recalled = '';
+    historyBusy = false;
+    historyError = '';
+  }
+  $effect(() => {
+    historyKey;
+    resetHistory();
+  });
+  $effect(() => {
+    if (value !== recalled) resetHistory();
+  });
+  /** 历史按消息 ID 去重，保留重复发送的相同文本；更早页面仅在边界请求。 */
+  async function browseHistory(direction: -1 | 1): Promise<void> {
+    if (!onhistory || historyBusy) return;
+    const request = ++historyRequest;
+    const key = historyKey;
+    const draft = value;
+    const current = () =>
+      request === historyRequest && key === historyKey && value === draft;
+    historyBusy = true;
+    historyError = '';
+    try {
+      if (!historyInitialized) {
+        const page = await onhistory();
+        if (!current()) return;
+        historyMessages = page.messages;
+        historyBefore = page.before;
+        historyMore = page.hasMore;
+        historyIndex = historyMessages.length;
+        historyInitialized = true;
+      }
+      let index = historyIndex + direction;
+      while (index < 0 && historyMore) {
+        const page = await onhistory(historyBefore);
+        if (!current()) return;
+        const ids = new Set(historyMessages.map((message) => message.id));
+        const earlier = page.messages.filter((message) => {
+          if (ids.has(message.id)) return false;
+          ids.add(message.id);
+          return true;
+        });
+        historyMessages = [...earlier, ...historyMessages];
+        historyIndex += earlier.length;
+        index += earlier.length;
+        historyBefore = page.before;
+        historyMore = page.hasMore;
+      }
+      if (index < 0 || index > historyMessages.length) return;
+      const message = historyMessages[index];
+      const text = message
+        ? await (onhistorytext?.(message) ?? Promise.resolve(message.text))
+        : '';
+      if (!current()) return;
+      historyIndex = index;
+      recalled = text;
+      value = text;
+      // 召回的斜杠文本供编辑，不能突然打开命令菜单抢走历史导航。
+      dismissed = text;
+      await tick();
+      if (request !== historyRequest || key !== historyKey || value !== text)
+        return;
+      const position = direction === -1 ? 0 : text.length;
+      textarea.setSelectionRange(position, position);
+    } catch (cause) {
+      if (current()) historyError = errorMessage(cause);
+    } finally {
+      if (request === historyRequest) historyBusy = false;
+    }
+  }
   let selected = $state(0);
   let dismissed = $state('');
   let query = $state('');
@@ -192,6 +283,31 @@
       if (event.key === 'Enter' || event.key === 'Tab') event.preventDefault();
       return;
     }
+    if (
+      onhistory &&
+      !disabled &&
+      !submitting &&
+      !event.shiftKey &&
+      !event.ctrlKey &&
+      !event.metaKey &&
+      !event.altKey &&
+      textarea.selectionStart === textarea.selectionEnd &&
+      (value === '' || (historyInitialized && value === recalled))
+    ) {
+      const position = textarea.selectionStart;
+      // 只在首行/末行接管方向键，多行文本内部仍使用原生光标移动。
+      const up =
+        event.key === 'ArrowUp' && !value.slice(0, position).includes('\n');
+      const down =
+        event.key === 'ArrowDown' &&
+        historyInitialized &&
+        !value.slice(position).includes('\n');
+      if (up || down) {
+        event.preventDefault();
+        void browseHistory(up ? -1 : 1);
+        return;
+      }
+    }
     if (shouldSend(event, composing)) {
       event.preventDefault();
       submit();
@@ -295,7 +411,10 @@
     aria-activedescendant={matches.length ? `${menuId}-${selected}` : undefined}
     oninput={(event) => {
       if (menu) query = event.currentTarget.value;
-      else value = event.currentTarget.value;
+      else {
+        resetHistory();
+        value = event.currentTarget.value;
+      }
       dismissed = '';
     }}
     {disabled}
@@ -306,6 +425,10 @@
     oncompositionend={() => {
       composing = false;
     }}></textarea>
+  {#if historyError}<p role="alert">
+      历史提示词读取失败：{historyError}，可再次按方向键重试。
+    </p>{/if}
+  {#if historyBusy}<p role="status">正在读取历史提示词…</p>{/if}
   <div class="composer-bottom">
     <div class="composer-options">
       {#if controls}{@render controls()}{/if}
@@ -314,7 +437,9 @@
           ? '语法：/compact [可选压缩要求] · Enter 直接执行压缩'
           : running
             ? 'Enter 发送引导 · Shift + Enter 换行'
-            : 'Shift + Enter 换行'}</span
+            : onhistory
+              ? '↑ / ↓ 翻阅历史 · Shift + Enter 换行'
+              : 'Shift + Enter 换行'}</span
       >
     </div>
     <div class="composer-actions">
