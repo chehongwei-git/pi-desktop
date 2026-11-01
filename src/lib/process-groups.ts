@@ -32,11 +32,14 @@ export function processRows(messages: Message[]): TranscriptRow[] {
             },
       );
     }
-    // 空助手占位不创建可见分界；有正文引用的历史仍挂载以读取正文。
+    // 已加载的完整空白正文不切断过程；空预览可能是缓存淘汰，截断预览也不能代表全文。
+    // 这两类引用仍需挂载读取，避免将真实回复误并入过程。
     if (
       (!assistant && message.role !== 'toolResult') ||
       (assistant &&
-        (message.text.trim() || message.contentRef || message.images?.length))
+        (message.text.trim() ||
+          (message.contentRef && (!message.text || message.truncated)) ||
+          message.images?.length))
     ) {
       rows.push({
         kind: 'message',
@@ -61,7 +64,13 @@ export function processDuration(
     return '';
   const seconds = Math.max(
     0,
-    Math.floor(((info.endedAt ?? now) - info.startedAt) / 1000),
+    // 暂停时固定取提问时刻，恢复后只扣除已累计的等待时间。
+    Math.floor(
+      ((info.pausedAt ?? info.endedAt ?? now) -
+        info.startedAt -
+        (info.pausedMs ?? 0)) /
+        1000,
+    ),
   );
   if (seconds < 1) return '<1 秒';
   if (seconds < 60) return `${seconds} 秒`;

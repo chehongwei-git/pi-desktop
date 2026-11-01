@@ -471,7 +471,11 @@ async fn actor(
                     match tokio::time::timeout(Duration::from_secs(5), stdin.write_all(&bytes)).await {
                         Ok(Ok(())) => {}, _ => { let error = AppError::new("PIPE", "Pi 输入管道阻塞或断开，请重新连接"); let _ = reply.send(Err(error.clone())); failure = Some(error); break; }
                     }
-                    if matches!(kind, Kind::Extension) { let _ = reply.send(Ok(Value::Null)); }
+                    if matches!(kind, Kind::Extension) {
+                        // 扩展响应没有 RPC 回执，以管道写入成功作为恢复计时的边界。
+                        let result = projection.extension_responded(command["id"].as_str().unwrap_or(""), &mut store);
+                        let _ = reply.send(result.map(|()| Value::Null));
+                    }
                     else {
                         let seconds = if matches!(kind, Kind::Bridge | Kind::BridgeRefresh) { 120 } else if matches!(kind, Kind::LongRefresh) { 600 } else if matches!(kind, Kind::Reset | Kind::Restore | Kind::Refresh) { 30 } else if matches!(kind, Kind::Mutate) { 15 } else { 10 };
                         let bridge_command = if matches!(kind, Kind::Bridge | Kind::BridgeRefresh) { command["message"].as_str().and_then(|message| message.split_whitespace().next()).map(|message| format!("command:{}", message.trim_start_matches('/'))) } else { None };

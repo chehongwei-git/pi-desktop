@@ -28,9 +28,9 @@
   );
   let tools = $derived(messages.filter((m) => m.role === 'toolResult').length);
   let duration = $derived(processDuration(info, now));
-  // 仅活动过程创建秒级定时器；收起不影响计时，结束或卸载即释放。
+  // 等待扩展回答时停止刷新；恢复、结束或卸载时重新管理定时器。
   $effect(() => {
-    if (!running) return;
+    if (!running || info?.pausedAt != null) return;
     now = Date.now();
     const timer = setInterval(() => {
       now = Date.now();
@@ -51,6 +51,7 @@
 <section class="process-group" aria-label="处理过程">
   <button
     class="process-heading"
+    class:running
     bind:this={heading}
     aria-expanded={expanded}
     aria-controls={id}
@@ -59,7 +60,14 @@
     <span class:open={expanded} class="chevron"
       ><Icon name="down" size={14} /></span
     >
-    <span
+    {#if running}
+      <span
+        class="activity-indicator"
+        class:paused={info?.pausedAt != null}
+        aria-hidden="true"
+      ></span>
+    {/if}
+    <span class="process-label"
       >{running
         ? '正在处理'
         : info?.state === 'stopped'
@@ -68,8 +76,10 @@
             ? '未完成'
             : '处理过程'}</span
     >
-    {#if tools}<span>· {tools} 次工具调用</span>{/if}
-    {#if duration}<span>· {running ? '已用时' : '耗时'} {duration}</span>{/if}
+    {#if tools}<span class="process-meta">· {tools} 次工具调用</span>{/if}
+    {#if duration}<span class="process-meta"
+        >· {running ? '已用时' : '耗时'} {duration}</span
+      >{/if}
   </button>
   {#if expanded}
     <!-- svelte-ignore a11y_no_noninteractive_element_interactions (Escape 从详情内的按钮冒泡，收起后恢复入口焦点。) -->
@@ -117,6 +127,24 @@
     text-align: left;
     cursor: pointer;
     min-height: 36px;
+  }
+  /* 仅运行中的入口强调底色和轮廓，历史过程保持轻量，避免长对话处处抢眼。 */
+  .process-heading.running {
+    padding: 8px 12px;
+    border: 1px solid var(--accent);
+    background: var(--accent-soft);
+    color: var(--accent);
+    gap: 8px;
+  }
+  .process-heading.running:hover {
+    background: var(--selected);
+  }
+  .running .process-label {
+    font-weight: 600;
+  }
+  .process-meta {
+    color: var(--muted);
+    font-variant-numeric: tabular-nums;
   }
   .chevron {
     display: inline-flex;

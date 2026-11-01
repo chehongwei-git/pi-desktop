@@ -117,16 +117,15 @@
   .message-notice {
     --notice-color: var(--accent);
     display: flex;
-    align-items: flex-start;
-    gap: 11px;
-    padding: 14px;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 8px;
+    min-height: 38px;
     border: 1px solid var(--border);
-    border-radius: 14px;
+    border-radius: 8px;
     background: var(--bg);
     color: var(--text);
-    box-shadow:
-      0 4px 18px #0000000a,
-      var(--shadow);
+    box-shadow: none;
     pointer-events: auto;
     animation: notice-enter 160ms ease-out;
   }
@@ -143,8 +142,8 @@
     display: grid;
     place-items: center;
     flex-shrink: 0;
-    width: 30px;
-    height: 30px;
+    width: 24px;
+    height: 24px;
     border-radius: 9px;
     color: var(--notice-color);
     background: color-mix(in srgb, var(--notice-color) 10%, var(--bg));
@@ -152,16 +151,21 @@
   .notice-body {
     flex: 1;
     min-width: 0;
-    padding-top: 1px;
+    padding-top: 0;
   }
   strong {
-    display: block;
+    /* 视觉标题由图标及无障碍组名表达，避免短提示重复占用一行。 */
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
     font-size: 12px;
     font-weight: 600;
     line-height: 1.6;
   }
   p {
-    margin: 4px 0 0;
+    margin: 0;
     font-size: 12px;
     line-height: 1.65;
     white-space: pre-wrap;
@@ -171,8 +175,8 @@
   }
   p.collapsed {
     display: -webkit-box;
-    -webkit-line-clamp: 3;
-    line-clamp: 3;
+    -webkit-line-clamp: 1;
+    line-clamp: 1;
     -webkit-box-orient: vertical;
     overflow: hidden;
   }
@@ -180,7 +184,7 @@
     display: flex;
     flex-wrap: wrap;
     gap: 4px;
-    margin: 9px 0 -3px -8px;
+    margin: 2px 0 0 -8px;
   }
   .notice-actions :global(button) {
     font-size: 12px;
@@ -190,7 +194,7 @@
   .notice-close {
     flex-shrink: 0;
     color: var(--muted);
-    margin: -4px -4px 0 0;
+    margin: 0;
     min-width: 30px;
     min-height: 30px;
   }

@@ -7,7 +7,7 @@ use crate::{
 };
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt};
 
 pub const RECORD_LIMIT: usize = 64 * 1024 * 1024;
@@ -73,6 +73,7 @@ pub struct Projection {
     timing_dir: Option<std::path::PathBuf>,
     message_started: Option<i64>,
     timing_keys: Vec<String>,
+    waiting_extensions: BTreeSet<String>,
 }
 
 /// 只以消息时间戳和正文摘要生成键，文件名不暴露提示词或工作目录。
@@ -93,6 +94,7 @@ impl Projection {
         self.process = None;
         self.message_started = None;
         self.timing_keys.clear();
+        self.waiting_extensions.clear();
     }
     /// 独立元数据文件不改写 Pi 历史；每条已结束消息只写一次，临时文件原子替换。
     pub fn with_timing_dir(path: std::path::PathBuf) -> Self {
@@ -111,6 +113,9 @@ impl Projection {
                 id: uuid::Uuid::new_v4().to_string(),
                 started_at: Some(chrono::Utc::now().timestamp_millis()),
                 ended_at: None,
+                paused_at: (!self.waiting_extensions.is_empty())
+                    .then(|| chrono::Utc::now().timestamp_millis()),
+                paused_ms: 0,
                 state: "running".into(),
             });
         }
@@ -129,7 +134,31 @@ impl Projection {
         }
         Ok(())
     }
+    /// 响应写入 Pi 成功后才解除等待，重复或过期 ID 不影响计时。
+    pub fn extension_responded(&mut self, id: &str, store: &mut Store) -> Result<()> {
+        if !self.waiting_extensions.remove(id) || !self.waiting_extensions.is_empty() {
+            return Ok(());
+        }
+        if let Some(process) = &mut self.process {
+            if let Some(paused_at) = process.paused_at.take() {
+                let end = process.ended_at.unwrap_or_else(|| chrono::Utc::now().timestamp_millis());
+                process.paused_ms += (end - paused_at).max(0);
+            }
+        }
+        self.publish_process(store)?;
+        for key in &self.timing_keys {
+            self.save_timing_key(key);
+        }
+        Ok(())
+    }
     fn publish_process(&mut self, store: &mut Store) -> Result<()> {
+        // 所有结束路径统一结清当前暂停，避免停止后仍保留活动暂停状态。
+        if let Some(process) = &mut self.process {
+            if let (Some(end), Some(start)) = (process.ended_at, process.paused_at) {
+                process.paused_ms += (end - start).max(0);
+                process.paused_at = None;
+            }
+        }
         if let Some(process) = &self.process {
             for message in &mut self.messages {
                 if message.process.as_ref().is_some_and(|p| p.id == process.id) {
@@ -398,12 +427,12 @@ impl Projection {
                             .into();
                         }
                     }
+                    self.publish_process(store)?;
                     message.process = self.process.clone();
                     if let Some(key) = timing_key(value) {
                         self.timing_keys.push(key);
                     }
                     self.save_timing(value);
-                    self.publish_process(store)?;
                 } else if role == "user" {
                     message.process = None;
                 } else if role == "toolResult" {
@@ -511,7 +540,23 @@ impl Projection {
             "compaction_end" | "auto_retry_end" => {
                 store.push(json!({"type":"run","state":"running"}))?
             }
-            "extension_ui_request" => store.push(json!({"type":"extension","request":event}))?,
+            "extension_ui_request" => {
+                if matches!(event["method"].as_str(), Some("select" | "confirm" | "input" | "editor")) {
+                    if let Some(id) = event["id"].as_str() {
+                        self.waiting_extensions.insert(id.into());
+                        if let Some(process) = &mut self.process {
+                            if process.ended_at.is_none() && process.paused_at.is_none() {
+                                process.paused_at = Some(chrono::Utc::now().timestamp_millis());
+                            }
+                        }
+                        self.publish_process(store)?;
+                        for key in &self.timing_keys {
+                            self.save_timing_key(key);
+                        }
+                    }
+                }
+                store.push(json!({"type":"extension","request":event}))?;
+            }
             "session_info_changed" | "thinking_level_changed" | "queue_update" => {
                 store.push(json!({"type":"metadata","data":event}))?
             }
@@ -570,6 +615,8 @@ impl Projection {
                         id: id.clone(),
                         started_at: None,
                         ended_at: None,
+                        paused_at: None,
+                        paused_ms: 0,
                         state: "running".into(),
                     });
                 }
@@ -617,6 +664,68 @@ impl Projection {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// 重叠请求按等待区间扣除，重复响应与非交互通知不能提前恢复。
+    #[test]
+    fn extension_waiting_pauses_until_all_responses_are_written() {
+        let mut projection = Projection::default();
+        let mut store = Store::new().unwrap();
+        projection.event(json!({"type":"agent_start"}), &mut store).unwrap();
+        projection.event(json!({"type":"extension_ui_request","method":"setStatus","id":"status"}), &mut store).unwrap();
+        assert!(projection.process.as_ref().unwrap().paused_at.is_none());
+        for method in ["select", "confirm", "input", "editor"] {
+            projection.event(json!({"type":"extension_ui_request","method":method,"id":method}), &mut store).unwrap();
+        }
+        let paused = chrono::Utc::now().timestamp_millis() - 5000;
+        projection.process.as_mut().unwrap().paused_at = Some(paused);
+        for id in ["unknown", "select", "select", "confirm", "input"] {
+            projection.extension_responded(id, &mut store).unwrap();
+            assert_eq!(projection.process.as_ref().unwrap().paused_at, Some(paused));
+            assert_eq!(projection.process.as_ref().unwrap().paused_ms, 0);
+        }
+        projection.extension_responded("editor", &mut store).unwrap();
+        let process = projection.process.as_ref().unwrap();
+        assert!(process.paused_at.is_none());
+        assert!(process.paused_ms >= 5000);
+        let elapsed = process.paused_ms;
+        projection.extension_responded("editor", &mut store).unwrap();
+        assert_eq!(projection.process.as_ref().unwrap().paused_ms, elapsed);
+    }
+
+    /// 停止或失败也结清暂停，并沿原有元数据恢复，不计入离线时长。
+    #[test]
+    fn paused_timing_is_finalized_and_restored() {
+        for finish in ["agent_settled", "error", "aborted"] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut projection = Projection::with_timing_dir(dir.path().to_path_buf());
+            let mut store = Store::new().unwrap();
+            projection.event(json!({"type":"agent_start"}), &mut store).unwrap();
+            let message = json!({"role":"assistant","timestamp":1000,"stopReason":"toolUse","content":[{"type":"thinking","thinking":"分析"}]});
+            projection.event(json!({"type":"message_end","message":message}), &mut store).unwrap();
+            projection.event(json!({"type":"extension_ui_request","method":"input","id":"q"}), &mut store).unwrap();
+            projection.process.as_mut().unwrap().paused_at = Some(chrono::Utc::now().timestamp_millis() - 5000);
+            if finish == "agent_settled" {
+                projection.event(json!({"type":finish}), &mut store).unwrap();
+            } else {
+                let mut failed = message.clone();
+                failed["stopReason"] = finish.into();
+                projection.event(json!({"type":"message_end","message":failed}), &mut store).unwrap();
+            }
+            let original = projection.messages.last().unwrap().process.as_ref().unwrap();
+            assert!(original.paused_at.is_none());
+            assert!(original.paused_ms >= 5000);
+            assert!(original.ended_at.is_some());
+            let mut restored = Projection::with_timing_dir(dir.path().to_path_buf());
+            restored.restore(&json!({"leafId":"a","entries":[{"id":"a","type":"message","message":message}]}), &mut store).unwrap();
+            let saved = restored.messages[0].process.as_ref().unwrap();
+            assert_eq!(saved.paused_ms, original.paused_ms);
+            assert_eq!(saved.ended_at, original.ended_at);
+            assert!(saved.paused_at.is_none());
+        }
+        let legacy: ProcessInfo = serde_json::from_value(json!({"id":"old","startedAt":1,"endedAt":10,"state":"done"})).unwrap();
+        assert_eq!(legacy.paused_ms, 0);
+        assert!(legacy.paused_at.is_none());
+    }
+
     /// 重启后复用同一组冻结时间；旧会话缺少记录不推算耗时。
     #[test]
     fn process_classification_and_timing_survive_restart() {

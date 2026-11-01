@@ -111,6 +111,68 @@ describe('统一处理过程', () => {
     ]);
     expect(empty).toEqual([]);
   });
+  it('merges tools and thinking across whitespace-only bodies even with content references', () => {
+    const rows = processRows([
+      message('a', 'toolResult', { process: info }),
+      message('blank', 'assistant', {
+        text: ' \r\n\t',
+        contentRef: 'blank-body',
+        process: info,
+      }),
+      message('thinking', 'assistant', {
+        text: '\n',
+        thinking: '继续检查',
+        contentRef: 'thinking-body',
+        process: info,
+      }),
+      message('b', 'toolResult', { process: info }),
+    ]);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      kind: 'process',
+      id: 'process-turn',
+      messages: [
+        { id: 'a' },
+        { id: 'thinking', text: '', contentRef: null },
+        { id: 'b' },
+      ],
+    });
+  });
+  it.each([
+    { text: '', contentRef: 'evicted-body' },
+    { text: ' \n', contentRef: 'truncated-body', truncated: true },
+    { text: '真实正文', contentRef: 'body' },
+    { text: '', images: [{ id: 'image', mimeType: 'image/png' }] },
+  ])('retains real or not yet fully loaded body boundaries: %j', (body) => {
+    const rows = processRows([
+      message('a', 'toolResult', { process: info }),
+      message('body', 'assistant', body),
+      message('b', 'toolResult', { process: info }),
+    ]);
+    expect(rows.map((row) => row.kind)).toEqual([
+      'process',
+      'message',
+      'process',
+    ]);
+    expect(rows[0].id).not.toBe(rows[2].id);
+  });
+  it('freezes while waiting, resumes without a jump and preserves final active duration', () => {
+    const paused: ProcessInfo = {
+      id: 'waiting',
+      startedAt: 1000,
+      state: 'running',
+      pausedAt: 6000,
+      pausedMs: 2000,
+    };
+    expect(processDuration(paused, 10000)).toBe('3 秒');
+    expect(processDuration(paused, 90000)).toBe('3 秒');
+    const resumed = { ...paused, pausedAt: undefined, pausedMs: 16000 };
+    expect(processDuration(resumed, 20000)).toBe('3 秒');
+    expect(processDuration(resumed, 23000)).toBe('6 秒');
+    expect(
+      processDuration({ ...resumed, state: 'stopped', endedAt: 23000 }, 90000),
+    ).toBe('6 秒');
+  });
   it('updates only running elapsed time, clamps rollback and formats minutes and hours', () => {
     expect(
       processDuration({ ...info, endedAt: undefined, state: 'running' }, 13000),

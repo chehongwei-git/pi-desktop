@@ -15,6 +15,8 @@ for (const width of [1200, 480]) {
     );
     await page.goto('/process-fixture');
     const heading = page.locator('.process-heading');
+    await expect(heading).toHaveCount(1);
+    await expect(page.locator('[data-message-id="blank"]')).toHaveCount(0);
     await expect(heading).toContainText('耗时 23 秒');
     await expect(heading).toContainText('1 次工具调用');
     await expect(heading).toHaveAttribute('aria-expanded', 'false');
@@ -40,6 +42,32 @@ for (const width of [1200, 480]) {
     await expect(page.locator('.tool-expanded')).toHaveCount(0);
     await heading.click();
     await expect(page.getByText('文件内容', { exact: true })).toBeVisible();
+    const originalHeading = await heading.elementHandle();
+    await page
+      .getByRole('button', { name: '追加过程内容', exact: true })
+      .click();
+    await page
+      .getByRole('button', { name: '补载同组历史', exact: true })
+      .click();
+    await expect(heading).toHaveCount(1);
+    await expect(heading).toHaveAttribute('aria-expanded', 'true');
+    await expect(heading).toContainText('3 次工具调用');
+    await expect(
+      page.getByText('继续核对结果。', { exact: true }),
+    ).toBeVisible();
+    await expect(page.getByText('文件内容', { exact: true })).toBeVisible();
+    expect(
+      await originalHeading!.evaluate(
+        (node) => node === document.querySelector('.process-heading'),
+      ),
+    ).toBe(true);
+    expect(
+      await page
+        .locator('.process-content [data-message-id]')
+        .evaluateAll((nodes) =>
+          nodes.map((node) => node.getAttribute('data-message-id')),
+        ),
+    ).toEqual(['read-older', 'read', 'more-thinking', 'read-next', 'answer']);
     await page.evaluate(() => {
       document.documentElement.dataset.theme = 'dark';
     });

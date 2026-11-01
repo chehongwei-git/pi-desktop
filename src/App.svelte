@@ -25,6 +25,57 @@
   import PlanTodos from './lib/components/PlanTodos.svelte';
   const desktop = new Desktop();
   let resumeFollow = $state(0);
+  let noticesExpanded = $state(false);
+  let noticeCount = $derived(
+    Number(!!desktop.error) +
+      Number(!!(desktop.sidebarError || desktop.sidebarFeedback)) +
+      Number(!!desktop.notice),
+  );
+  // 需要操作的故障优先展示，普通提示折叠后暂停计时，避免未读即消失。
+  let primaryNotice = $derived(
+    desktop.error
+      ? 'error'
+      : desktop.sidebarError
+        ? 'sidebar'
+        : desktop.notice && desktop.run === 'aborting'
+          ? 'notice'
+          : desktop.sidebarFeedback
+            ? 'sidebar'
+            : 'notice',
+  );
+  $effect(() => {
+    if (noticeCount === 0) noticesExpanded = false;
+  });
+  let feedbackOpen = $state(false);
+  let feedbackTrigger = $state<HTMLButtonElement>();
+  let feedbackBack = $state<HTMLButtonElement>();
+  let feedbackHovered = $state(false);
+  let feedbackFocused = $state(false);
+  let feedbackText = $derived(
+    primaryNotice === 'error'
+      ? desktop.error
+      : primaryNotice === 'sidebar'
+        ? desktop.sidebarError || desktop.sidebarFeedback
+        : desktop.notice,
+  );
+  $effect(() => {
+    if (!noticeCount) feedbackOpen = false;
+  });
+  /** 详情仅替换顶栏内容，返回时恢复入口，不干预正文与输入焦点。 */
+  async function toggleFeedback(open: boolean): Promise<void> {
+    feedbackOpen = open;
+    await tick();
+    if (open) feedbackBack?.focus({ preventScroll: true });
+    else feedbackTrigger?.focus({ preventScroll: true });
+  }
+  function dismissFeedback(): void {
+    if (primaryNotice === 'error') desktop.error = '';
+    else if (primaryNotice === 'sidebar') {
+      desktop.sidebarError = '';
+      desktop.sidebarFeedback = '';
+      desktop.sidebarUndo = null;
+    } else desktop.notice = '';
+  }
   let displayProject = $derived(desktop.newChatProject ?? desktop.project);
   let sidebar = $state(true);
   let settingsOpen = $state(false);
@@ -847,91 +898,183 @@
     </div>
   </aside>
   <main class="main-pane">
-    <section
-      class="notice-stack"
-      class:collection-notices={sidebarCollection !== null || settingsVisible}
-      aria-label="消息提示"
-    >
-      {#if desktop.error}
-        <MessageNotice
-          message={desktop.error}
-          title="操作未完成"
-          tone="error"
-          dismissLabel="关闭错误"
-          duration={8000}
-          ondismiss={() => {
-            desktop.error = '';
-          }}
-        >
-          {#snippet actions()}
-            {#if desktop.project}<button
-                class="text-button"
-                onclick={() =>
-                  desktop.requestSwitch('重新连接', () =>
-                    desktop.connect(desktop.project),
-                  )}>重新连接</button
-              >{/if}
-            <button class="text-button" onclick={openSettings}>设置</button>
-          {/snippet}
-        </MessageNotice>
-      {/if}
-      {#if desktop.sidebarFeedback || desktop.sidebarError}
-        <MessageNotice
-          message={desktop.sidebarError || desktop.sidebarFeedback}
-          title={desktop.sidebarError ? '历史管理未完成' : '历史已更新'}
-          tone={desktop.sidebarError ? 'error' : 'success'}
-          dismissLabel="关闭历史管理提示"
-          duration={desktop.sidebarSaving ? 0 : 8000}
-          ondismiss={() => {
-            desktop.sidebarFeedback = '';
-            desktop.sidebarError = '';
-            desktop.sidebarUndo = null;
-          }}
-        >
-          {#snippet actions()}
-            {#if desktop.sidebarUndo}<button
-                class="text-button"
-                disabled={desktop.sidebarSaving}
-                onclick={() => {
-                  void desktop.undoSidebar().catch((error) => {
-                    desktop.sidebarError = errorMessage(error);
-                  });
-                }}>{desktop.sidebarSaving ? '正在撤销…' : '撤销'}</button
-              >{/if}
-          {/snippet}
-        </MessageNotice>
-      {/if}
-      {#if desktop.notice}
-        <MessageNotice
-          message={desktop.notice}
-          title={desktop.run === 'aborting'
-            ? '任务仍在停止中'
-            : ['会话路径已复制', '名称已更新'].includes(desktop.notice)
-              ? '操作成功'
-              : '消息提示'}
-          tone={desktop.run === 'aborting'
-            ? 'warning'
-            : ['会话路径已复制', '名称已更新'].includes(desktop.notice)
-              ? 'success'
-              : 'info'}
-          duration={desktop.run === 'aborting' || desktop.run === 'compacting'
-            ? 0
-            : 5000}
-          ondismiss={() => {
-            desktop.notice = '';
-          }}
-        >
-          {#snippet actions()}
-            {#if desktop.run === 'aborting'}<button
-                class="text-button"
-                onclick={() => {
-                  void desktop.guard(() => desktop.disconnect(true));
-                }}>强制关闭</button
-              >{/if}
-          {/snippet}
-        </MessageNotice>
-      {/if}
-    </section>
+    {#snippet notices(inHeader = false)}
+      <!-- svelte-ignore a11y_no_noninteractive_element_interactions (容器仅接收子控件冒泡的 Escape，入口与返回均为原生按钮。) -->
+      <section
+        class="notice-stack"
+        class:header-feedback={inHeader}
+        class:feedback-open={inHeader && feedbackOpen}
+        aria-label="消息提示"
+        onpointerenter={() => {
+          feedbackHovered = true;
+        }}
+        onpointerleave={() => {
+          feedbackHovered = false;
+        }}
+        onfocusin={() => {
+          feedbackFocused = true;
+        }}
+        onfocusout={(event) => {
+          feedbackFocused = event.currentTarget.contains(
+            event.relatedTarget as Node,
+          );
+        }}
+        onkeydown={(event) => {
+          if (inHeader && event.key === 'Escape') {
+            event.preventDefault();
+            void toggleFeedback(false);
+          }
+        }}
+      >
+        {#if inHeader && noticeCount}
+          <div class="feedback-summary" hidden={feedbackOpen}>
+            <button
+              bind:this={feedbackTrigger}
+              class="feedback-trigger"
+              aria-label="查看消息提示"
+              aria-expanded={feedbackOpen}
+              onclick={() => void toggleFeedback(true)}
+            >
+              <Icon
+                name={primaryNotice === 'error' || desktop.run === 'aborting'
+                  ? 'warning'
+                  : 'info'}
+                size={16}
+              />
+              <span role={primaryNotice === 'error' ? 'alert' : 'status'}
+                >{feedbackText}</span
+              ><small>{noticeCount}</small>
+            </button>
+            <button
+              class="icon-button"
+              aria-label="关闭提示"
+              onclick={dismissFeedback}><Icon name="close" size={16} /></button
+            >
+          </div>
+          {#if feedbackOpen}<button
+              bind:this={feedbackBack}
+              class="text-button feedback-back"
+              onclick={() => void toggleFeedback(false)}>返回</button
+            >{/if}
+        {/if}
+        <div class="feedback-details" hidden={inHeader && !feedbackOpen}>
+          {#if desktop.error}
+            <div hidden={!noticesExpanded && primaryNotice !== 'error'}>
+              <MessageNotice
+                message={desktop.error}
+                title="操作未完成"
+                tone="error"
+                dismissLabel="关闭错误"
+                duration={inHeader &&
+                (feedbackOpen || feedbackHovered || feedbackFocused)
+                  ? 0
+                  : noticesExpanded || primaryNotice === 'error'
+                    ? 8000
+                    : 0}
+                ondismiss={() => {
+                  desktop.error = '';
+                }}
+              >
+                {#snippet actions()}
+                  {#if desktop.project}<button
+                      class="text-button"
+                      onclick={() =>
+                        desktop.requestSwitch('重新连接', () =>
+                          desktop.connect(desktop.project),
+                        )}>重新连接</button
+                    >{/if}
+                  <button class="text-button" onclick={openSettings}
+                    >设置</button
+                  >
+                {/snippet}
+              </MessageNotice>
+            </div>
+          {/if}
+          {#if desktop.sidebarFeedback || desktop.sidebarError}
+            <div hidden={!noticesExpanded && primaryNotice !== 'sidebar'}>
+              <MessageNotice
+                message={desktop.sidebarError || desktop.sidebarFeedback}
+                title={desktop.sidebarError ? '历史管理未完成' : '历史已更新'}
+                tone={desktop.sidebarError ? 'error' : 'success'}
+                dismissLabel="关闭历史管理提示"
+                duration={(inHeader &&
+                  (feedbackOpen || feedbackHovered || feedbackFocused)) ||
+                desktop.sidebarSaving ||
+                (!noticesExpanded && primaryNotice !== 'sidebar')
+                  ? 0
+                  : 8000}
+                ondismiss={() => {
+                  desktop.sidebarFeedback = '';
+                  desktop.sidebarError = '';
+                  desktop.sidebarUndo = null;
+                }}
+              >
+                {#snippet actions()}
+                  {#if desktop.sidebarUndo}<button
+                      class="text-button"
+                      disabled={desktop.sidebarSaving}
+                      onclick={() => {
+                        void desktop.undoSidebar().catch((error) => {
+                          desktop.sidebarError = errorMessage(error);
+                        });
+                      }}>{desktop.sidebarSaving ? '正在撤销…' : '撤销'}</button
+                    >{/if}
+                {/snippet}
+              </MessageNotice>
+            </div>
+          {/if}
+          {#if desktop.notice}
+            <div hidden={!noticesExpanded && primaryNotice !== 'notice'}>
+              <MessageNotice
+                message={desktop.notice}
+                title={desktop.run === 'aborting'
+                  ? '任务仍在停止中'
+                  : ['会话路径已复制', '名称已更新'].includes(desktop.notice)
+                    ? '操作成功'
+                    : '消息提示'}
+                tone={desktop.run === 'aborting'
+                  ? 'warning'
+                  : ['会话路径已复制', '名称已更新'].includes(desktop.notice)
+                    ? 'success'
+                    : 'info'}
+                duration={(inHeader &&
+                  (feedbackOpen || feedbackHovered || feedbackFocused)) ||
+                (!noticesExpanded && primaryNotice !== 'notice') ||
+                desktop.run === 'aborting' ||
+                desktop.run === 'compacting'
+                  ? 0
+                  : 3000}
+                ondismiss={() => {
+                  desktop.notice = '';
+                }}
+              >
+                {#snippet actions()}
+                  {#if desktop.run === 'aborting'}<button
+                      class="text-button"
+                      onclick={() => {
+                        void desktop.guard(() => desktop.disconnect(true));
+                      }}>强制关闭</button
+                    >{/if}
+                {/snippet}
+              </MessageNotice>
+            </div>
+          {/if}
+          {#if noticeCount > 1}
+            <button
+              class="text-button notice-more"
+              aria-expanded={noticesExpanded}
+              onclick={() => {
+                noticesExpanded = !noticesExpanded;
+              }}
+              >{noticesExpanded
+                ? '收起其他提示'
+                : `还有 ${noticeCount - 1} 条提示`}</button
+            >
+          {/if}
+        </div>
+      </section>
+    {/snippet}
+    {#if sidebarCollection !== null || settingsVisible}{@render notices()}{/if}
     {#if settingsVisible}
       <SettingsDialog
         bind:this={settingsPage}
@@ -966,7 +1109,7 @@
       class:collection-hidden={sidebarCollection !== null || settingsVisible}
       inert={sidebarCollection !== null || settingsVisible}
     >
-      <header class="topbar">
+      <header class="topbar" class:show-feedback={feedbackOpen}>
         <div class="topbar-left">
           {#if !sidebar}<button
               class="icon-button"
@@ -985,6 +1128,7 @@
           {/if}
         </div>
         <div class="topbar-right">
+          {@render notices(true)}
           <span
             class="connection"
             class:connected={desktop.connection === 'ready'}
@@ -1096,8 +1240,13 @@
               />
             {/key}
           {/if}
-          {#if runLabel}<div class="run-status" role="status">
-              <span class="working status-dot"></span>{runLabel}
+          {#if runLabel}<div
+              class="run-status"
+              class:stopping={desktop.run === 'aborting'}
+              role="status"
+            >
+              <span class="activity-indicator" aria-hidden="true"></span>
+              <strong>{runLabel}</strong>
             </div>{/if}
           <!-- 新对话只是本地草稿，后台扩展状态仍属于原会话；返回时继续展示。 -->
           {#if desktop.newChatProject === null && !desktop.openingSession}

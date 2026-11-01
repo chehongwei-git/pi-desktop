@@ -8,6 +8,29 @@ function fixture(action: Bridge['action']) {
   return new Desktop({ ...bridge, action });
 }
 describe('desktop business behavior', () => {
+  it('clears ordinary feedback only on valid submission and preserves plan status', async () => {
+    const action = vi.fn().mockResolvedValue({});
+    const desktop = fixture(action);
+    desktop.connection = 'ready';
+    desktop.notice = 'Plan mode enabled';
+    desktop.statuses['plan-mode'] = '⏸ plan';
+    await desktop.send();
+    expect(desktop.notice).toBe('Plan mode enabled');
+    desktop.draft = '分析项目';
+    desktop.submitting = true;
+    await desktop.send();
+    expect(desktop.notice).toBe('Plan mode enabled');
+    desktop.submitting = false;
+    await desktop.send();
+    expect(desktop.notice).toBe('');
+    expect(desktop.statuses['plan-mode']).toBe('⏸ plan');
+    expect(action).toHaveBeenCalledOnce();
+    desktop.run = 'aborting';
+    desktop.notice = '停止超时';
+    desktop.draft = '补充';
+    await desktop.send();
+    expect(desktop.notice).not.toBe('');
+  });
   it('serializes older pages, deduplicates IDs and captures the anchor at commit', async () => {
     let release!: (page: unknown) => void;
     const action = vi.fn().mockImplementation(

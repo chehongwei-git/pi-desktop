@@ -78,6 +78,9 @@ export interface ProcessInfo {
   id: string;
   startedAt?: number;
   endedAt?: number;
+  /** 扩展等待回答的起点及累计等待毫秒数；旧记录按零处理。 */
+  pausedAt?: number;
+  pausedMs?: number;
   state: 'running' | 'done' | 'stopped' | 'error';
 }
 export interface Message {

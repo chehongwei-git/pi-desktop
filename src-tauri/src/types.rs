@@ -134,6 +134,11 @@ pub struct ProcessInfo {
     pub started_at: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ended_at: Option<i64>,
+    /// 等待扩展回答期间冻结显示；旧记录默认没有暂停。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paused_at: Option<i64>,
+    #[serde(default)]
+    pub paused_ms: i64,
     pub state: String,
 }
 

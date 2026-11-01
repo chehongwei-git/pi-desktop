@@ -636,6 +636,203 @@ for (const method of ['input', 'editor', 'confirm', 'select']) {
   });
 }
 
+// 提示必须位于正文之外，避免首条消息被遮挡而误判发送失败。
+for (const { width, theme, zoom } of [
+  { width: 1200, theme: 'light', zoom: 1 },
+  { width: 480, theme: 'light', zoom: 1 },
+  { width: 1200, theme: 'dark', zoom: 1 },
+  { width: 1200, theme: 'dark', zoom: 2 },
+]) {
+  test(`inline feedback leaves the first plan message visible at width ${width} ${theme} zoom ${zoom}`, async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width, height: 800 * zoom });
+    await mock(page, 0);
+    await page.addInitScript((theme) => {
+      localStorage.setItem('mock-settings', JSON.stringify({ theme }));
+      localStorage.setItem(
+        'pi-desktop-sidebar',
+        JSON.stringify({ sidebar: false }),
+      );
+    }, theme);
+    await page.goto('/');
+    if (zoom !== 1)
+      await page.evaluate((zoom) => {
+        document.documentElement.style.zoom = String(zoom);
+        document.documentElement.style.setProperty(
+          '--preview-zoom',
+          String(zoom),
+        );
+      }, zoom);
+    const input = page.getByRole('textbox', { name: '消息输入' });
+    await expect(input).toBeEnabled();
+    await input.fill('第一条计划消息');
+    await input.press('Enter');
+    await expect(
+      page.getByText('第一条计划消息', { exact: true }),
+    ).toBeVisible();
+    await input.focus();
+    await page.evaluate(() =>
+      (window as any).emitEvents([
+        {
+          type: 'extension',
+          request: {
+            method: 'setStatus',
+            statusKey: 'plan-mode',
+            statusText: '⏸ plan',
+          },
+        },
+      ]),
+    );
+    await expect(page.locator('.extension-status')).toHaveText('⏸ plan');
+    const originalViewport = await page.locator('.transcript').boundingBox();
+    const originalInput = await input.boundingBox();
+    await page.evaluate(() =>
+      (window as any).emitEvents([
+        {
+          type: 'extension',
+          request: {
+            method: 'notify',
+            message: 'Plan mode enabled. Built-in write tools disabled.',
+          },
+        },
+        {
+          type: 'extension',
+          request: {
+            method: 'setStatus',
+            statusKey: 'plan-mode',
+            statusText: '⏸ plan',
+          },
+        },
+      ]),
+    );
+    const notice = page.locator('.notice-stack:visible');
+    await expect(notice).toContainText('Plan mode enabled');
+    await expect(input).toBeFocused();
+    const feedback = await notice.boundingBox();
+    const message = await page
+      .getByText('第一条计划消息', { exact: true })
+      .boundingBox();
+    expect(feedback!.y + feedback!.height).toBeLessThanOrEqual(message!.y);
+    expect(feedback!.height / zoom).toBeLessThan(85);
+    expect(await page.locator('.transcript').boundingBox()).toEqual(
+      originalViewport,
+    );
+    expect(await input.boundingBox()).toEqual(originalInput);
+    await page.getByRole('button', { name: '查看消息提示' }).click();
+    expect(await page.locator('.transcript').boundingBox()).toEqual(
+      originalViewport,
+    );
+    expect(await input.boundingBox()).toEqual(originalInput);
+    await page
+      .getByRole('button', { name: '返回', exact: true })
+      .press('Escape');
+    await expect(
+      page.getByRole('button', { name: '查看消息提示' }),
+    ).toBeFocused();
+    await input.fill('继续分析');
+    await input.press('Enter');
+    await expect(
+      page.getByText('Plan mode enabled. Built-in write tools disabled.', {
+        exact: true,
+      }),
+    ).toHaveCount(0);
+    await expect(page.locator('.extension-status')).toHaveText('⏸ plan');
+    await expect(page.getByText('继续分析', { exact: true })).toBeVisible();
+  });
+}
+
+test('inline feedback prioritizes errors and expands other messages without losing details', async ({
+  page,
+}) => {
+  await mock(page);
+  await page.goto('/');
+  const input = page.getByRole('textbox', { name: '消息输入' });
+  await expect(input).toBeEnabled();
+  await page.evaluate(() => {
+    const host = window as any;
+    host.emitEvents([
+      {
+        type: 'extension',
+        request: {
+          method: 'notify',
+          message: '计划提示\n' + '长内容'.repeat(100),
+        },
+      },
+    ]);
+    host.failPrompt = true;
+  });
+  // 空提交不清除普通提示；失败反馈与新扩展通知共同验证优先级。
+  await input.fill('保留失败草稿');
+  await input.press('Enter');
+  await expect(page.getByRole('alert')).toContainText('模拟发送失败');
+  await page.getByRole('button', { name: '查看消息提示' }).click();
+  await page.evaluate(() =>
+    (window as any).emitEvents([
+      {
+        type: 'extension',
+        request: {
+          method: 'notify',
+          message: '计划提示\n' + '长内容'.repeat(100),
+        },
+      },
+    ]),
+  );
+  await expect(
+    page.getByRole('button', { name: '还有 1 条提示' }),
+  ).toBeVisible();
+  await expect(page.getByText(/^计划提示/)).toBeHidden();
+  await page.getByRole('button', { name: '还有 1 条提示' }).click();
+  await expect(page.getByText(/^计划提示/)).toBeVisible();
+  await page.getByRole('button', { name: '展开详情' }).click();
+  await expect(page.getByRole('button', { name: '收起详情' })).toHaveAttribute(
+    'aria-expanded',
+    'true',
+  );
+  await expect(input).toHaveValue('保留失败草稿');
+  await page.getByRole('button', { name: '收起其他提示' }).click();
+  await expect(page.getByRole('alert')).toBeVisible();
+  await expect(page.getByText(/^计划提示/)).toBeHidden();
+});
+
+test('inline feedback preserves the reading anchor when it appears and disappears', async ({
+  page,
+}) => {
+  await mock(page, 60);
+  await page.goto('/');
+  const transcript = page.getByRole('region', { name: '对话消息' });
+  await expect(transcript).toBeVisible();
+  await transcript.hover();
+  await page.mouse.wheel(0, -900);
+  await expect(page.getByRole('button', { name: '回到底部' })).toBeVisible();
+  const anchor = await transcript.evaluate((node) => {
+    const top = node.getBoundingClientRect().top;
+    const item = [
+      ...node.querySelectorAll<HTMLElement>('[data-message-id]'),
+    ].find((item) => item.getBoundingClientRect().top >= top)!;
+    return {
+      id: item.dataset.messageId!,
+      top: item.getBoundingClientRect().top,
+    };
+  });
+  await page.evaluate(() =>
+    (window as any).emitEvents([
+      {
+        type: 'extension',
+        request: { method: 'notify', message: '计划模式已开启' },
+      },
+    ]),
+  );
+  const item = page.locator('[data-message-id="' + anchor.id + '"]');
+  await expect
+    .poll(async () => (await item.boundingBox())!.y)
+    .toBeCloseTo(anchor.top, 0);
+  await page.getByRole('button', { name: '关闭提示', exact: true }).click();
+  await expect
+    .poll(async () => (await item.boundingBox())!.y)
+    .toBeCloseTo(anchor.top, 0);
+});
+
 test('plan status is readable and stop cancels the extension choice without hanging', async ({
   page,
 }) => {

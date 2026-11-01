@@ -1083,6 +1083,8 @@ export class Desktop {
         },
       ];
     }
+    // 普通反馈在下一次有效提交时结束；停止和压缩状态不能随发送清除。
+    if (this.run !== 'aborting' && this.run !== 'compacting') this.notice = '';
     this.submitting = true;
     try {
       await this.action({
@@ -1113,7 +1115,7 @@ export class Desktop {
       if (this.draft === text) this.draft = '';
       const sent = new Set(images.map((image) => image.id));
       this.images = this.images.filter((image) => !sent.has(image.id));
-      if (delivery)
+      if (delivery && this.run !== 'aborting' && this.run !== 'compacting')
         this.notice =
           delivery === 'steer'
             ? '引导消息已提交'
