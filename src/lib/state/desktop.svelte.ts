@@ -378,6 +378,8 @@ export class Desktop {
   private modelConfigRevision = 0;
   error = $state('');
   submitting = $state(false);
+  /** 仅当前会话的消息被接受后恢复底部跟随；失败和本地命令不触发。 */
+  sentMessageRevision = $state(0);
   loadingHistory = $state(false);
   openingSession = $state<{ path: string; title: string } | null>(null);
   private currentSessionTitle = $state('');
@@ -1058,6 +1060,7 @@ export class Desktop {
     )
       throw new Error('当前模型不支持图片输入，请切换到支持图片的模型。');
     const sessionFile = this.snapshot.sessionFile;
+    const generation = this.generation;
     const sentAt = new Date().toISOString();
     const delivery = mode ?? (this.run !== 'idle' ? 'steer' : undefined);
     const pendingId = delivery
@@ -1096,6 +1099,14 @@ export class Desktop {
             }
           : {}),
       });
+      // 迟到的提交结果不能把新会话的阅读位置拉到底部。
+      if (
+        generation === this.generation &&
+        sessionFile === this.snapshot.sessionFile &&
+        this.newChatProject === null &&
+        !this.openingSession
+      )
+        this.sentMessageRevision++;
       if (sessionFile) this.sentAt[this.sessionKey(sessionFile)] = sentAt;
       const pending = this.messages.find((message) => message.id === pendingId);
       if (pending?.delivery) pending.delivery.state = 'queued';

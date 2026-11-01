@@ -261,7 +261,7 @@ for (const variant of [
     });
     await page.getByLabel('API 基础地址').fill('https://changed.test/v1');
     await page.getByRole('button', { name: '返回对话' }).click();
-    await expect(page.getByText('有未保存的更改，是否放弃？')).toBeVisible();
+    await expect(page.getByText('有未保存的更改').first()).toBeVisible();
     await page.getByRole('button', { name: '继续编辑' }).click();
     await expect(page.getByLabel('API 基础地址')).toHaveValue(
       'https://changed.test/v1',

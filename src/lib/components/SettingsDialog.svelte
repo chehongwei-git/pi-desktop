@@ -1,21 +1,29 @@
-<!-- 设置在主内容区编辑；连接配置在下次连接时生效。 -->
+<!-- 设置在主内容区编辑，具体生效时机在对应分类内说明。 -->
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, tick } from 'svelte';
   import { open } from '@tauri-apps/plugin-dialog';
   import Icon from './Icon.svelte';
   import ModelSettings from './ModelSettings.svelte';
   import type { Desktop } from '../state/desktop.svelte';
   import { errorMessage } from '../client';
 
-  let { desktop, onclose }: { desktop: Desktop; onclose: () => void } =
-    $props();
+  let {
+    desktop,
+    onclose,
+    unsaved = $bindable(false),
+  }: {
+    desktop: Desktop;
+    onclose: () => void;
+    unsaved?: boolean;
+  } = $props();
   // 只在进入设置时取快照，避免外部刷新覆盖编辑中的草稿。
-  const initial = initialSettings();
+  const seed = initialSettings();
+  let initial = $state(structuredClone(seed));
   function initialSettings() {
     return structuredClone($state.snapshot(desktop.settings));
   }
-  let form = $state(structuredClone(initial));
-  let paths = $state(initial.extraPath.join('\n'));
+  let form = $state(structuredClone(seed));
+  let paths = $state(seed.extraPath.join('\n'));
   let section = $state('appearance');
   let modelsPage = $state<ModelSettings>();
   let modelsVisited = $state(false);
@@ -25,8 +33,15 @@
   let diagnostic = $state('');
   let failed = $state(false);
   let status = $state('');
-  let confirmLeave = $state(false);
+  /** 确认条内的保存失败说明，避免长文案在同一区域被覆盖。 */
+  let saveError = $state('');
+  /** 被导航拦下时保留目的地说明，让用户确认点击已被记录。 */
+  let leaveTarget = $state('');
+  /** 确认条出现前的焦点来源，取消后回到原处。 */
+  let leaveReturnFocus: HTMLElement | null = null;
+  let leavePrimary = $state<HTMLButtonElement | null>(null);
   let heading: HTMLHeadingElement;
+  const leaveHeadingId = $props.id();
   const sections = [
     {
       id: 'appearance',
@@ -58,38 +73,78 @@
     { id: 'light', label: '浅色' },
     { id: 'dark', label: '深色' },
   ] as const;
-  let dirty = $derived(
-    form.piPath !== initial.piPath ||
+  // 分项标记让用户知道改在哪个分类，而不用逐页翻找。
+  const changed = $derived({
+    appearance: form.theme !== initial.theme,
+    connection:
+      form.piPath !== initial.piPath ||
       form.runtimePath !== initial.runtimePath ||
-      form.sessionDir !== initial.sessionDir ||
-      form.theme !== initial.theme ||
       paths !== initial.extraPath.join('\n'),
+    models: modelsDirty,
+    storage: form.sessionDir !== initial.sessionDir,
+  });
+  const changedList = $derived(
+    sections.filter((item) => changed[item.id as keyof typeof changed]),
   );
+  let dirty = $derived(changedList.length > 0);
+  $effect(() => {
+    unsaved = dirty;
+  });
   onMount(() => heading?.focus({ preventScroll: true }));
 
   let pendingLeave = $state<(() => void) | null>(null);
+  let confirmLeave = $state(false);
+  let waitingForTask = $state(false);
   /** 返回与侧栏导航共用未保存保护，确认后执行用户选择的目的地。 */
-  export function requestLeave(action: () => void = onclose): void {
-    if (busy || modelsBusy) return;
-    if (dirty || modelsDirty) {
+  export function requestLeave(
+    action: () => void = onclose,
+    target = '返回对话',
+  ): void {
+    // 保存进行中也要给出反馈，不能静默吞掉导航点击。
+    if (dirty || busy || modelsBusy) {
       pendingLeave = action;
+      waitingForTask = !!busy || modelsBusy;
+      leaveTarget = target;
+      leaveReturnFocus =
+        document.activeElement instanceof HTMLElement &&
+        !leavePrimary?.contains(document.activeElement)
+          ? document.activeElement
+          : leaveReturnFocus;
       confirmLeave = true;
-    } else action();
+      void tick().then(() => leavePrimary?.focus({ preventScroll: true }));
+      return;
+    }
+    cancelLeave();
+    action();
   }
   function close(): void {
     requestLeave();
   }
+  /** 取消离开：保留草稿并把焦点还给触发控件。 */
+  async function keepEditing(): Promise<void> {
+    const origin = leaveReturnFocus;
+    cancelLeave();
+    await tick();
+    (origin?.isConnected ? origin : heading)?.focus({ preventScroll: true });
+  }
+  function cancelLeave(): void {
+    pendingLeave = null;
+    waitingForTask = false;
+    leaveTarget = '';
+    saveError = '';
+    confirmLeave = false;
+  }
   function discard(): void {
     const action = pendingLeave ?? onclose;
-    pendingLeave = null;
-    confirmLeave = false;
+    cancelLeave();
     action();
   }
   function keydown(event: KeyboardEvent) {
     if (event.key === 'Escape' && !event.defaultPrevented) {
       event.preventDefault();
-      if (confirmLeave) confirmLeave = false;
-      else close();
+      if (confirmLeave) {
+        if (!busy && !modelsBusy) void keepEditing();
+      } else close();
     }
   }
   async function browse(field: 'piPath' | 'runtimePath' | 'sessionDir') {
@@ -134,22 +189,61 @@
       busy = null;
     }
   }
-  async function save() {
-    if (busy || modelsBusy) return;
-    if (modelsDirty && !(await modelsPage?.save())) return;
-    if (section === 'models' && !dirty) return;
+  /** 保存全部草稿；整段提交共用锁，防止模型与桌面设置交错提交。 */
+  async function persist(): Promise<boolean> {
+    if (busy || modelsBusy) return false;
     busy = 'save';
+    saveError = '';
     status = '';
     try {
-      await desktop.saveSettings(value());
-      desktop.notice = '设置已保存，启动配置在下次连接时生效。';
-      if (!modelsVisited) onclose();
-      else status = '桌面设置已保存。';
+      if (modelsDirty && !(await modelsPage?.save())) {
+        section = 'models';
+        saveError = '模型配置未保存，请检查“模型与服务商”中的提示。';
+        return false;
+      }
+      // 模型保存成功后仍可能有桌面配置失败，只更新已落盘部分的基线。
+      if (changed.appearance || changed.connection || changed.storage) {
+        await desktop.saveSettings(value());
+        initial = structuredClone($state.snapshot(form));
+        initial.extraPath = paths.split('\n');
+      }
+      desktop.notice = '设置已保存。';
+      status = '设置已保存。';
+      return true;
     } catch (error) {
-      status = errorMessage(error);
+      saveError = errorMessage(error);
+      return false;
     } finally {
+      // 保存的后续导航由调用方统一执行，避免监听器与主操作重复导航。
+      waitingForTask = false;
       busy = null;
     }
+  }
+  async function save() {
+    if (!(await persist())) return;
+    // 提交期间点击侧栏时，优先执行最新目的地，避免跳回旧会话。
+    if (pendingLeave) discard();
+    else if (!modelsVisited) onclose();
+  }
+  // 检测或模型读取期间的导航可排队；任务结束且无草稿时继续执行。
+  $effect(() => {
+    if (
+      waitingForTask &&
+      confirmLeave &&
+      pendingLeave &&
+      !busy &&
+      !modelsBusy &&
+      !dirty &&
+      !saveError
+    )
+      discard();
+  });
+  /** 确认条主操作：保存成功后继续前往被拦下的目的地。 */
+  async function saveAndLeave(): Promise<void> {
+    if (!(await persist())) return;
+    const action = pendingLeave ?? onclose;
+    cancelLeave();
+    action();
   }
 </script>
 
@@ -163,20 +257,35 @@
     </div>
     <button
       class="return-button"
-      disabled={!!busy || modelsBusy}
-      onclick={close}><span aria-hidden="true">←</span> 返回对话</button
+      class:unsaved
+      aria-label="返回对话"
+      title={dirty ? '有未保存的更改' : undefined}
+      onclick={(event) => {
+        event.currentTarget.focus({ preventScroll: true });
+        close();
+      }}
+      ><span aria-hidden="true">←</span> 返回对话{#if dirty}<span
+          class="unsaved-dot"
+          aria-hidden="true"
+        ></span>{/if}</button
     >
   </header>
   <div class="settings-layout">
     <nav aria-label="设置分类">
       {#each sections as item}
+        {@const pending = changed[item.id as keyof typeof changed]}
         <button
           class:active={section === item.id}
           aria-current={section === item.id ? 'page' : undefined}
+          title={pending ? `${item.label}有未保存的更改` : undefined}
           onclick={() => {
             section = item.id;
             if (section === 'models') modelsVisited = true;
-          }}><Icon name={item.icon} size={18} />{item.label}</button
+          }}
+          ><Icon name={item.icon} size={18} />{item.label}{#if pending}<span
+              class="unsaved-dot"
+              aria-hidden="true"
+            ></span>{/if}</button
         >
       {/each}
       <div class="local-note">
@@ -200,7 +309,7 @@
           />
         </div>
       {/if}
-      <fieldset disabled={!!busy} hidden={section === 'models'}>
+      <fieldset disabled={!!busy || modelsBusy} hidden={section === 'models'}>
         {#if section === 'appearance'}
           <div class="settings-card">
             <div class="card-heading">
@@ -258,7 +367,7 @@
             <Icon name="info" size={18} />
             <p>
               连接本机已有 Pi。API Key 和模型参数可在“模型与服务商”中配置；OAuth
-              登录仍由 Pi CLI 管理。
+              登录仍由 Pi CLI 管理。启动路径和环境配置用于下次启动 Pi。
             </p>
           </div>
           <div class="settings-card fields">
@@ -358,24 +467,61 @@
         </div>{/if}
     </div>
   </div>
-  <footer class="settings-footer">
-    {#if confirmLeave}<div class="leave-confirm" role="status">
-        <span>有未保存的更改，是否放弃？</span><button
-          onclick={() => {
-            confirmLeave = false;
-            pendingLeave = null;
-          }}>继续编辑</button
-        ><button onclick={discard}
-          >{pendingLeave ? '放弃并继续' : '放弃并返回'}</button
-        >
+  <footer class="settings-footer" class:confirming={confirmLeave}>
+    {#if confirmLeave}<div class="leave-confirm">
+        <span class="leave-icon" aria-hidden="true">
+          <Icon name="warning" size={16} />
+        </span>
+        <div class="leave-copy">
+          <div id={leaveHeadingId} role="alert">
+            <strong>{dirty ? '有未保存的更改' : '正在处理设置'}</strong>
+            <span class="leave-scope">
+              {changedList.map((item) => item.label).join('、')}
+            </span>
+          </div>
+          <p>
+            <span>将前往：{leaveTarget}。 </span>
+            {#if busy || modelsBusy}正在处理设置，完成后可继续。
+            {:else if dirty}放弃后这些修改会丢失。{/if}
+          </p>
+          {#if saveError}<p class="error-text" role="alert">{saveError}</p>{/if}
+        </div>
+        <div class="leave-actions">
+          <button
+            disabled={!!busy || modelsBusy}
+            onclick={() => void keepEditing()}>继续编辑</button
+          >
+          <button
+            class="destructive"
+            disabled={!!busy || modelsBusy}
+            onclick={discard}>放弃更改并继续</button
+          >
+          <button
+            bind:this={leavePrimary}
+            class="primary"
+            disabled={!!busy || modelsBusy}
+            aria-describedby={leaveHeadingId}
+            onclick={() => void saveAndLeave()}
+            >{busy === 'save' || modelsBusy
+              ? '正在保存…'
+              : leaveTarget === '返回对话'
+                ? '保存并返回'
+                : '保存并继续'}</button
+          >
+        </div>
       </div>
     {:else}<div class="save-hint" role="status">
-        {#if status}<span class="error-text">{status}</span>{:else}{dirty ||
-          modelsDirty
-            ? '有未保存的更改'
-            : '设置保存在本机'}<small>连接配置在下次连接时生效</small>{/if}
+        {#if saveError}<span class="error-text" role="alert">{saveError}</span>
+        {:else if status}<span>{status}</span>
+        {:else if dirty}<span class="hint-dirty"
+            ><span class="unsaved-dot" aria-hidden="true"></span>有未保存的更改
+            · {changedList.map((item) => item.label).join('、')}</span
+          >{:else}设置保存在本机{/if}
       </div>
-      <button class="primary" disabled={!!busy || modelsBusy} onclick={save}
+      <button
+        class:primary={dirty}
+        disabled={!!busy || modelsBusy}
+        onclick={save}
         >{busy === 'save' || modelsBusy ? '处理中…' : '保存设置'}</button
       >{/if}
   </footer>
@@ -712,6 +858,7 @@
     padding: 8px 0;
   }
   .settings-footer {
+    flex-shrink: 0;
     display: flex;
     justify-content: space-between;
     align-items: center;
@@ -719,27 +866,95 @@
     padding: 18px 32px;
     border-top: 1px solid var(--border);
   }
+  /* 确认条占满整行，用警示底色与主操作表明导航已被拦下。 */
+  .settings-footer.confirming {
+    display: block;
+    padding: 14px 32px;
+    background: var(--warning-soft);
+    border-top-color: color-mix(in srgb, var(--warning) 35%, var(--border));
+  }
   .save-hint {
     font-size: 13px;
     min-width: 0;
     overflow-wrap: anywhere;
   }
-  .save-hint small {
-    display: block;
-    font-size: 12px;
-    color: var(--settings-muted);
-    margin-top: 5px;
+  .hint-dirty {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    color: var(--warning);
+    font-weight: 500;
   }
   .settings-footer > button {
     flex-shrink: 0;
     padding: 10px 20px;
   }
+  .unsaved-dot {
+    display: inline-block;
+    flex-shrink: 0;
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--warning);
+  }
+  .return-button.unsaved {
+    color: var(--warning);
+  }
+  nav button .unsaved-dot {
+    margin-left: auto;
+  }
   .leave-confirm {
     display: flex;
-    align-items: center;
-    gap: 10px;
+    align-items: flex-start;
+    gap: 12px;
     flex-wrap: wrap;
     font-size: 13px;
+    min-width: 0;
+  }
+  .leave-icon {
+    display: grid;
+    place-items: center;
+    flex-shrink: 0;
+    width: 28px;
+    height: 28px;
+    border-radius: 8px;
+    color: var(--warning);
+    background: color-mix(in srgb, var(--warning) 14%, var(--bg));
+  }
+  .leave-copy {
+    flex: 1;
+    min-width: 190px;
+    line-height: 1.6;
+  }
+  .leave-copy strong {
+    font-weight: 600;
+  }
+  .leave-scope {
+    margin-left: 8px;
+    color: var(--settings-muted);
+  }
+  .leave-copy p {
+    margin: 3px 0 0;
+    font-size: 12px;
+    color: var(--settings-muted);
+    overflow-wrap: anywhere;
+  }
+  .leave-copy .error-text {
+    color: var(--error);
+  }
+  .leave-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin-left: auto;
+  }
+  /* 放弃会丢失草稿，因此以次要外观呈现。 */
+  .leave-actions .destructive {
+    color: var(--error);
+  }
+  .leave-actions .primary {
+    padding: 9px 16px;
   }
   @media (max-width: 1100px) {
     .settings-layout {
@@ -816,6 +1031,24 @@
     .detect-row {
       align-items: flex-start;
       flex-wrap: wrap;
+    }
+    .settings-footer.confirming {
+      padding: 12px 18px;
+    }
+    /* 窄窗口下按钮换行到文本下方，保持可点击尺寸。 */
+    .leave-confirm {
+      gap: 10px;
+    }
+    .leave-actions {
+      width: 100%;
+      margin-left: 0;
+      padding-left: 40px;
+    }
+    .leave-actions button {
+      flex: 1 1 auto;
+      min-height: 36px;
+      padding: 8px 10px;
+      font-size: 12px;
     }
   }
 </style>

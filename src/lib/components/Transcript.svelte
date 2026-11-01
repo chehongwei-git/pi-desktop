@@ -20,7 +20,7 @@
     read,
   }: {
     messages: Message[];
-    /** 用户确认扩展操作时恢复跟随；普通进度更新不能打断阅读。 */
+    /** 消息提交成功或确认扩展操作时恢复跟随；普通进度更新不能打断阅读。 */
     resumeFollow?: number;
     hasMore?: boolean;
     loading?: boolean;

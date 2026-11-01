@@ -59,6 +59,11 @@ async function mock(
           });
           if (command === 'get_settings') return settings;
           if (command === 'save_settings') {
+            // 延迟落盘，用真实页面验证提交期间的导航和重复提交保护。
+            if (host.deferSettingsSave)
+              await new Promise<void>((resolve) => {
+                host.releaseSettingsSave = resolve;
+              });
             if (host.failSaveOnce) {
               host.failSaveOnce = false;
               throw new Error('模拟保存失败');
@@ -269,6 +274,11 @@ async function mock(
                   hasMore: false,
                 };
               case 'prompt':
+                if (host.failPrompt) throw new Error('模拟发送失败');
+                if (host.deferPrompt)
+                  await new Promise<void>((resolve) => {
+                    host.releasePrompt = resolve;
+                  });
                 if (host.queuePrompts && args.action.mode)
                   return { disposition: 'queued' };
                 pending = [
@@ -739,7 +749,7 @@ test('settings preserve conversation, retain failed edits and save across catego
     .click();
   await settings.getByRole('textbox', { name: /会话目录/ }).fill('/sessions');
   await settings.getByRole('button', { name: '返回对话', exact: true }).click();
-  await expect(settings).toContainText('有未保存的更改，是否放弃');
+  await expect(settings).toContainText('有未保存的更改');
   await settings.getByRole('button', { name: '继续编辑', exact: true }).click();
   await page.evaluate(() => {
     (window as any).failSaveOnce = true;
@@ -2031,6 +2041,95 @@ for (const kind of ['many lines', 'few wrapped lines', 'virtual rows']) {
   });
 }
 
+test('successful sends resume bottom follow while failures preserve reading position', async ({
+  page,
+}) => {
+  await mock(page, 100);
+  await page.goto('/');
+  const transcript = page.locator('.transcript');
+  const input = page.getByRole('textbox', { name: '消息输入', exact: true });
+  const distance = () =>
+    transcript.evaluate(
+      (node) => node.scrollHeight - node.clientHeight - node.scrollTop,
+    );
+  const pause = async () => {
+    await transcript.hover();
+    await page.mouse.wheel(0, -360);
+    await expect.poll(distance).toBeGreaterThan(200);
+  };
+  await expect.poll(distance).toBeLessThan(3);
+  await pause();
+  await input.fill('失败时保留阅读位置');
+  await page.evaluate(() => {
+    (window as any).failPrompt = true;
+  });
+  const before = await transcript.evaluate((node) => node.scrollTop);
+  await input.press('Enter');
+  await expect(page.getByText('模拟发送失败', { exact: true })).toBeVisible();
+  await expect(input).toHaveValue('失败时保留阅读位置');
+  await expect
+    .poll(() => transcript.evaluate((node) => node.scrollTop))
+    .toBe(before);
+  await page.evaluate(() => {
+    (window as any).failPrompt = false;
+  });
+  await input.press('Enter');
+  await expect(input).toHaveValue('');
+  await expect.poll(distance).toBeLessThan(3);
+  const append = () =>
+    page.evaluate(() =>
+      (window as any).emitEvents([
+        {
+          type: 'message',
+          message: {
+            id: 'new-assistant',
+            role: 'assistant',
+            text: '持续回复\\n'.repeat(100),
+            thinking: '',
+            status: 'streaming',
+            contentRef: null,
+            name: null,
+          },
+        },
+      ]),
+    );
+  await append();
+  await expect.poll(distance).toBeLessThan(3);
+  await pause();
+  const reading = await transcript.evaluate((node) => node.scrollTop);
+  await append();
+  await expect
+    .poll(() => transcript.evaluate((node) => node.scrollTop))
+    .toBe(reading);
+  // 引导与后续消息排队成功，也应回到底部；延迟期间保持阅读位置。
+  for (const mode of ['steer', 'followUp']) {
+    await page.evaluate(() => {
+      const host = window as any;
+      host.queuePrompts = true;
+      host.deferPrompt = true;
+      host.emitEvents([{ type: 'run', state: 'running' }]);
+    });
+    await input.fill(`发送 ${mode}`);
+    if (mode === 'steer') await input.press('Enter');
+    else
+      await page
+        .getByRole('button', { name: '完成后发送', exact: true })
+        .click();
+    await expect
+      .poll(() => page.evaluate(() => typeof (window as any).releasePrompt))
+      .toBe('function');
+    await expect.poll(distance).toBeGreaterThan(100);
+    await page.evaluate(() => {
+      const host = window as any;
+      host.releasePrompt();
+      delete host.releasePrompt;
+    });
+    await expect(input).toHaveValue('');
+    await expect.poll(distance).toBeLessThan(3);
+    await pause();
+  }
+});
+
 test('manual bottom scrolling resumes streaming follow and blank clicks keep it active', async ({
   page,
 }) => {
@@ -2582,7 +2681,8 @@ test('sidebar navigation selects only the visible page and protects unsaved sett
   await settingsButton.click();
   await settings.getByRole('radio', { name: '深色', exact: true }).check();
   await archiveButton.click();
-  await expect(settings).toContainText('有未保存的更改，是否放弃');
+  await expect(settings).toContainText('有未保存的更改');
+  await expect(settings).toContainText('将前往：打开「已归档」');
   await expect(settingsButton).toHaveAttribute('aria-current', 'page');
   await expect(archiveButton).not.toHaveAttribute('aria-current', 'page');
   await settings.getByRole('button', { name: '继续编辑', exact: true }).click();
@@ -2591,7 +2691,7 @@ test('sidebar navigation selects only the visible page and protects unsaved sett
   ).toBeChecked();
   await archiveButton.click();
   await settings
-    .getByRole('button', { name: '放弃并继续', exact: true })
+    .getByRole('button', { name: '放弃更改并继续', exact: true })
     .click();
   await expect(settings).toHaveCount(0);
   await expect(archiveButton).toHaveAttribute('aria-current', 'page');
@@ -2599,6 +2699,17 @@ test('sidebar navigation selects only the visible page and protects unsaved sett
   await page
     .getByRole('region', { name: '最近', exact: true })
     .locator('[data-sidebar-path="alpha.jsonl"]')
+    .click();
+  await expect(settings).toHaveCount(0);
+  await settingsButton.click();
+  await settings.getByRole('radio', { name: '深色', exact: true }).check();
+  await page
+    .getByRole('region', { name: '最近', exact: true })
+    .locator('[data-sidebar-path="alpha.jsonl"]')
+    .click();
+  await expect(settings).toContainText('打开会话「');
+  await settings
+    .getByRole('button', { name: '保存并继续', exact: true })
     .click();
   await expect(settings).toHaveCount(0);
   await expect(page.locator('.conversation-workspace')).toBeVisible();
@@ -2611,6 +2722,118 @@ test('sidebar navigation selects only the visible page and protects unsaved sett
   await expect(
     page.getByRole('textbox', { name: '消息输入', exact: true }),
   ).toBeVisible();
+});
+
+test('settings drafts are signalled before navigation is blocked', async ({
+  page,
+}) => {
+  await mock(page, 2, true);
+  await page.goto('/');
+  const settingsButton = page
+    .locator('.sidebar-footer')
+    .getByRole('button', { name: /设置/ });
+  const settings = page.getByRole('region', { name: '应用设置' });
+  await settingsButton.click();
+  await expect(settingsButton).not.toContainText('未保存更改');
+  await settings.getByRole('radio', { name: '深色', exact: true }).check();
+  // 侧栏设置项与分类导航同时标记，未进入拦截也能看到草稿。
+  await expect(settingsButton).toContainText('未保存更改');
+  await expect(
+    settings.getByRole('button', { name: '外观', exact: true }),
+  ).toHaveAttribute('title', '外观有未保存的更改');
+  await expect(
+    settings.getByRole('button', { name: '会话与存储', exact: true }),
+  ).not.toHaveAttribute('title', /未保存/);
+  await settings.getByRole('button', { name: '外观', exact: true }).focus();
+  await settings.getByRole('button', { name: '返回对话', exact: true }).click();
+  // 确认条出现后聚焦主按钮；Escape 取消并回到触发控件。
+  await expect(
+    settings.getByRole('button', { name: '保存并返回', exact: true }),
+  ).toBeFocused();
+  await page.keyboard.press('Escape');
+  await expect(settings).not.toContainText('放弃后这些修改会丢失');
+  await expect(
+    settings.getByRole('button', { name: '返回对话', exact: true }),
+  ).toBeFocused();
+  // 保存失败保留确认条与草稿，可重试。
+  await page.evaluate(() => {
+    (window as any).failSaveOnce = true;
+  });
+  await settings.getByRole('button', { name: '返回对话', exact: true }).click();
+  await settings
+    .getByRole('button', { name: '保存并返回', exact: true })
+    .click();
+  await expect(settings).toContainText('模拟保存失败');
+  await expect(
+    settings.getByRole('button', { name: '保存并返回', exact: true }),
+  ).toBeVisible();
+  await settings
+    .getByRole('button', { name: '保存并返回', exact: true })
+    .click();
+  await expect(settings).toHaveCount(0);
+  await expect(settingsButton).not.toContainText('未保存更改');
+  // 窄窗口下确认条按钮仍完整可见。
+  await page.setViewportSize({ width: 480, height: 720 });
+  await settingsButton.click();
+  await settings.getByRole('radio', { name: '浅色', exact: true }).check();
+  await settings.getByRole('button', { name: '返回对话', exact: true }).click();
+  await expect(
+    settings.getByRole('button', { name: '保存并返回', exact: true }),
+  ).toBeInViewport();
+  expect(
+    await page.evaluate(
+      () => document.documentElement.scrollWidth <= window.innerWidth,
+    ),
+  ).toBe(true);
+});
+
+test('settings navigation during save keeps the latest destination and submits once', async ({
+  page,
+}) => {
+  await mock(page, 2, true);
+  await page.goto('/');
+  const settings = page.getByRole('region', { name: '应用设置' });
+  await page
+    .locator('.sidebar-footer')
+    .getByRole('button', { name: /设置/ })
+    .click();
+  await settings.getByRole('radio', { name: '深色', exact: true }).check();
+  await page.evaluate(() => {
+    (window as any).deferSettingsSave = true;
+    (window as any).ipcCalls = [];
+  });
+  await settings.getByRole('button', { name: '保存设置', exact: true }).click();
+  await expect
+    .poll(() => page.evaluate(() => typeof (window as any).releaseSettingsSave))
+    .toBe('function');
+  await page.getByRole('button', { name: '已归档', exact: true }).click();
+  await expect(settings).toContainText('正在处理设置，完成后可继续');
+  await expect(
+    settings.getByRole('button', { name: '正在保存…', exact: true }),
+  ).toBeDisabled();
+  await page
+    .getByRole('region', { name: '最近', exact: true })
+    .locator('[data-sidebar-path="alpha.jsonl"]')
+    .click();
+  await expect(settings).toContainText('打开会话「');
+  expect(
+    await page.evaluate(
+      () =>
+        (window as any).ipcCalls.filter(
+          (call: any) => call.command === 'save_settings',
+        ).length,
+    ),
+  ).toBe(1);
+  await page.evaluate(() => {
+    (window as any).releaseSettingsSave();
+  });
+  await expect(settings).toHaveCount(0);
+  await expect(page.locator('.conversation-workspace')).toBeVisible();
+  expect(
+    await page.evaluate(
+      () => JSON.parse(localStorage.getItem('mock-settings')!).theme,
+    ),
+  ).toBe('dark');
 });
 
 test('sidebar progressively reveals long recent and project lists', async ({

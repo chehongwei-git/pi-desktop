@@ -32,13 +32,17 @@
     settingsOpen || desktop.builtinRequest?.name === 'settings',
   );
   let settingsPage = $state<SettingsDialog>();
+  /** 侧栏设置项常驻未保存标记，避免必须先踩坑才发现草稿。 */
+  let settingsUnsaved = $state(false);
   /** 管理视图切换先经过设置草稿保护，成功导航时再清理页面状态。 */
-  function leaveSettings(action: () => void): void {
-    if (settingsVisible && settingsPage) settingsPage.requestLeave(action);
+  function leaveSettings(action: () => void, target = ''): void {
+    if (settingsVisible && settingsPage)
+      settingsPage.requestLeave(action, target);
     else action();
   }
   function hideSettings(): void {
     settingsOpen = false;
+    settingsUnsaved = false;
     if (desktop.builtinRequest?.name === 'settings')
       desktop.builtinRequest = null;
   }
@@ -55,6 +59,7 @@
   }
   async function closeSettings(): Promise<void> {
     settingsOpen = false;
+    settingsUnsaved = false;
     sidebarCollection = null;
     if (desktop.builtinRequest?.name === 'settings')
       desktop.builtinRequest = null;
@@ -178,7 +183,7 @@
       collectionTrigger = trigger;
       sidebarCollection = collection;
       sidebar = window.innerWidth > 900;
-    });
+    }, '打开「已归档」');
   }
   async function closeCollection(): Promise<void> {
     sidebarCollection = null;
@@ -372,7 +377,7 @@
         sidebarCollection = null;
         desktop.prepareNewChat(project);
       });
-    });
+    }, '开始新对话');
   }
   function selectNewProject(project: string): void {
     desktop.requestSwitch('选择新对话项目', async () => {
@@ -390,15 +395,18 @@
     });
   }
   /** 复用 Pi 恢复历史；被扩展取消时门面保持原状态。 */
-  function selectSession(project: string, path: string): void {
-    leaveSettings(() => {
-      desktop.requestSwitch('打开历史会话', async () => {
-        await desktop.openSession(project, path);
-        hideSettings();
-        sidebarCollection = null;
-        sidebar = window.innerWidth > 900;
-      });
-    });
+  function selectSession(project: string, path: string, label = ''): void {
+    leaveSettings(
+      () => {
+        desktop.requestSwitch('打开历史会话', async () => {
+          await desktop.openSession(project, path);
+          hideSettings();
+          sidebarCollection = null;
+          sidebar = window.innerWidth > 900;
+        });
+      },
+      label ? `打开会话「${label}」` : '打开历史会话',
+    );
   }
   /** 快捷键与普通输入不冲突；原生 dialog 已处理 Escape/焦点约束。 */
   function keydown(event: KeyboardEvent): void {
@@ -531,7 +539,12 @@
         pinned={desktop.isPinned(session.path)}
         busy={desktop.pinSaving}
         disabled={!!desktop.openingSession}
-        onopen={() => selectSession(session.cwd, session.path)}
+        onopen={() =>
+          selectSession(
+            session.cwd,
+            session.path,
+            session.name || session.preview || session.timestamp,
+          )}
         onpin={() => desktop.guard(() => desktop.togglePin(session.path))}
       />
     {/if}
@@ -827,9 +840,9 @@
         class="sidebar-settings"
         aria-current={settingsVisible ? 'page' : undefined}
         onclick={openSettings}
-        ><Icon name="settings" size={19} /><span>设置</span><small
-          >本地 Pi · RPC</small
-        ></button
+        ><Icon name="settings" size={19} /><span>设置</span
+        >{#if settingsUnsaved}<small class="unsaved-hint">未保存更改</small
+          >{:else}<small>本地 Pi · RPC</small>{/if}</button
       >
     </div>
   </aside>
@@ -923,6 +936,7 @@
       <SettingsDialog
         bind:this={settingsPage}
         {desktop}
+        bind:unsaved={settingsUnsaved}
         onclose={() => {
           void closeSettings();
         }}
@@ -1046,7 +1060,7 @@
           </div>
         {:else}{#key `${desktop.runtimeId}:${desktop.snapshot.sessionFile ?? ''}`}<Transcript
               messages={desktop.messages}
-              {resumeFollow}
+              resumeFollow={resumeFollow + desktop.sentMessageRevision}
               hasMore={desktop.hasMore}
               loading={desktop.loadingHistory}
               onolder={(beforeInsert) =>
