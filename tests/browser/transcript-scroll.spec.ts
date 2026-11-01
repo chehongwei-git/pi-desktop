@@ -29,7 +29,7 @@ for (const kind of ['text', 'mixed', 'expanded']) {
       );
       await page.evaluate((kind) => (window as any).switchHistory(kind), kind);
       const transcript = page.locator('.transcript');
-      await expect(page.locator('.message-item')).toHaveCount(240);
+      await expect(page.locator('[data-message-id]')).toHaveCount(240);
       await expect
         .poll(() =>
           transcript.evaluate(
@@ -133,7 +133,7 @@ for (const kind of ['text', 'mixed', 'expanded']) {
       );
       expect(jumps.slice(0, 3)).toEqual([]);
       expect(errors).toEqual([]);
-      expect(await page.locator('.message-item').count()).toBe(240);
+      expect(await page.locator('[data-message-id]').count()).toBe(240);
       expect(await page.locator('.virtual-item, .virtual-code').count()).toBe(
         0,
       );

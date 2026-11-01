@@ -25,6 +25,8 @@ host.switchHistory = async (kind = 'mixed') => {
     return {
       id: `${kind}-${i}`,
       role: tool ? 'toolResult' : 'assistant',
+      presentation: tool ? 'process' : 'answer',
+      process: { id: `${kind}-${Math.floor(i / 3)}`, state: 'done' },
       text,
       thinking: '',
       status: 'done',
@@ -54,10 +56,14 @@ host.switchHistory = async (kind = 'mixed') => {
       onerror: (message: string) => {
         throw new Error(message);
       },
-      toolViews:
-        kind === 'expanded'
+      toolViews: {
+        ...Object.fromEntries(
+          messages.map((m) => [`process-${m.process!.id}`, { process: true }]),
+        ),
+        ...(kind === 'expanded'
           ? Object.fromEntries(messages.map((m) => [m.id, { output: true }]))
-          : {},
+          : {}),
+      },
       ontoggletool: () => {},
       read: async () => ({ text: '', next: 0, done: true }),
     },

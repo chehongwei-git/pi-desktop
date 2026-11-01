@@ -7,6 +7,7 @@ const host = window as any;
 const messages: Message[] = Array.from({ length: 30 }, (_, i) => ({
   id: String(i),
   role: 'assistant',
+  presentation: 'answer',
   name: null,
   status: 'done',
   thinking: '',
@@ -42,7 +43,7 @@ mount(Transcript, {
     onload: async () => {},
     onvisible: () => {},
     onerror: () => {},
-    toolViews: {},
+    toolViews: { 'process-a': { process: true } },
     ontoggletool: () => {},
     read: async (id, offset) => {
       if (host.slow && id === 'a')

@@ -73,11 +73,21 @@ export interface MessageImage {
   data?: string;
   name?: string;
 }
+/** 每组共用计时信息；结束时间冻结，历史恢复不重新计时。 */
+export interface ProcessInfo {
+  id: string;
+  startedAt?: number;
+  endedAt?: number;
+  state: 'running' | 'done' | 'stopped' | 'error';
+}
 export interface Message {
   id: string;
   role: string;
   text: string;
   thinking: string;
+  /** 兼容旧版分类；展示按内容拆分，普通正文始终直接显示。 */
+  presentation?: 'process' | 'answer';
+  process?: ProcessInfo;
   images?: MessageImage[];
   contentRef: string | null;
   /** 只有正文超出宿主预览上限时才需要全文入口。 */

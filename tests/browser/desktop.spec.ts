@@ -1437,6 +1437,7 @@ test('full-content actions only appear for truncated messages and still open the
     .getByRole('button', { name: '选择项目文件夹', exact: true })
     .last()
     .click();
+  await page.locator('.process-heading').click();
   const messages = page.locator('.message');
   await expect(messages).toHaveCount(4);
   await expect(
@@ -1550,6 +1551,7 @@ test('tool summaries expand inline with code, edit diff, parameters and truncati
     .getByRole('button', { name: '选择项目文件夹', exact: true })
     .last()
     .click();
+  await page.locator('.process-heading').click();
   const read = page
     .locator('.tool-step')
     .filter({ has: page.locator('.tool-path', { hasText: 'src/read.ts' }) });
@@ -1648,6 +1650,7 @@ test('large tool output retries and reads explicit chunks in its own scroll box'
     .getByRole('button', { name: '选择项目文件夹', exact: true })
     .last()
     .click();
+  await page.locator('.process-heading').click();
   const tool = page.locator('.tool-step');
   await tool.locator('.tool-heading').click();
   await expect(tool.getByRole('alert')).toContainText('模拟正文读取失败');
@@ -1719,6 +1722,7 @@ test('tool expansion survives scrolling and updates from running to complete', a
     .getByRole('button', { name: '选择项目文件夹', exact: true })
     .last()
     .click();
+  await page.locator('.process-heading').click();
   const tool = page.locator('.tool-step');
   await expect(tool.locator('.tool-state')).toHaveText('执行中');
   await tool.locator('.tool-heading').click();
@@ -1886,6 +1890,7 @@ test('long tool output scrolls independently and contains boundary gestures', as
     }));
   });
   await page.goto('/');
+  await page.locator('.process-heading').click();
   const tool = page.locator('.tool-step').last();
   await tool.locator('.tool-heading').click();
   const code = tool.locator('.tool-expanded .tool-code');
@@ -1965,6 +1970,7 @@ for (const kind of ['many lines', 'few wrapped lines', 'virtual rows']) {
       name: '对话消息',
       exact: true,
     });
+    await page.locator('.process-heading').click();
     const heading = page.locator('.tool-heading');
     await heading.click();
     await expect(page.locator('.tool-code-line')).toHaveCount(
@@ -2085,6 +2091,7 @@ test('successful sends resume bottom follow while failures preserve reading posi
             id: 'new-assistant',
             role: 'assistant',
             text: '持续回复\\n'.repeat(100),
+            presentation: 'answer',
             thinking: '',
             status: 'streaming',
             contentRef: null,
@@ -2139,6 +2146,7 @@ test('manual bottom scrolling resumes streaming follow and blank clicks keep it 
     host.followMessage = {
       id: 'follow-stream',
       role: 'assistant',
+      presentation: 'answer',
       status: 'streaming',
       text: Array.from({ length: 100 }, (_, i) => `流式正文 ${i}`).join('\n'),
       thinking: '',
@@ -2401,6 +2409,7 @@ for (const deferred of [false, true]) {
       host.historyMessages = Array.from({ length: 160 }, (_, i) => ({
         id: `variable-${i}`,
         role: i % 3 !== 0 ? 'toolResult' : 'assistant',
+        presentation: i % 3 !== 0 ? 'process' : 'answer',
         text:
           i % 3 !== 0
             ? `输出 ${i}\nline 2\nline 3`
@@ -2516,6 +2525,7 @@ test('growing a message across the viewport edge preserves its reading position'
     host.growingMessage = {
       id: 'growing',
       role: 'assistant',
+      presentation: 'answer',
       status: 'streaming',
       text: Array.from({ length: 100 }, (_, i) => `正在阅读的第 ${i} 行`).join(
         '\n',

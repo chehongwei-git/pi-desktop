@@ -2,6 +2,8 @@
 <script lang="ts">
   import { onMount, tick } from 'svelte';
   import MessageView from './MessageView.svelte';
+  import ProcessGroup from './ProcessGroup.svelte';
+  import { processRows } from '../process-groups';
   import ChangePanel from './ChangePanel.svelte';
   import Icon from './Icon.svelte';
   import type { ContentPage, Message } from '../types';
@@ -34,6 +36,7 @@
     ontoggletool: (id: string, section: string) => void;
     read: (id: string, offset: number) => Promise<ContentPage>;
   } = $props();
+  let rows = $derived(processRows(messages));
   let viewport: HTMLDivElement;
   let content: HTMLDivElement;
   let sentinel: HTMLDivElement;
@@ -96,7 +99,10 @@
   /** 只扫描到首个可见节点；已加载历史不回收，也不持续测量消息高度。 */
   function anchor(): { node: HTMLElement; top: number } | undefined {
     const top = viewport.getBoundingClientRect().top;
-    for (const node of content.children) {
+    // 同组历史可能插入既有折叠区内部，以实际消息或入口作为锚点。
+    for (const node of content.querySelectorAll<HTMLElement>(
+      '[data-message-id], .process-heading',
+    )) {
       const rect = node.getBoundingClientRect();
       if (rect.bottom > top)
         return { node: node as HTMLElement, top: rect.top };
@@ -227,7 +233,7 @@
         >{/if}
     </div>
     <div class="message-list" bind:this={content}>
-      {#each messages as message (message.id)}
+      {#snippet renderMessage(message: Message)}
         <div class="message-item" data-message-id={message.id}>
           <MessageView
             {message}
@@ -245,6 +251,28 @@
             }}
           />
         </div>
+      {/snippet}
+      {#each rows as row (row.id)}
+        {#if row.kind === 'message'}
+          {@render renderMessage(row.message)}
+        {:else}
+          <div class="message-item" data-process-id={row.id}>
+            <ProcessGroup
+              id={row.id}
+              messages={row.messages}
+              info={row.info}
+              expanded={toolViews[row.id]?.process ?? false}
+              ontoggle={() => {
+                pauseFollow();
+                ontoggletool(row.id, 'process');
+              }}
+            >
+              {#each row.messages as message (message.id)}
+                {@render renderMessage(message)}
+              {/each}
+            </ProcessGroup>
+          </div>
+        {/if}
       {/each}
     </div>
   </div>

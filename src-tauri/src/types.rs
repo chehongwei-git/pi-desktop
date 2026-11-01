@@ -125,6 +125,18 @@ pub struct MessageImage {
     pub content_ref: String,
 }
 
+/// 同一回复的处理过程共用标识与时间，缺失旧计时记录时不估算。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProcessInfo {
+    pub id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ended_at: Option<i64>,
+    pub state: String,
+}
+
 /// 正文由宿主私有临时文件托管；前端列表只接收有界预览。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -133,6 +145,10 @@ pub struct Message {
     pub role: String,
     pub text: String,
     pub thinking: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub presentation: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process: Option<ProcessInfo>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub images: Vec<MessageImage>,
     pub content_ref: Option<String>,

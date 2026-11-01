@@ -118,10 +118,10 @@
     {#each message.images ?? [] as image, index (`${image.id}-${index}`)}
       <MessageImage {image} {read} />
     {/each}
-    {#if message.thinking}<details class="thinking">
-        <summary>思考过程</summary>
+    {#if message.thinking}<div class="thinking">
+        <div class="summary-label">思考过程</div>
         <pre>{message.thinking}</pre>
-      </details>{/if}
+      </div>{/if}
     {#if message.role === 'compactionSummary'}<div class="summary-label">
         上下文已压缩
       </div>{/if}

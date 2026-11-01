@@ -131,6 +131,7 @@ test('switches models and thinking beside the input and preserves drafts', async
       await expect(trigger).toBeFocused();
     }
   }
+  await page.locator('.process-heading').click();
   await expect(page.locator('.tool-heading')).toHaveCount(8);
   await expectMenusAboveTools();
   await page.locator('.tool-heading').last().click();

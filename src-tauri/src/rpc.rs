@@ -3,7 +3,7 @@ use crate::{
     history::{active_branch, text_content},
     storage::{preview, Store},
     tool::ToolPresentation,
-    types::{AppError, Message, MessageImage, Result},
+    types::{AppError, Message, MessageImage, ProcessInfo, Result},
 };
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -69,6 +69,19 @@ pub struct Projection {
     blocks: BTreeMap<usize, (String, String)>,
     counter: u64,
     tools: BTreeMap<String, ToolPresentation>,
+    process: Option<ProcessInfo>,
+    timing_dir: Option<std::path::PathBuf>,
+    message_started: Option<i64>,
+    timing_keys: Vec<String>,
+}
+
+/// 只以消息时间戳和正文摘要生成键，文件名不暴露提示词或工作目录。
+fn timing_key(value: &Value) -> Option<String> {
+    let timestamp = value["timestamp"].as_i64()?;
+    Some(format!(
+        "v2-{:x}",
+        Sha256::digest(format!("{timestamp}:{}", value["content"]).as_bytes())
+    ))
 }
 impl Projection {
     /// 新会话或恢复成功后才能清空；取消切换不得调用。
@@ -77,6 +90,83 @@ impl Projection {
         self.blocks.clear();
         self.active_id = None;
         self.tools.clear();
+        self.process = None;
+        self.message_started = None;
+        self.timing_keys.clear();
+    }
+    /// 独立元数据文件不改写 Pi 历史；每条已结束消息只写一次，临时文件原子替换。
+    pub fn with_timing_dir(path: std::path::PathBuf) -> Self {
+        Self {
+            timing_dir: Some(path),
+            ..Self::default()
+        }
+    }
+    fn begin_process(&mut self) {
+        if self.process.as_ref().is_some_and(|p| p.ended_at.is_some()) {
+            self.process = None;
+            self.timing_keys.clear();
+        }
+        if self.process.is_none() {
+            self.process = Some(ProcessInfo {
+                id: uuid::Uuid::new_v4().to_string(),
+                started_at: Some(chrono::Utc::now().timestamp_millis()),
+                ended_at: None,
+                state: "running".into(),
+            });
+        }
+    }
+    /// 普通正文开始即结束前一组，后续工具创建独立计时。
+    fn finish_process(&mut self, store: &mut Store) -> Result<()> {
+        if let Some(process) = &mut self.process {
+            if process.ended_at.is_none() {
+                process.ended_at = Some(chrono::Utc::now().timestamp_millis());
+                process.state = "done".into();
+            }
+        }
+        self.publish_process(store)?;
+        for key in &self.timing_keys {
+            self.save_timing_key(key);
+        }
+        Ok(())
+    }
+    fn publish_process(&mut self, store: &mut Store) -> Result<()> {
+        if let Some(process) = &self.process {
+            for message in &mut self.messages {
+                if message.process.as_ref().is_some_and(|p| p.id == process.id) {
+                    message.process = Some(process.clone());
+                    store.push(json!({"type":"message","message":message}))?;
+                }
+            }
+        }
+        Ok(())
+    }
+    fn save_timing(&self, value: &Value) {
+        let Some(key) = timing_key(value) else {
+            return;
+        };
+        self.save_timing_key(&key);
+    }
+    fn save_timing_key(&self, key: &str) {
+        let Some(dir) = &self.timing_dir else {
+            return;
+        };
+        let Some(process) = &self.process else {
+            return;
+        };
+        let result = (|| -> std::io::Result<()> {
+            std::fs::create_dir_all(dir)?;
+            let mut file = tempfile::NamedTempFile::new_in(dir)?;
+            serde_json::to_writer(&mut file, process)?;
+            file.persist(dir.join(format!("{key}.json")))
+                .map_err(|e| e.error)?;
+            Ok(())
+        })();
+        if result.is_err() {
+            tracing::warn!(
+                code = "PROCESS_TIMING_WRITE",
+                "process timing not persisted"
+            );
+        }
     }
     fn calls(&mut self, value: &Value, store: &mut Store) -> Result<()> {
         if let Some(blocks) = value["content"].as_array() {
@@ -166,6 +256,9 @@ impl Projection {
         Ok(Message {
             id,
             images,
+            // 展示按内容拆分，toolUse 不隐藏同消息的普通正文。
+            presentation: (role == "assistant").then(|| "answer".into()),
+            process: self.process.clone(),
             role,
             text: preview(&text, 64 * 1024),
             thinking: preview(&thinking, 64 * 1024),
@@ -200,6 +293,16 @@ impl Projection {
             .ok_or_else(|| AppError::new("PROTOCOL", "事件缺失 type"))?;
         match kind {
             "message_start" if event["message"]["role"] == "assistant" => {
+                if self.process.as_ref().is_some_and(|p| p.state == "done") {
+                    self.process = None;
+                    self.timing_keys.clear();
+                }
+                self.begin_process();
+                if let Some(process) = &mut self.process {
+                    process.ended_at = None;
+                    process.state = "running".into();
+                }
+                self.message_started = None;
                 self.counter += 1;
                 let id = format!("live-{}", self.counter);
                 self.active_id = Some(id.clone());
@@ -211,6 +314,8 @@ impl Projection {
                         images: vec![],
                         text: String::new(),
                         thinking: String::new(),
+                        presentation: Some("process".into()),
+                        process: self.process.clone(),
                         content_ref: None,
                         truncated: false,
                         status: "streaming".into(),
@@ -224,6 +329,15 @@ impl Projection {
                 let update = &event["assistantMessageEvent"];
                 let update_kind = update["type"].as_str().unwrap_or("");
                 if matches!(update_kind, "text_delta" | "thinking_delta") {
+                    if update_kind == "text_delta"
+                        && self.message_started.is_none()
+                        && update["delta"]
+                            .as_str()
+                            .is_some_and(|text| !text.trim().is_empty())
+                    {
+                        self.finish_process(store)?;
+                        self.message_started = Some(chrono::Utc::now().timestamp_millis());
+                    }
                     let index = update["contentIndex"]
                         .as_u64()
                         .ok_or_else(|| AppError::new("PROTOCOL", "增量缺失 contentIndex"))?
@@ -263,11 +377,47 @@ impl Projection {
                     self.counter += 1;
                     format!("message-{}", self.counter)
                 };
-                let message = self.message(value, id, store)?;
+                let mut message = self.message(value, id, store)?;
+                if role == "assistant" {
+                    if !message.text.trim().is_empty() {
+                        self.finish_process(store)?;
+                    }
+                    if let Some(process) = &mut self.process {
+                        if !message.text.trim().is_empty() {
+                            process.ended_at = process.ended_at.or(self.message_started)
+                                .or(Some(chrono::Utc::now().timestamp_millis()));
+                            process.state = "done".into();
+                        } else if matches!(value["stopReason"].as_str(), Some("error" | "aborted"))
+                        {
+                            process.ended_at = Some(chrono::Utc::now().timestamp_millis());
+                            process.state = if value["stopReason"] == "aborted" {
+                                "stopped"
+                            } else {
+                                "error"
+                            }
+                            .into();
+                        }
+                    }
+                    message.process = self.process.clone();
+                    if let Some(key) = timing_key(value) {
+                        self.timing_keys.push(key);
+                    }
+                    self.save_timing(value);
+                    self.publish_process(store)?;
+                } else if role == "user" {
+                    message.process = None;
+                } else if role == "toolResult" {
+                    // 工具结果保存独立映射，重启后仍可恢复该组计时。
+                    if let Some(key) = timing_key(value) {
+                        self.timing_keys.push(key);
+                    }
+                    self.save_timing(value);
+                }
                 self.upsert(message, store)?;
                 self.blocks.clear();
             }
             "tool_execution_start" | "tool_execution_update" | "tool_execution_end" => {
+                self.begin_process();
                 let id = format!(
                     "tool-{}",
                     event["toolCallId"]
@@ -314,6 +464,8 @@ impl Projection {
                         images: vec![],
                         text: preview(&text, 64 * 1024),
                         thinking: String::new(),
+                        presentation: Some("process".into()),
+                        process: self.process.clone(),
                         content_ref,
                         truncated: text.len() > 64 * 1024,
                         status: if kind != "tool_execution_end" {
@@ -330,8 +482,27 @@ impl Projection {
                     store,
                 )?;
             }
-            "agent_start" => store.push(json!({"type":"run","state":"running"}))?,
-            "agent_settled" => store.push(json!({"type":"run","state":"idle"}))?,
+            "agent_start" => {
+                self.process = None;
+                self.timing_keys.clear();
+                self.begin_process();
+                store.push(json!({"type":"run","state":"running"}))?;
+            }
+            "agent_settled" => {
+                if let Some(process) = &mut self.process {
+                    if process.ended_at.is_none() {
+                        process.ended_at = Some(chrono::Utc::now().timestamp_millis());
+                        process.state = "stopped".into();
+                    }
+                }
+                self.publish_process(store)?;
+                for key in &self.timing_keys {
+                    self.save_timing_key(key);
+                }
+                self.process = None;
+                self.timing_keys.clear();
+                store.push(json!({"type":"run","state":"idle"}))?;
+            }
             "auto_retry_start" => store.push(json!({"type":"run","state":"retrying"}))?,
             "compaction_start" => store.push(json!({"type":"run","state":"compacting"}))?,
             "compaction_end" if event["reason"] == "manual" => {
@@ -376,9 +547,61 @@ impl Projection {
             } else {
                 entry["id"].as_str().unwrap_or("").into()
             };
-            let message = self.message(&value, id, store)?;
+            if self.process.as_ref().is_some_and(|p| p.state == "done") {
+                self.process = None;
+            }
+            // 新记录恢复精确计时；旧记录只恢复分组，时间保持未知。
+            if matches!(value["role"].as_str(), Some("assistant" | "toolResult")) {
+                let saved =
+                    self.timing_dir
+                        .as_ref()
+                        .zip(timing_key(&value))
+                        .and_then(|(dir, key)| {
+                            std::fs::read(dir.join(format!("{key}.json")))
+                                .ok()
+                                .and_then(|bytes| {
+                                    serde_json::from_slice::<ProcessInfo>(&bytes).ok()
+                                })
+                        });
+                if let Some(saved) = saved {
+                    self.process = Some(saved);
+                } else if self.process.is_none() {
+                    self.process = Some(ProcessInfo {
+                        id: id.clone(),
+                        started_at: None,
+                        ended_at: None,
+                        state: "running".into(),
+                    });
+                }
+            }
+            let mut message = self.message(&value, id, store)?;
+            if value["role"] == "user" {
+                message.process = None;
+            }
+            if value["role"] == "assistant" && !message.text.trim().is_empty() {
+                if let Some(process) = &mut self.process {
+                    process.state = "done".into();
+                }
+                message.process = self.process.clone();
+            }
             self.messages.push(message);
         }
+        // 后续消息持有整组最终时间，反向同步到分页边界之前的过程消息。
+        let mut groups = BTreeMap::new();
+        for message in &self.messages {
+            if let Some(process) = &message.process {
+                groups.insert(process.id.clone(), process.clone());
+            }
+        }
+        for message in &mut self.messages {
+            if let Some(process) = &mut message.process {
+                *process = groups[&process.id].clone();
+                if process.state == "running" {
+                    process.state = "stopped".into();
+                }
+            }
+        }
+        self.process = None;
         Ok(())
     }
     /// 历史分页游标是当前投影的数组位置，前端不需要接收完整快照。
@@ -394,6 +617,131 @@ impl Projection {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// 重启后复用同一组冻结时间；旧会话缺少记录不推算耗时。
+    #[test]
+    fn process_classification_and_timing_survive_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut projection = Projection::with_timing_dir(dir.path().to_path_buf());
+        let mut store = Store::new().unwrap();
+        let progress = json!({"role":"assistant","timestamp":1000,"stopReason":"toolUse","content":[{"type":"text","text":"检查文件"},{"type":"toolCall","id":"a","name":"read","arguments":{"path":"a"}}]});
+        let answer = json!({"role":"assistant","timestamp":24000,"stopReason":"stop","content":[{"type":"thinking","thinking":"分析"},{"type":"text","text":"已完成"}]});
+        projection
+            .event(json!({"type":"agent_start"}), &mut store)
+            .unwrap();
+        projection
+            .event(json!({"type":"message_end","message":progress}), &mut store)
+            .unwrap();
+        assert_eq!(
+            projection.messages[0].presentation.as_deref(),
+            Some("answer")
+        );
+        projection
+            .event(
+                json!({"type":"message_start","message":{"role":"assistant"}}),
+                &mut store,
+            )
+            .unwrap();
+        projection.event(json!({"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":1,"delta":"已完成"}}), &mut store).unwrap();
+        projection
+            .event(json!({"type":"message_end","message":answer}), &mut store)
+            .unwrap();
+        projection
+            .event(json!({"type":"agent_settled"}), &mut store)
+            .unwrap();
+        let original = projection.messages[0].process.clone().unwrap();
+        assert!(original.ended_at.is_some());
+        let history = json!({"leafId":"b","entries":[
+            {"id":"a","type":"message","message":progress},
+            {"id":"b","parentId":"a","type":"message","message":answer}
+        ]});
+        let mut restarted = Projection::with_timing_dir(dir.path().to_path_buf());
+        restarted.restore(&history, &mut store).unwrap();
+        assert_eq!(
+            restarted.messages[1].presentation.as_deref(),
+            Some("answer")
+        );
+        for (message, live) in restarted.messages.iter().zip(&projection.messages) {
+            let restored = message.process.as_ref().unwrap();
+            let expected = live.process.as_ref().unwrap();
+            assert_eq!(restored.id, expected.id);
+            assert_eq!(restored.started_at, expected.started_at);
+            assert_eq!(restored.ended_at, expected.ended_at);
+        }
+        assert_ne!(
+            restarted.messages[0].process.as_ref().unwrap().id,
+            restarted.messages[1].process.as_ref().unwrap().id
+        );
+        let mut legacy = Projection::default();
+        legacy.restore(&history, &mut store).unwrap();
+        assert!(legacy.messages[0]
+            .process
+            .as_ref()
+            .unwrap()
+            .started_at
+            .is_none());
+        assert_ne!(
+            legacy.messages[0].process.as_ref().unwrap().id,
+            legacy.messages[1].process.as_ref().unwrap().id
+        );
+    }
+    /// 正文切断过程计时，工具独立组在历史恢复后仍保留正确起止时间。
+    #[test]
+    fn tools_between_visible_replies_have_independent_persistent_timing() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut projection = Projection::with_timing_dir(dir.path().to_path_buf());
+        let mut store = Store::new().unwrap();
+        let first = json!({"role":"assistant","timestamp":1,"content":[{"type":"text","text":"先检查"},{"type":"toolCall","id":"r","name":"read","arguments":{}}],"stopReason":"toolUse"});
+        let tool = json!({"role":"toolResult","timestamp":2,"toolCallId":"r","toolName":"read","content":[{"type":"text","text":"未找到"}],"isError":true});
+        let last = json!({"role":"assistant","timestamp":3,"content":[{"type":"thinking","thinking":"换个路径"},{"type":"text","text":"检查完成"}],"stopReason":"stop"});
+        projection
+            .event(json!({"type":"agent_start"}), &mut store)
+            .unwrap();
+        projection
+            .event(json!({"type":"message_end","message":first}), &mut store)
+            .unwrap();
+        projection
+            .event(
+                json!({"type":"tool_execution_start","toolCallId":"r","toolName":"read","args":{}}),
+                &mut store,
+            )
+            .unwrap();
+        projection
+            .event(json!({"type":"message_end","message":tool}), &mut store)
+            .unwrap();
+        projection
+            .event(
+                json!({"type":"message_start","message":{"role":"assistant"}}),
+                &mut store,
+            )
+            .unwrap();
+        projection.event(json!({"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":1,"delta":"检查"}}), &mut store).unwrap();
+        let frozen = projection.messages[1].process.clone().unwrap();
+        assert_eq!(frozen.state, "done");
+        assert!(frozen.ended_at.is_some());
+        assert_ne!(
+            frozen.id,
+            projection.messages[0].process.as_ref().unwrap().id
+        );
+        projection
+            .event(json!({"type":"message_end","message":last}), &mut store)
+            .unwrap();
+        projection
+            .event(json!({"type":"agent_settled"}), &mut store)
+            .unwrap();
+        let history = json!({"leafId":"c","entries":[
+            {"id":"a","type":"message","message":first},
+            {"id":"b","parentId":"a","type":"message","message":tool},
+            {"id":"c","parentId":"b","type":"message","message":last}
+        ]});
+        let mut restored = Projection::with_timing_dir(dir.path().to_path_buf());
+        restored.restore(&history, &mut store).unwrap();
+        assert_eq!(restored.messages[1].process.as_ref().unwrap().id, frozen.id);
+        assert_eq!(
+            restored.messages[1].process.as_ref().unwrap().ended_at,
+            frozen.ended_at
+        );
+        assert_eq!(restored.messages[1].process.as_ref().unwrap().state, "done");
+    }
     /// 图片只在宿主存正文，实时与恢复均保留摘要引用。
     #[test]
     fn user_images_survive_live_and_history_without_inline_data() {
