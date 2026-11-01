@@ -97,6 +97,32 @@ export interface Snapshot {
   steeringMode?: 'all' | 'one-at-a-time';
   followUpMode?: 'all' | 'one-at-a-time';
 }
+/** 上下文窗口估算；压缩后 tokens/percent 为 null，直到下一次模型回答才可信。 */
+export interface ContextUsage {
+  tokens: number | null;
+  contextWindow: number;
+  percent: number | null;
+}
+/** get_session_stats 投影：累计用量覆盖整条会话，包含工具与摘要产生的用量。 */
+export interface SessionStats {
+  sessionFile?: string;
+  sessionId?: string;
+  userMessages: number;
+  assistantMessages: number;
+  toolCalls: number;
+  toolResults: number;
+  totalMessages: number;
+  tokens: {
+    input: number;
+    output: number;
+    cacheRead: number;
+    cacheWrite: number;
+    total: number;
+  };
+  cost: number;
+  /** 无可用模型或上下文窗口时为 undefined。 */
+  contextUsage?: ContextUsage;
+}
 export interface Command {
   name: string;
   description?: string;

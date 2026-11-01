@@ -7,33 +7,98 @@ use std::{
 };
 use tokio::process::{Child, Command};
 
-/// 合并用户额外 PATH，不修改父进程环境；不可表示的目录返回显式错误。
+/// 只读取 nvm 的版本目录，按数值降序选择后备版本，不执行 shell 配置。
+fn nvm_bins(root: &Path) -> Vec<PathBuf> {
+    let mut versions: Vec<_> = std::fs::read_dir(root)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|entry| {
+            let name = entry.file_name();
+            let parts: Vec<u32> = name
+                .to_str()?
+                .strip_prefix('v')?
+                .split('.')
+                .map(str::parse)
+                .collect::<std::result::Result<_, _>>()
+                .ok()?;
+            if parts.len() != 3 || !entry.path().is_dir() {
+                return None;
+            }
+            Some((parts, entry.path().join("bin")))
+        })
+        .collect();
+    versions.sort_by(|a, b| b.0.cmp(&a.0));
+    versions.into_iter().map(|(_, path)| path).collect()
+}
+
+/// GUI 不继承 shell 初始化；为入口发现和子进程共用相同的有限后备目录。
+fn fallback_dirs() -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    if let Some(home) = env::var_os("USERPROFILE").or_else(|| env::var_os("HOME")) {
+        let home = PathBuf::from(home);
+        dirs.extend([
+            home.join(".local").join("bin"),
+            home.join(".bun").join("bin"),
+            home.join(".pi").join("bin"),
+            home.join(".pi").join("agent").join("bin"),
+        ]);
+        let data = env::var_os("XDG_DATA_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| home.join(".local").join("share"));
+        dirs.push(data.join("pi-node").join("current").join("bin"));
+        let nvm = env::var_os("NVM_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| home.join(".nvm"));
+        dirs.extend(nvm_bins(&nvm.join("versions").join("node")));
+    }
+    #[cfg(windows)]
+    {
+        for key in ["NVM_HOME", "NVM_SYMLINK"] {
+            if let Some(path) = env::var_os(key) {
+                dirs.push(PathBuf::from(path));
+            }
+        }
+        if let Some(roaming) = env::var_os("APPDATA") {
+            dirs.push(PathBuf::from(roaming).join("npm"));
+        }
+        if let Some(program_files) = env::var_os("ProgramFiles") {
+            dirs.push(PathBuf::from(program_files).join("nodejs"));
+        }
+    }
+    #[cfg(unix)]
+    dirs.extend([PathBuf::from("/usr/local/bin"), PathBuf::from("/usr/bin")]);
+    #[cfg(target_os = "macos")]
+    dirs.push(PathBuf::from("/opt/homebrew/bin"));
+    dirs
+}
+
+/// 显式运行时优先，确保脚本中的 env node 与直接启动 JS 使用同一目录。
 fn search_path(settings: &Settings) -> Result<std::ffi::OsString> {
-    let mut paths: Vec<PathBuf> = settings.extra_path.iter().map(PathBuf::from).collect();
+    let mut paths = Vec::new();
+    if !settings.runtime_path.is_empty() {
+        let runtime = Path::new(&settings.runtime_path);
+        if !runtime.is_file() {
+            return Err(AppError::new("NODE_NOT_FOUND", "运行时文件不存在"));
+        }
+        if let Some(parent) = runtime.parent() {
+            paths.push(parent.to_path_buf());
+        }
+    }
+    paths.extend(settings.extra_path.iter().map(PathBuf::from));
     paths.extend(env::split_paths(&env::var_os("PATH").unwrap_or_default()));
+    paths.extend(fallback_dirs());
+    // 保持优先级去重，避免子进程 PATH 随多次发现而膨胀。
+    let mut seen = std::collections::HashSet::new();
+    paths.retain(|path| seen.insert(path.clone()));
     env::join_paths(paths).map_err(|_| AppError::new("PATH", "额外 PATH 含无效目录"))
 }
 
 /// 在有限安装目录查找入口，不执行用户 shell 配置，也不递归磁盘。
 fn candidates(settings: &Settings, name: &str) -> Result<Vec<PathBuf>> {
-    let mut dirs: Vec<PathBuf> = env::split_paths(&search_path(settings)?).collect();
-    if let Some(home) = env::var_os("USERPROFILE").or_else(|| env::var_os("HOME")) {
-        let home = PathBuf::from(home);
-        dirs.extend([
-            home.join(".local/bin"),
-            home.join(".bun/bin"),
-            home.join(".pi/bin"),
-        ]);
-    }
-    if let Some(roaming) = env::var_os("APPDATA") {
-        dirs.push(PathBuf::from(roaming).join("npm"));
-    }
-    dirs.extend([
-        PathBuf::from("/usr/local/bin"),
-        PathBuf::from("/opt/homebrew/bin"),
-        PathBuf::from("/usr/bin"),
-    ]);
-    Ok(dirs.into_iter().map(|dir| dir.join(name)).collect())
+    Ok(env::split_paths(&search_path(settings)?)
+        .map(|dir| dir.join(name))
+        .collect())
 }
 
 /// 显式配置优先，随后 PATH 与常见目录；标准 npm shim 解析 bin 而非执行 cmd。
@@ -144,7 +209,10 @@ pub async fn version(settings: &Settings) -> Result<serde_json::Value> {
     .await
     .map_err(|_| AppError::new("VERSION_TIMEOUT", "Pi 版本检测超时"))??;
     if !result.status.success() {
-        return Err(AppError::new("VERSION", "Pi 无法启动，请检查运行时版本"));
+        return Err(AppError::new(
+            "VERSION",
+            "Pi 无法启动。请确认 Node 版本符合 Pi 要求，并在设置中指定运行时或补充额外 PATH。",
+        ));
     }
     let version = String::from_utf8_lossy(&result.stdout).trim().to_string();
     Ok(serde_json::json!({"spec":spec,"version":version,"verified":version.contains("1.4.0")}))
@@ -220,6 +288,7 @@ impl ProcessTree {
         }
     }
 }
+
 impl Drop for ProcessTree {
     /// 退出所有路径均回收树，绝不按名称终止其他 Pi。
     fn drop(&mut self) {
@@ -231,5 +300,54 @@ impl Drop for ProcessTree {
         unsafe {
             libc::kill(-self.pid, libc::SIGKILL);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 版本按数值排序，避免 v9 在 v22 前面；忽略无关目录。
+    #[test]
+    fn nvm_versions_are_numeric_and_limited_to_version_dirs() {
+        let dir = tempfile::tempdir().unwrap();
+        for name in ["v9.9.0", "v22.9.0", "v22.23.2", "default", "v24"] {
+            std::fs::create_dir(dir.path().join(name)).unwrap();
+        }
+        assert_eq!(
+            nvm_bins(dir.path()),
+            vec![
+                dir.path().join("v22.23.2").join("bin"),
+                dir.path().join("v22.9.0").join("bin"),
+                dir.path().join("v9.9.0").join("bin"),
+            ]
+        );
+    }
+
+    /// 不修改全局环境；显式运行时也必须传递给原生/脚本入口的子进程。
+    #[test]
+    fn explicit_runtime_directory_is_first_in_child_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = dir
+            .path()
+            .join(if cfg!(windows) { "node.exe" } else { "node" });
+        std::fs::write(&runtime, "").unwrap();
+        let settings = Settings {
+            runtime_path: runtime.to_string_lossy().into(),
+            extra_path: vec![dir.path().to_string_lossy().into()],
+            ..Settings::default()
+        };
+        let path = search_path(&settings).unwrap();
+        let paths: Vec<_> = env::split_paths(&path).collect();
+        assert_eq!(paths[0], dir.path());
+        assert_eq!(paths.iter().filter(|p| *p == dir.path()).count(), 1);
+    }
+
+    /// 使用真实安装在隔离 PATH 下探测，不发送消息、不加载用户会话。
+    #[tokio::test]
+    #[ignore = "需要本机安装 Pi；通过最小 PATH 单独执行"]
+    async fn installed_pi_starts_with_gui_path() {
+        let value = version(&Settings::default()).await.unwrap();
+        assert!(!value["version"].as_str().unwrap().is_empty());
     }
 }

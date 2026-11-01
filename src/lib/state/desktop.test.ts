@@ -1055,4 +1055,66 @@ describe('desktop business behavior', () => {
     ]);
     expect(action).toHaveBeenCalledOnce();
   });
+  it('keeps context stats scoped to the current runtime and session', async () => {
+    let release!: (value: unknown) => void;
+    const action = vi.fn().mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          release = resolve;
+        }),
+    );
+    const desktop = fixture(action);
+    desktop.connection = 'ready';
+    desktop.runtimeId = 'r';
+    desktop.snapshot = { sessionFile: 'a' };
+    const pending = desktop.refreshStats();
+    expect(desktop.refreshStats()).toBe(pending);
+    expect(action).toHaveBeenCalledOnce();
+    // 会话已切换后到达的统计属于上一个会话，不能覆盖当前展示。
+    desktop.snapshot = { sessionFile: 'b' };
+    release({
+      totalMessages: 2,
+      tokens: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, total: 2 },
+      cost: 0,
+      contextUsage: { tokens: 10, contextWindow: 100, percent: 10 },
+    });
+    await pending;
+    expect(desktop.stats).toBeNull();
+    expect(desktop.statsLoading).toBe(false);
+    // 同一会话的响应正常落地。
+    const current = desktop.refreshStats();
+    release({
+      totalMessages: 3,
+      tokens: { input: 2, output: 1, cacheRead: 0, cacheWrite: 0, total: 3 },
+      cost: 0.01,
+      contextUsage: { tokens: 20, contextWindow: 100, percent: 20 },
+    });
+    await current;
+    expect(desktop.stats?.totalMessages).toBe(3);
+    expect(desktop.stats?.contextUsage?.percent).toBe(20);
+  });
+  it('ignores context stats failures and skips the query while disconnected', async () => {
+    const action = vi.fn().mockRejectedValue(new Error('查询失败'));
+    const desktop = fixture(action);
+    desktop.connection = 'ready';
+    desktop.runtimeId = 'r';
+    desktop.snapshot = { sessionFile: 'a' };
+    desktop.stats = {
+      userMessages: 1,
+      assistantMessages: 0,
+      toolCalls: 0,
+      toolResults: 0,
+      totalMessages: 1,
+      tokens: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, total: 2 },
+      cost: 0,
+    };
+    await desktop.refreshStats();
+    // 用量是辅助信息：失败不弹全局错误，也保留上一次的数字。
+    expect(desktop.stats?.totalMessages).toBe(1);
+    expect(desktop.error).toBe('');
+    action.mockClear();
+    desktop.connection = 'disconnected';
+    await desktop.refreshStats();
+    expect(action).not.toHaveBeenCalled();
+  });
 });

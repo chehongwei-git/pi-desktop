@@ -2,6 +2,8 @@
 
 “未找到 Pi”：先在终端确认 Pi 可独立运行，再到设置执行诊断。Windows npm 用户通常可选择 `%APPDATA%/npm/pi.cmd`，或选择包内 `dist/bundle/cli.js` 并指定 node.exe。运行时版本要符合 Pi 要求。GUI 的 PATH 可能与终端不同，可在额外 PATH 每行补一个目录。
 
+“Pi 无法启动”：从 Finder 等桌面入口启动时不会执行 shell 配置。客户端会在继承 PATH 后补充 Pi 托管安装及运行时、nvm 的版本目录和平台常用安装目录；nvm 后备版本按版本号从高到低排列。设置中的运行时目录优先加入子进程 PATH，额外 PATH 次之，供 Pi 启动脚本及其子进程使用。若 PATH 已有旧 Node，请在设置中指定符合 Pi 要求的 Node，或在额外 PATH 添加其目录；不需要修改全局 PATH。
+
 “初始化超时”：检查 Pi 扩展是否需要终端自定义 UI、是否向 stdout 写日志或在启动时阻塞。扩展应把日志写 stderr。基础扩展对话会在初始化阶段显示；自定义 TUI 不支持。初始化失败后可以重连，不会自动提交提示词。
 
 “历史为空”：会话 header.cwd 必须匹配项目实际路径。自定义会话目录在客户端设置后会同时传给 Pi 和历史索引；默认遵循 PI_CODING_AGENT_DIR / PI_CODING_AGENT_SESSION_DIR。无用户消息的空会话不列为历史。旧版迁移由 Pi 完成。

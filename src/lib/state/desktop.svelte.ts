@@ -14,6 +14,7 @@ import {
   type Message,
   type Model,
   type RunState,
+  type SessionStats,
   type SessionSummary,
   type Settings,
   type SidebarItem,
@@ -316,6 +317,15 @@ export class Desktop {
     else this.expandProject(project);
   }
   snapshot = $state<Snapshot>({});
+  /** 上下文用量只用于展示；拉取失败保留上次结果，不影响会话主流程。 */
+  stats = $state<SessionStats | null>(null);
+  statsLoading = $state(false);
+  private statsRequest = 0;
+  private statsTask?: {
+    runtime: string;
+    session?: string;
+    task: Promise<void>;
+  };
   models = $state<Model[]>([]);
   levels = $state<string[]>([]);
   commands = $state<Command[]>([]);
@@ -512,6 +522,7 @@ export class Desktop {
       this.expandProject(this.project);
       this.version = connected.version;
       this.snapshot = connected.snapshot;
+      this.stats = null;
       this.currentSessionTitle = '';
       this.newChatProject = null;
       this.connection = 'ready';
@@ -542,6 +553,7 @@ export class Desktop {
         this.refreshMetadata(),
         this.refreshHistory(),
         this.refreshSessions(),
+        this.refreshStats(),
       ]);
       if (generation === this.generation) await this.applyProjectModel();
     } catch (error) {
@@ -614,6 +626,7 @@ export class Desktop {
           if (this.run === 'idle') clearTimeout(this.stopTimer);
           void this.guard(async () => {
             await this.syncState();
+            await this.refreshStats();
             await this.refreshSessions();
           });
           if (
@@ -721,6 +734,50 @@ export class Desktop {
     const generation = this.generation;
     const snapshot = await this.action<Snapshot>({ type: 'state' });
     if (generation === this.generation) this.snapshot = snapshot;
+  }
+  /**
+   * 只读会话统计：上下文窗口估算与累计 tokens/费用。
+   * 按 runtimeId 与 sessionFile 作废迟到响应，避免切会话后显示上一会话的数字；
+   * 失败只保留既有值，用量是辅助信息，不应把连接错误推给用户。
+   */
+  refreshStats(): Promise<void> {
+    if (this.connection !== 'ready' || !this.runtimeId)
+      return Promise.resolve();
+    const runtime = this.runtimeId;
+    const session = this.snapshot.sessionFile;
+    // 相同会话的并发刷新共用查询；切换后的新会话不等待旧查询。
+    if (
+      this.statsTask?.runtime === runtime &&
+      this.statsTask.session === session
+    )
+      return this.statsTask.task;
+    const task = this.fetchStats().finally(() => {
+      if (this.statsTask?.task === task) this.statsTask = undefined;
+    });
+    this.statsTask = { runtime, session, task };
+    return task;
+  }
+  private async fetchStats(): Promise<void> {
+    const generation = this.generation;
+    const runtime = this.runtimeId;
+    const session = this.snapshot.sessionFile;
+    const request = ++this.statsRequest;
+    this.statsLoading = true;
+    try {
+      const stats = await this.action<SessionStats>({ type: 'session_stats' });
+      if (
+        generation !== this.generation ||
+        runtime !== this.runtimeId ||
+        request !== this.statsRequest ||
+        session !== this.snapshot.sessionFile
+      )
+        return;
+      this.stats = stats;
+    } catch {
+      // 忽略：统计失败不清空已展示的数字，也不覆盖主要错误提示。
+    } finally {
+      if (request === this.statsRequest) this.statsLoading = false;
+    }
   }
   /** 全局索引支持启动时浏览全部项目；搜索在摘要上本地进行。 */
   async refreshSessions(): Promise<void> {
@@ -978,6 +1035,7 @@ export class Desktop {
       this.refreshHistory(),
       this.refreshMetadata(),
       this.refreshSessions(),
+      this.refreshStats(),
     ]);
     await this.applyProjectModel();
   }
@@ -1049,6 +1107,7 @@ export class Desktop {
     }
     ++this.historyRequest;
     this.loadingHistory = false;
+    this.stats = null;
     this.currentSessionTitle = title;
     if (path) this.newChatModel = null;
     this.newChatProject = null;
@@ -1064,6 +1123,7 @@ export class Desktop {
       this.refreshHistory(),
       this.refreshMetadata(),
       this.refreshSessions(),
+      this.refreshStats(),
     ]);
     this.draft = this.drafts.get(this.draftKey()) ?? '';
     await this.applyProjectModel();
@@ -1086,6 +1146,7 @@ export class Desktop {
     this.runtimeId = '';
     this.run = 'idle';
     this.extensions = [];
+    this.stats = null;
   }
   /** 重命名只针对已打开会话，并由 Pi 负责写入。 */
   async rename(name: string): Promise<void> {

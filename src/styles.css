@@ -27,6 +27,8 @@
   --accent: #2b6150;
   --accent-soft: #e9f1ec;
   --error: #a33a36;
+  --warning: #8a5a12;
+  --warning-soft: #fdf3e0;
   --shadow: 0 8px 40px #0000000c;
   --diff-added: #245b37;
   --diff-added-bg: #e8f3e9;
@@ -48,6 +50,8 @@
   --accent: #b6d5be;
   --accent-soft: #2b3b30;
   --error: #f1948b;
+  --warning: #e0b071;
+  --warning-soft: #3a3025;
   --shadow: 0 8px 40px #0004;
   --diff-added: #a6ddb4;
   --diff-added-bg: #263b2d;
@@ -548,7 +552,7 @@ button svg {
 .collection-navigation span:last-child:not(:first-child) {
   margin-left: auto;
 }
-/* 主区使用 flex，把正文滚动与固定输入区分开；空对话输入器靠近欢迎标题。 */
+/* 主区使用 flex，把正文滚动与底部输入区分开。 */
 .main-pane {
   min-width: 0;
   min-height: 0;
@@ -692,19 +696,20 @@ button svg {
   min-height: 0;
   position: relative;
 }
-/* 欢迎与输入组成整体，上下留白约 2:3；短窗口可滚动到所有控件。 */
-.conversation.empty {
-  overflow-y: auto;
-}
-.conversation.empty::before,
-.conversation.empty::after {
-  content: "";
-  flex: 2 0 24px;
-}
-.conversation.empty::after {
-  flex-grow: 3;
-}
+/* 欢迎区占用剩余空间并独立滚动，使新旧会话输入器保持相同的底部位置。
+   外层不裁切，项目菜单向上展开时不会推动输入器或被欢迎区截断。 */
 .conversation.empty > .welcome {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: safe center;
+  margin: 0 auto 24px;
+  padding-block: 24px;
+}
+.conversation.empty > .welcome > * {
   flex-shrink: 0;
 }
 
@@ -1021,13 +1026,131 @@ button svg {
   opacity: 0.22;
 }
 .composer-footnote {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 16px;
+  flex-wrap: wrap;
   font-size: 12px;
   color: var(--muted);
-  text-align: center;
   margin: 10px 0 0;
 }
-.composer-footnote span {
+.composer-note {
+  margin: 0;
+  min-width: 0;
+}
+.composer-footnote .composer-note span {
   margin-left: 12px;
+}
+/* 用量指标贴齐输入区右下角；数字等宽，避免刷新时宽度跳动。 */
+.context-usage {
+  position: relative;
+  margin-left: auto;
+}
+.context-usage-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 6px;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  color: var(--muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.4;
+}
+.context-usage-trigger:hover,
+.context-usage-trigger[aria-expanded='true'] {
+  background: var(--hover);
+  color: var(--text);
+}
+.context-usage-trigger[data-tone='warning'] {
+  color: var(--warning);
+}
+.context-usage-trigger[data-tone='error'] {
+  color: var(--error);
+  font-weight: 600;
+}
+.context-usage-auto {
+  padding: 0 4px;
+  border: 1px solid currentColor;
+  border-radius: 4px;
+  font-size: 10px;
+  opacity: 0.75;
+}
+.context-usage-panel {
+  position: absolute;
+  bottom: calc(100% + 10px);
+  right: 0;
+  width: min(320px, calc(100vw - 40px));
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  box-shadow:
+    0 16px 48px #00000018,
+    0 2px 8px #00000008;
+  z-index: 6;
+  color: var(--text);
+}
+:root[data-theme='dark'] .context-usage-panel {
+  box-shadow:
+    0 16px 48px #0006,
+    0 2px 8px #0003;
+}
+.context-usage-heading {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.context-usage-heading strong {
+  font-size: 13px;
+}
+.context-usage-heading span {
+  color: var(--muted);
+  font-size: 11px;
+}
+.usage-grid {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 4px 12px;
+  margin: 0;
+  font-size: 12px;
+}
+.usage-grid dt {
+  color: var(--muted);
+}
+.usage-grid dd {
+  margin: 0;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+.usage-grid small {
+  color: var(--muted);
+  font-size: 11px;
+}
+.context-usage-note {
+  margin: 0;
+  padding: 6px 8px;
+  border-radius: 8px;
+  background: var(--warning-soft);
+  color: var(--warning);
+  font-size: 11px;
+}
+.context-usage-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.context-usage-hint {
+  color: var(--muted);
+  font-size: 11px;
 }
 .send-menu {
   top: auto;

@@ -21,6 +21,7 @@
   import SidebarContextMenu from './lib/components/SidebarContextMenu.svelte';
   import SidebarCollection from './lib/components/SidebarCollection.svelte';
   import MessageNotice from './lib/components/MessageNotice.svelte';
+  import ContextUsage from './lib/components/ContextUsage.svelte';
   const desktop = new Desktop();
   let displayProject = $derived(desktop.newChatProject ?? desktop.project);
   let sidebar = $state(true);
@@ -1126,11 +1127,15 @@
               });
             }}
           />
-          <p class="composer-footnote">
-            Pi 在本地项目中工作，请检查重要改动。{#if desktop.version}<span
-                >Pi {desktop.version}</span
-              >{/if}
-          </p>
+          <div class="composer-footnote">
+            <p class="composer-note">
+              Pi 在本地项目中工作，请检查重要改动。{#if desktop.version}<span
+                  >Pi {desktop.version}</span
+                >{/if}
+            </p>
+            <!-- 上下文使用率固定在右下角，与终端 footer 的位置与读数保持一致。 -->
+            <ContextUsage {desktop} />
+          </div>
         </div>
       </div>
     </div>

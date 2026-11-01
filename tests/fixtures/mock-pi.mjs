@@ -86,7 +86,18 @@ for await (const line of readline.createInterface({
       reply(request, { path: request.outputPath || 'mock.html' });
       break;
     case 'get_session_stats':
-      reply(request, { totalMessages: entries.length });
+      reply(request, {
+        totalMessages: entries.length,
+        tokens: {
+          input: 50000,
+          output: 10000,
+          cacheRead: 40000,
+          cacheWrite: 5000,
+          total: 105000,
+        },
+        cost: 0.45,
+        contextUsage: { tokens: 24600, contextWindow: 200000, percent: 12.3 },
+      });
       break;
     case 'get_last_assistant_text':
       reply(request, { text: 'restored' });

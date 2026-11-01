@@ -296,6 +296,40 @@ async function mock(
                   10,
                 );
                 return {};
+              case 'session_stats':
+                // 用量叠在真实统计形状上，浏览器验收同时覆盖折叠读数与展开明细。
+                if (host.statsError) throw new Error('模拟统计失败');
+                return {
+                  sessionFile,
+                  sessionId: 'mock',
+                  userMessages: 1,
+                  assistantMessages: 1,
+                  toolCalls: 0,
+                  toolResults: 0,
+                  totalMessages: 2,
+                  tokens: {
+                    input: 50000,
+                    output: 10000,
+                    cacheRead: 40000,
+                    cacheWrite: 5000,
+                    total: 105000,
+                  },
+                  cost: 0.45,
+                  contextUsage:
+                    host.statsUnknown || host.statsHidden
+                      ? host.statsHidden
+                        ? undefined
+                        : {
+                            tokens: null,
+                            contextWindow: 200000,
+                            percent: null,
+                          }
+                      : {
+                          tokens: 118000,
+                          contextWindow: 200000,
+                          percent: 59,
+                        },
+                };
               case 'state':
                 return {
                   cwd,
@@ -2637,4 +2671,55 @@ test('archives classify by type and project, search across pages and bound initi
     () => JSON.parse(localStorage.getItem('mock-settings')!).sidebarItems,
   );
   expect(saved.some((item: any) => item.state === 'deleted')).toBe(false);
+});
+
+test('context usage stays in the bottom-right footer and expands details in place', async ({
+  page,
+}) => {
+  await mock(page);
+  await page.goto('/');
+  const meter = page.getByRole('button', { name: /上下文使用率/ });
+  await expect(meter).toBeVisible();
+  await expect(meter).toContainText('59.0% · 118k/200k');
+  // 指标整体在输入区下方右侧，不与输入器抢占空间。
+  const box = await meter.boundingBox();
+  const footnote = await page.locator('.composer-footnote').boundingBox();
+  expect(box!.y).toBeGreaterThan(footnote!.y - 1);
+  expect(box!.x + box!.width).toBeGreaterThan(
+    footnote!.x + footnote!.width - 80,
+  );
+  await meter.click();
+  const panel = page.getByRole('group', { name: '上下文用量明细' });
+  await expect(panel).toBeVisible();
+  await expect(panel).toContainText('50k');
+  await expect(panel).toContainText('42.1%');
+  await expect(panel).toContainText('$0.450');
+  await page.screenshot({ path: 'test-results/context-usage.png' });
+  await page.keyboard.press('Escape');
+  await expect(panel).toHaveCount(0);
+  await expect(meter).toBeFocused();
+  // 统计失败不应打断会话：指标保留，也不弹出全局错误。
+  await page.evaluate(() => {
+    (window as any).statsError = true;
+  });
+  await meter.click();
+  await expect(panel).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(page.getByRole('alert')).toHaveCount(0);
+});
+
+test('context usage explains unknown tokens right after compaction', async ({
+  page,
+}) => {
+  await mock(page);
+  await page.addInitScript(() => {
+    (window as any).statsUnknown = true;
+  });
+  await page.goto('/');
+  const meter = page.getByRole('button', { name: /上下文使用率/ });
+  await expect(meter).toContainText('?% · ?/200k');
+  await meter.click();
+  await expect(
+    page.getByRole('group', { name: '上下文用量明细' }),
+  ).toContainText('压缩后需要等待下一次回答');
 });
