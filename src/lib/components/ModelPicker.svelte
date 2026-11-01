@@ -232,8 +232,9 @@
     max-width: 100%;
     padding: 7px 10px;
     border-radius: 10px;
-    background: var(--bg);
-    font-size: 12px;
+    border-color: transparent;
+    background: transparent;
+    font-size: 13px;
   }
   .model-trigger > :global(svg) {
     color: var(--accent);
@@ -252,10 +253,10 @@
     text-overflow: ellipsis;
     white-space: nowrap;
     color: var(--muted);
-    font-size: 10px;
-    padding: 2px 5px;
+    font-size: 12px;
+    padding: 0;
     border-radius: 4px;
-    background: var(--surface);
+    background: transparent;
   }
   .chevron {
     display: flex;
@@ -277,18 +278,18 @@
     border: 1px solid var(--border);
     border-radius: 14px;
     background: var(--bg);
-    box-shadow: 0 8px 30px #0002;
+    box-shadow: var(--shadow);
   }
   .panel-heading {
     display: flex;
     justify-content: space-between;
     align-items: center;
     padding: 3px 3px 10px;
-    font-size: 12px;
+    font-size: 13px;
   }
   .panel-heading > span {
     color: var(--muted);
-    font-size: 11px;
+    font-size: 12px;
   }
   .model-search {
     display: flex;
@@ -307,7 +308,7 @@
     padding: 9px 0;
     border: 0;
     background: transparent;
-    font-size: 12px;
+    font-size: 13px;
     outline: none;
   }
   .model-list {
@@ -326,7 +327,7 @@
     padding: 9px 7px;
     background: var(--bg);
     color: var(--muted);
-    font-size: 11px;
+    font-size: 12px;
     font-weight: 600;
     overflow-wrap: anywhere;
   }
@@ -359,13 +360,13 @@
     flex: 1;
   }
   .model-copy strong {
-    font-size: 12px;
+    font-size: 13px;
     font-weight: 500;
     overflow-wrap: anywhere;
   }
   .model-copy small {
     color: var(--muted);
-    font-size: 10px;
+    font-size: 12px;
     overflow-wrap: anywhere;
   }
   .current-mark {
@@ -373,7 +374,7 @@
     align-items: center;
     gap: 5px;
     color: var(--accent);
-    font-size: 10px;
+    font-size: 12px;
     flex-shrink: 0;
   }
   .panel-hint {
@@ -383,18 +384,18 @@
     padding: 10px 3px 1px;
     border-top: 1px solid var(--border);
     margin-top: 7px;
-    font-size: 10px;
+    font-size: 12px;
     color: var(--muted);
   }
   .empty {
     padding: 18px 8px;
-    font-size: 12px;
+    font-size: 13px;
     color: var(--muted);
     line-height: 1.6;
   }
   .load-more {
     width: 100%;
-    font-size: 12px;
+    font-size: 13px;
     margin-block: 6px;
   }
   @media (max-width: 600px) {

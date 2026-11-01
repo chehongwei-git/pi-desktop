@@ -258,9 +258,9 @@
     min-width: 0;
     max-width: 100%;
     min-height: 34px;
-    border: 1px solid var(--border);
+    border: 1px solid transparent;
     border-radius: 10px;
-    background: var(--bg);
+    background: transparent;
   }
   .control:hover {
     border-color: var(--muted);
@@ -273,7 +273,7 @@
     opacity: 0.55;
   }
   .control-caption {
-    font-size: 11px;
+    font-size: 12px;
   }
   .thinking-root {
     position: relative;
@@ -281,7 +281,7 @@
   .thinking-control {
     gap: 7px;
     padding: 7px 10px;
-    font-size: 12px;
+    font-size: 13px;
     color: inherit;
   }
   .thinking-control:disabled {
@@ -333,19 +333,19 @@
     border: 1px solid var(--border);
     border-radius: 14px;
     background: var(--bg);
-    box-shadow: 0 8px 30px #0002;
+    box-shadow: var(--shadow);
     color: var(--text);
   }
   .menu-heading {
     padding: 8px 9px 10px;
-    font-size: 12px;
+    font-size: 13px;
     font-weight: 600;
   }
   .menu-heading span {
     display: block;
     margin-top: 4px;
     color: var(--muted);
-    font-size: 11px;
+    font-size: 12px;
     font-weight: 400;
   }
   .thinking-option {
@@ -378,7 +378,7 @@
     flex-shrink: 0;
     border: 1px solid var(--border);
     border-radius: 7px;
-    font-size: 12px;
+    font-size: 13px;
     color: var(--muted);
   }
   .selected .option-strength {
@@ -394,16 +394,16 @@
     display: flex;
     align-items: center;
     gap: 8px;
-    font-size: 12px;
+    font-size: 13px;
     font-weight: 600;
   }
   .level-code {
-    font-size: 10px;
+    font-size: 12px;
     font-weight: 400;
     color: var(--muted);
   }
   .option-hint {
-    font-size: 11px;
+    font-size: 12px;
     color: var(--muted);
     line-height: 1.5;
   }
@@ -413,16 +413,16 @@
   }
   .thinking-control.active {
     background: var(--accent-soft);
-    border-color: var(--accent);
+    border-color: transparent;
     color: var(--accent);
   }
   .saving {
-    font-size: 11px;
+    font-size: 12px;
     color: var(--muted);
   }
   .control-error {
     margin: 8px 0 0;
-    font-size: 12px;
+    font-size: 13px;
     line-height: 1.5;
     color: var(--error);
     overflow-wrap: anywhere;

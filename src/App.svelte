@@ -957,7 +957,15 @@
               onclick={() => {
                 void setSidebar(true);
               }}><Icon name="panel" /></button
-            >{/if}<span class="product-name">Pi</span>
+            >{/if}
+          <!-- 当前会话直接作为顶栏主体，减少重复品牌与第二行标题。 -->
+          {#if displayProject || desktop.newChatProject !== null || desktop.openingSession}
+            <h1 class="session-title" title={desktop.sessionTitle}>
+              {desktop.sessionTitle}
+            </h1>
+          {:else}
+            <span class="product-name">Pi</span>
+          {/if}
         </div>
         <div class="topbar-right">
           <span
@@ -1008,13 +1016,6 @@
           </div>
         </div>
       </header>
-      {#if displayProject || desktop.newChatProject !== null || desktop.openingSession}
-        <div class="conversation-heading">
-          <h1 class="session-title" title={desktop.sessionTitle}>
-            {desktop.sessionTitle}
-          </h1>
-        </div>
-      {/if}
       <div
         class="conversation"
         class:empty

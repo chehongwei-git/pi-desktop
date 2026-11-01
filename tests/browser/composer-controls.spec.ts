@@ -47,7 +47,24 @@ test('switches models and thinking beside the input and preserves drafts', async
             case 'commands':
               return { commands: [] };
             case 'history':
-              return { messages: [], hasMore: false, before: 0 };
+              return {
+                messages: Array.from({ length: 8 }, (_, i) => ({
+                  id: `tool-${i}`,
+                  role: 'toolResult',
+                  name: 'bash',
+                  text: '工具输出\n'.repeat(40),
+                  thinking: '',
+                  status: 'done',
+                  contentRef: null,
+                  tool: {
+                    name: 'bash',
+                    callId: `call-${i}`,
+                    command: `echo ${i}`,
+                  },
+                })),
+                hasMore: false,
+                before: 0,
+              };
             case 'state':
               return { model, thinkingLevel, sessionFile: 'test.jsonl' };
             case 'set_model':
@@ -77,6 +94,46 @@ test('switches models and thinking beside the input and preserves drafts', async
   await expect(model).toBeEnabled();
   await expect(thinking).toHaveText(/思考\s*关闭/);
   await expect(page.locator('.topbar select')).toHaveCount(0);
+  // 检查真实交叠位置的命中对象，不直接比较不同堆叠上下文的 z-index。
+  async function expectMenusAboveTools() {
+    for (const [trigger, panel] of [
+      [model, composer.getByRole('region', { name: '选择模型' })],
+      [thinking, composer.getByRole('menu', { name: '思考强度' })],
+    ]) {
+      await trigger.click();
+      await expect(panel).toBeVisible();
+      const hits = await panel.evaluate((menu) => {
+        const bounds = menu.getBoundingClientRect();
+        return [...document.querySelectorAll('.tool-heading')].flatMap(
+          (heading) => {
+            const rect = heading.getBoundingClientRect();
+            const left = Math.max(bounds.left, rect.left);
+            const right = Math.min(bounds.right, rect.right);
+            const top = Math.max(bounds.top, rect.top);
+            const bottom = Math.min(bounds.bottom, rect.bottom);
+            if (left >= right || top >= bottom) return [];
+            return [
+              menu.contains(
+                document.elementFromPoint(
+                  (left + right) / 2,
+                  (top + bottom) / 2,
+                ),
+              ),
+            ];
+          },
+        );
+      });
+      expect(hits.length).toBeGreaterThan(0);
+      expect(hits.every(Boolean)).toBe(true);
+      await page.keyboard.press('Escape');
+      await expect(trigger).toBeFocused();
+    }
+  }
+  await expect(page.locator('.tool-heading')).toHaveCount(8);
+  await expectMenusAboveTools();
+  await page.locator('.tool-heading').last().click();
+  await expectMenusAboveTools();
+  await page.locator('.tool-heading').last().click();
   await input.fill('检查草稿保留');
   await input.press('Tab');
   await expect(model).toBeFocused();
@@ -109,7 +166,10 @@ test('switches models and thinking beside the input and preserves drafts', async
   await expect(composer.getByRole('alert')).toHaveText('模型切换失败');
   await expect(model).toHaveAttribute('title', 'test/a');
   await expect(input).toHaveValue('检查草稿保留');
-  await page.screenshot({ path: 'test-results/composer-controls-light.png' });
+  await page.screenshot({
+    path: 'test-results/composer-controls-light.png',
+    animations: 'disabled',
+  });
   await page.setViewportSize({ width: 390, height: 844 });
   await page
     .getByRole('button', { name: '收起侧栏', exact: true })
@@ -117,6 +177,7 @@ test('switches models and thinking beside the input and preserves drafts', async
     .click();
   await expect(model).toBeVisible();
   await expect(thinking).toBeVisible();
+  await expectMenusAboveTools();
   const bounds = await composer.boundingBox();
   expect(bounds!.x).toBeGreaterThanOrEqual(0);
   expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(390);
@@ -126,7 +187,10 @@ test('switches models and thinking beside the input and preserves drafts', async
   const modelBounds = await modelPanel.boundingBox();
   expect(modelBounds!.x).toBeGreaterThanOrEqual(0);
   expect(modelBounds!.x + modelBounds!.width).toBeLessThanOrEqual(390);
-  await page.screenshot({ path: 'test-results/model-picker-narrow.png' });
+  await page.screenshot({
+    path: 'test-results/model-picker-narrow.png',
+    animations: 'disabled',
+  });
   await page.keyboard.press('Escape');
   await thinking.click();
   const menu = composer.getByRole('menu', { name: '思考强度' });
@@ -139,5 +203,7 @@ test('switches models and thinking beside the input and preserves drafts', async
   });
   await page.screenshot({
     path: 'test-results/composer-controls-dark-narrow.png',
+    // 主题切换后完成颜色过渡，避免截图混合明暗两套表面颜色。
+    animations: 'disabled',
   });
 });

@@ -1,18 +1,28 @@
 /* 全局设计变量：系统字体与中性色；主题只替换变量，避免重复布局规则。 */
 :root {
   font-family:
-    Inter, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', system-ui, sans-serif;
+    system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC',
+    'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif;
+  font-size: 14px;
+  line-height: 1.5;
+  --font-mono: ui-monospace, 'SFMono-Regular', Menlo, Consolas,
+    'Liberation Mono', 'Noto Sans Mono CJK SC', monospace;
+  --content-width: 820px;
+  --sidebar-width: 288px;
+  --radius-panel: 16px;
+  --input-surface: #f7f8fa;
+  --selected: #e3ece8;
   color: var(--text);
   background: var(--bg);
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
   --bg: #fff;
-  --sidebar: #f8f8f7;
-  --surface: #f1f1ef;
-  --hover: #eaeae7;
+  --sidebar: #f7f7f8;
+  --surface: #f2f3f5;
+  --hover: #eaecef;
   --text: #262725;
-  --muted: #6c6f67;
+  --muted: #646b73;
   --border: #e7e7e3;
   --accent: #2b6150;
   --accent-soft: #e9f1ec;
@@ -26,13 +36,15 @@
   color-scheme: light;
 }
 :root[data-theme='dark'] {
-  --bg: #212220;
-  --sidebar: #191a18;
-  --surface: #2e2f2b;
-  --hover: #373833;
-  --text: #eceee7;
-  --muted: #999d92;
-  --border: #383a34;
+  --input-surface: #292b2f;
+  --selected: #30443c;
+  --bg: #202124;
+  --sidebar: #191a1d;
+  --surface: #2b2d31;
+  --hover: #35383d;
+  --text: #eceef1;
+  --muted: #a5acb6;
+  --border: #3b3e44;
   --accent: #b6d5be;
   --accent-soft: #2b3b30;
   --error: #f1948b;
@@ -123,7 +135,7 @@ button svg {
 .text-button {
   border: 0;
   padding: 5px 8px;
-  font-size: 12px;
+  font-size: 13px;
 }
 .primary {
   background: var(--text);
@@ -145,7 +157,7 @@ button svg {
 /* 应用只占一个窗口；min-height:0 是内部滚动与虚拟列表不撑高窗口的约束。 */
 .app-shell {
   display: grid;
-  grid-template-columns: 260px minmax(0, 1fr);
+  grid-template-columns: var(--sidebar-width) minmax(0, 1fr);
   height: calc(100dvh / var(--preview-zoom, 1));
 }
 .app-shell.sidebar-hidden {
@@ -196,7 +208,7 @@ button svg {
 .nav-new kbd {
   margin-left: auto;
   color: var(--muted);
-  font-size: 9px;
+  font-size: 11px;
   font-family: inherit;
 }
 .search-box {
@@ -214,7 +226,7 @@ button svg {
   border: 0;
   padding: 10px 0;
   width: 100%;
-  font-size: 12px;
+  font-size: 13px;
   outline-offset: 0;
 }
 .section-label {
@@ -222,7 +234,7 @@ button svg {
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  font-size: 12px;
+  font-size: 13px;
   color: var(--muted);
   padding: 2px 4px;
   margin-bottom: 4px;
@@ -263,7 +275,7 @@ button svg {
   border-radius: 6px;
   background: var(--surface);
   color: var(--muted);
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 400;
   line-height: 18px;
   font-variant-numeric: tabular-nums;
@@ -279,11 +291,18 @@ button svg {
   /* 为窄滚动条留出稳定间距，避免置顶按钮被覆盖。 */
   margin-inline-end: 3px;
 }
-.session-row.active,
-.session-row:hover,
-.session-row:focus-within {
+.session-row:hover {
   background: var(--hover);
 }
+/* 当前位置与键盘焦点分别使用底色和轮廓表达。 */
+.session-row.active {
+  background: var(--selected);
+}
+.session-row:focus-within {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
 .session-row .history-item:hover:not(:disabled) {
   background: transparent;
 }
@@ -315,7 +334,7 @@ button svg {
   text-overflow: ellipsis;
   white-space: nowrap;
   color: var(--muted);
-  font-size: 11px;
+  font-size: 12px;
 }
 .session-pin {
   flex-shrink: 0;
@@ -408,7 +427,7 @@ button svg {
   scrollbar-width: thin;
 }
 .history-list h3 {
-  font-size: 10px;
+  font-size: 12px;
   font-weight: 500;
   color: var(--muted);
   margin: 20px 9px 8px;
@@ -420,7 +439,7 @@ button svg {
   padding: 10px 9px;
   text-align: left;
   border: 0;
-  font-size: 12px;
+  font-size: 13px;
   line-height: 1.4;
 }
 .history-item span:first-child {
@@ -430,11 +449,11 @@ button svg {
   flex: 1;
 }
 .history-item.active {
-  background: var(--hover);
+  background: var(--selected);
 }
 .history-empty {
   padding: 24px 10px;
-  font-size: 12px;
+  font-size: 13px;
   line-height: 1.8;
   color: var(--muted);
 }
@@ -466,7 +485,7 @@ button svg {
   margin: 0;
   padding: 4px 9px;
   color: var(--muted);
-  font-size: 12px;
+  font-size: 13px;
   line-height: 1.5;
 }
 .sidebar-rename {
@@ -478,7 +497,7 @@ button svg {
 }
 .sidebar-rename input {
   width: 100%;
-  font-size: 12px;
+  font-size: 13px;
   padding: 8px;
 }
 .rename-actions {
@@ -487,18 +506,18 @@ button svg {
   margin-top: 8px;
 }
 .rename-actions button {
-  font-size: 12px;
+  font-size: 13px;
   padding: 5px 9px;
 }
 .sidebar-rename p {
-  font-size: 12px;
+  font-size: 13px;
   line-height: 1.5;
   color: var(--error);
   overflow-wrap: anywhere;
 }
 .sidebar-settings small {
   margin-left: auto;
-  font-size: 10px;
+  font-size: 12px;
   color: var(--muted);
 }
 .sidebar-backdrop {
@@ -538,8 +557,8 @@ button svg {
   position: relative;
 }
 .topbar {
-  height: 66px;
-  min-height: 66px;
+  height: 68px;
+  min-height: 68px;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -553,13 +572,19 @@ button svg {
   gap: 9px;
   min-width: 0;
 }
+.topbar-left {
+  flex: 1;
+}
+.topbar-right {
+  flex-shrink: 0;
+}
 .product-name {
-  font-size: 20px;
+  font-size: 16px;
   font-weight: 600;
   margin-right: 1px;
 }
 .connection {
-  font-size: 10px;
+  font-size: 12px;
   color: var(--muted);
   display: flex;
   gap: 6px;
@@ -599,15 +624,15 @@ button svg {
   text-align: left;
   width: 100%;
   border: 0;
-  font-size: 12px;
+  font-size: 13px;
 }
 .notice-stack {
   position: absolute;
-  top: 112px;
+  top: 76px;
   right: 16px;
   z-index: 12;
   width: min(380px, calc(100% - 32px));
-  max-height: calc(60% - 112px);
+  max-height: calc(60% - 76px);
   display: flex;
   flex-direction: column;
   gap: 10px;
@@ -629,10 +654,7 @@ button svg {
 .notice-stack:empty {
   display: none;
 }
-.conversation-heading {
-  padding: 0 24px 12px;
-  min-width: 0;
-}
+
 .session-title {
   margin: 0;
   overflow: hidden;
@@ -670,12 +692,25 @@ button svg {
   min-height: 0;
   position: relative;
 }
+/* 欢迎与输入组成整体，上下留白约 2:3；短窗口可滚动到所有控件。 */
 .conversation.empty {
-  justify-content: flex-end;
+  overflow-y: auto;
 }
+.conversation.empty::before,
+.conversation.empty::after {
+  content: "";
+  flex: 2 0 24px;
+}
+.conversation.empty::after {
+  flex-grow: 3;
+}
+.conversation.empty > .welcome {
+  flex-shrink: 0;
+}
+
 .welcome {
-  width: min(100% - 64px, 760px);
-  margin: 0 auto 25px;
+  width: min(100% - 64px, var(--content-width));
+  margin: 0 auto 32px;
   text-align: center;
 }
 .welcome-logo {
@@ -683,13 +718,13 @@ button svg {
   margin-bottom: 22px;
 }
 .welcome h1 {
-  font-size: 29px;
-  font-weight: 500;
-  letter-spacing: -0.04em;
+  font-size: clamp(26px, 2.5vw, 32px);
+  font-weight: 600;
+  letter-spacing: 0;
   margin: 0 0 14px;
 }
 .welcome p {
-  font-size: 12px;
+  font-size: 13px;
   color: var(--muted);
   line-height: 1.8;
   overflow-wrap: anywhere;
@@ -704,7 +739,7 @@ button svg {
   font-size: 13px;
 }
 .composer-area {
-  width: min(100% - 64px, 800px);
+  width: min(100% - 64px, var(--content-width));
   margin: 0 auto;
   padding-bottom: 13px;
   flex-shrink: 0;
@@ -724,7 +759,7 @@ button svg {
   min-height: 34px;
   padding: 7px 10px;
   border-radius: 10px;
-  font-size: 12px;
+  font-size: 13px;
   background: var(--bg);
 }
 .project-picker-trigger[aria-expanded='true'] {
@@ -781,7 +816,7 @@ button svg {
 .project-picker-section,
 .project-picker-hint {
   color: var(--muted);
-  font-size: 11px;
+  font-size: 12px;
 }
 .project-picker-panel .search-box {
   margin: 0 4px 6px;
@@ -817,7 +852,7 @@ button svg {
   text-align: left;
   border: 0;
   padding: 9px 8px;
-  font-size: 12px;
+  font-size: 13px;
   min-height: 48px;
 }
 .project-picker-panel button:focus-visible {
@@ -858,13 +893,13 @@ button svg {
   white-space: nowrap;
 }
 .project-picker-copy strong {
-  font-size: 12px;
+  font-size: 13px;
   font-weight: 550;
 }
 .project-picker-copy small {
   color: var(--muted);
   margin-top: 4px;
-  font-size: 11px;
+  font-size: 12px;
   line-height: 1.4;
 }
 .project-picker-current {
@@ -872,7 +907,7 @@ button svg {
   align-items: center;
   gap: 5px;
   flex-shrink: 0;
-  font-size: 10px;
+  font-size: 12px;
 }
 .project-picker-empty {
   display: flex;
@@ -882,12 +917,12 @@ button svg {
   padding: 24px 12px;
   text-align: center;
   color: var(--muted);
-  font-size: 11px;
+  font-size: 12px;
   line-height: 1.6;
 }
 .project-picker-empty strong {
   color: var(--text);
-  font-size: 12px;
+  font-size: 13px;
   font-weight: 500;
 }
 .project-picker-footer {
@@ -904,16 +939,15 @@ button svg {
   justify-content: space-between;
   gap: 8px;
   padding: 9px 10px 3px;
-  font-size: 10px;
+  font-size: 12px;
   flex-shrink: 0;
 }
 .composer {
-  background: var(--surface);
-  border: 1px solid transparent;
-  border-radius: 22px;
-  padding: 16px 16px 11px;
+  background: var(--input-surface);
+  border: 1px solid var(--border);
+  border-radius: 24px;
+  padding: 20px 18px 14px;
   position: relative;
-  box-shadow: 0 2px 6px #00000003;
 }
 .composer:focus-within {
   border-color: var(--accent);
@@ -930,10 +964,10 @@ button svg {
   outline: none !important;
   box-shadow: none;
   background: transparent;
-  font-size: 14px;
-  line-height: 1.65;
+  font-size: 16px;
+  line-height: 1.7;
   padding: 0 3px;
-  min-height: 28px;
+  min-height: 40px;
 }
 .composer-bottom {
   display: flex;
@@ -952,7 +986,7 @@ button svg {
   min-width: 0;
 }
 .composer-hint {
-  font-size: 10px;
+  font-size: 12px;
   color: var(--muted);
 }
 .composer-actions {
@@ -965,8 +999,8 @@ button svg {
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 32px;
-  height: 32px;
+  width: 36px;
+  height: 36px;
   border-radius: 50%;
   background: var(--text);
   color: var(--bg);
@@ -978,7 +1012,7 @@ button svg {
   padding: 0 10px;
   gap: 5px;
   border-radius: 9px;
-  font-size: 12px;
+  font-size: 13px;
 }
 .send-button:hover:not(:disabled) {
   background: var(--accent);
@@ -987,7 +1021,7 @@ button svg {
   opacity: 0.22;
 }
 .composer-footnote {
-  font-size: 10px;
+  font-size: 12px;
   color: var(--muted);
   text-align: center;
   margin: 10px 0 0;
@@ -1004,7 +1038,7 @@ button svg {
 .send-menu small {
   display: block;
   color: var(--muted);
-  font-size: 10px;
+  font-size: 12px;
   margin-top: 4px;
 }
 .slash-menu {
@@ -1029,7 +1063,7 @@ button svg {
   justify-content: space-between;
   text-align: left;
   gap: 15px;
-  font-size: 12px;
+  font-size: 13px;
 }
 .slash-menu button.active {
   background: var(--accent-soft);
@@ -1047,7 +1081,7 @@ button svg {
   overflow: auto;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
-  font-size: 12px;
+  font-size: 13px;
 }
 .slash-menu small {
   color: var(--muted);
@@ -1062,7 +1096,7 @@ button svg {
   align-items: center;
   gap: 8px;
   color: var(--muted);
-  font-size: 11px;
+  font-size: 12px;
   padding: 6px 5px;
 }
 .working {
@@ -1070,13 +1104,13 @@ button svg {
   background: var(--accent);
 }
 .widget {
-  font-size: 11px;
+  font-size: 12px;
   color: var(--muted);
   max-height: 100px;
   overflow: auto;
 }
 .recovered-drafts {
-  font-size: 11px;
+  font-size: 12px;
   display: flex;
   align-items: center;
   gap: 5px;
@@ -1085,7 +1119,7 @@ button svg {
   padding: 5px;
 }
 .recovered-drafts button {
-  font-size: 10px;
+  font-size: 12px;
   padding: 3px 6px;
 }
 /* 普通文档流不回收已读节点；历史前插由列表统一恢复锚点。 */
@@ -1155,7 +1189,7 @@ button svg {
   .transcript-workspace.has-change > .transcript {
     visibility: hidden;
     flex: 1;
-    padding-inline: max(32px, calc((100% - 800px) / 2));
+    padding-inline: max(32px, calc((100% - var(--content-width)) / 2));
   }
   .change-panel {
     position: absolute;
@@ -1164,11 +1198,13 @@ button svg {
   }
 }
 .transcript {
+  /* 将吸顶工具标题限制在正文层，避免越过输入区遮挡模型及思考菜单。 */
+  isolation: isolate;
   flex: 1;
   min-height: 0;
   overflow-y: auto;
   overflow-x: hidden;
-  padding: 10px max(32px, calc((100% - 800px) / 2)) 25px;
+  padding: 10px max(32px, calc((100% - var(--content-width)) / 2)) 25px;
   scrollbar-width: thin;
   overflow-anchor: none;
   outline: none;
@@ -1179,8 +1215,8 @@ button svg {
   width: 100%;
 }
 .message {
-  font-size: 14px;
-  line-height: 1.85;
+  font-size: 16px;
+  line-height: 1.8;
   padding: 10px 0 22px;
   overflow-wrap: anywhere;
 }
@@ -1202,7 +1238,7 @@ button svg {
 }
 .delivery-status {
   color: var(--muted);
-  font-size: 11px;
+  font-size: 12px;
   margin-bottom: 5px;
 }
 .message-actions {
@@ -1253,11 +1289,11 @@ button svg {
   border-radius: 12px;
   padding: 34px 16px 15px;
   overflow: auto;
-  font-size: 12px;
+  font-size: 13px;
   line-height: 1.7;
 }
 .markdown code {
-  font-family: 'Cascadia Code', Consolas, monospace;
+  font-family: var(--font-mono);
   font-size: 0.9em;
   background: var(--surface);
   border-radius: 4px;
@@ -1274,7 +1310,7 @@ button svg {
   border: 0;
   padding: 3px 7px;
   color: var(--muted);
-  font-size: 10px;
+  font-size: 12px;
 }
 .markdown blockquote {
   border-left: 3px solid var(--border);
@@ -1310,12 +1346,12 @@ button svg {
   padding: 5px 0 15px;
 }
 .tool-step {
-  border: 1px solid var(--border);
-  border-radius: 12px;
+  border: 1px solid transparent;
+  border-radius: 13px;
   background: var(--bg);
   /* 保持祖先不裁切，让吸顶标题在整张工具卡片内可见。 */
   overflow: visible;
-  font-size: 12px;
+  font-size: 13px;
 }
 .tool-step.tool-failed {
   border-color: var(--error);
@@ -1323,7 +1359,7 @@ button svg {
 .tool-heading {
   position: relative;
   z-index: 3;
-  background: var(--sidebar);
+  background: var(--bg);
   display: flex;
   flex-wrap: wrap;
   align-items: center;
@@ -1333,7 +1369,7 @@ button svg {
   min-height: 44px;
   border: 0;
   border-radius: 11px;
-  padding: 10px 14px;
+  padding: 10px 12px;
 }
 .tool-heading:disabled {
   opacity: 1;
@@ -1347,7 +1383,13 @@ button svg {
 .tool-heading[aria-expanded='true'] {
   position: sticky;
   top: 0;
+  background: var(--sidebar);
 }
+/* 展开后才显示容器边界，连续摘要保持轻量。 */
+.tool-step:has(.tool-heading[aria-expanded='true']) {
+  border-color: var(--border);
+}
+
 .tool-name {
   color: var(--accent);
   font-weight: 600;
@@ -1355,7 +1397,7 @@ button svg {
 }
 .tool-command,
 .tool-path {
-  font-family: 'Cascadia Code', Consolas, monospace;
+  font-family: var(--font-mono);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   line-height: 1.65;
@@ -1368,11 +1410,11 @@ button svg {
 .tool-state {
   margin-left: auto;
   padding: 2px 7px;
-  border: 1px solid var(--border);
+  border: 0;
   border-radius: 6px;
-  background: var(--bg);
+  background: transparent;
   color: var(--muted);
-  font-size: 11px;
+  font-size: 12px;
   white-space: nowrap;
 }
 .tool-failed .tool-state {
@@ -1427,10 +1469,7 @@ button svg {
 }
 .tool-code-lines {
   font:
-    12px/22px 'Cascadia Code',
-    Consolas,
-    'Microsoft YaHei',
-    monospace;
+    13px/22px var(--font-mono);
   margin: 0;
   width: 100%;
   white-space: pre-wrap;
@@ -1480,7 +1519,7 @@ button svg {
   color: var(--error);
 }
 .tool-load-status {
-  font-size: 11px;
+  font-size: 12px;
 }
 .tool-expand-hint,
 .tool-load-more {
@@ -1499,7 +1538,7 @@ button svg {
   align-items: center;
   gap: 9px;
   list-style: none;
-  font-size: 11px;
+  font-size: 12px;
 }
 .tool summary strong {
   font-weight: 500;
@@ -1509,8 +1548,8 @@ button svg {
 }
 .tool-output,
 .thinking pre {
-  font-family: Consolas, monospace;
-  font-size: 11px;
+  font-family: var(--font-mono);
+  font-size: 12px;
   white-space: pre-wrap;
   max-height: 340px;
   overflow: auto;
@@ -1520,7 +1559,7 @@ button svg {
   background: var(--sidebar);
 }
 .thinking {
-  font-size: 11px;
+  font-size: 12px;
   color: var(--muted);
   margin-bottom: 12px;
 }
@@ -1528,7 +1567,7 @@ button svg {
   cursor: pointer;
 }
 .summary-label {
-  font-size: 11px;
+  font-size: 12px;
   color: var(--muted);
   margin-bottom: 8px;
 }
@@ -1540,7 +1579,7 @@ button svg {
   text-align: center;
   padding: 5px 0 15px;
   color: var(--muted);
-  font-size: 12px;
+  font-size: 13px;
 }
 .scroll-bottom {
   position: absolute;
@@ -1598,10 +1637,10 @@ dialog::backdrop {
   flex-wrap: wrap;
 }
 .modal-actions button {
-  font-size: 12px;
+  font-size: 13px;
 }
 .settings-form {
-  font-size: 12px;
+  font-size: 13px;
 }
 .settings-form > p {
   line-height: 1.8;
@@ -1610,10 +1649,10 @@ dialog::backdrop {
 .settings-form label {
   display: block;
   margin: 17px 0;
-  font-size: 12px;
+  font-size: 13px;
 }
 .settings-form label > span {
-  font-size: 10px;
+  font-size: 12px;
   margin-left: 5px;
 }
 .settings-form label > input,
@@ -1630,13 +1669,13 @@ dialog::backdrop {
 }
 .input-row input {
   flex: 1;
-  font-size: 12px;
+  font-size: 13px;
 }
 .input-row button {
-  font-size: 11px;
+  font-size: 12px;
 }
 .settings-note {
-  font-size: 11px;
+  font-size: 12px;
   color: var(--muted);
   line-height: 1.8;
   border-top: 1px solid var(--border);
@@ -1648,11 +1687,11 @@ dialog::backdrop {
   background: var(--surface);
   padding: 12px;
   border-radius: 8px;
-  font-size: 11px;
+  font-size: 12px;
 }
 .dialog-field {
   display: block;
-  font-size: 12px;
+  font-size: 13px;
 }
 .dialog-field input,
 .dialog-field textarea {
@@ -1677,8 +1716,7 @@ dialog::backdrop {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   font:
-    12px/1.7 Consolas,
-    monospace;
+    13px/1.7 var(--font-mono);
   background: var(--sidebar);
   padding: 15px;
   border-radius: 9px;
@@ -1724,7 +1762,7 @@ dialog::backdrop {
     margin-inline-start: auto;
   }
 }
-/* 窄窗口侧栏变成抽屉，主聊天宽度不再被 260px 压缩。 */
+/* 窄窗口侧栏变成抽屉，避免导航占用聊天的可用宽度。 */
 @media (max-width: 900px) {
   .app-shell,
   .app-shell.sidebar-hidden {
@@ -1735,7 +1773,7 @@ dialog::backdrop {
     left: 0;
     top: 0;
     bottom: 0;
-    width: 260px;
+    width: var(--sidebar-width);
     z-index: 30;
     box-shadow: var(--shadow);
   }

@@ -242,7 +242,7 @@
     flex: 1;
     min-height: 0;
     overflow: auto;
-    padding: 32px clamp(16px, 4vw, 56px);
+    padding: 34px clamp(16px, 4vw, 40px);
   }
   header {
     display: flex;
@@ -252,11 +252,11 @@
   }
   .eyebrow {
     color: var(--muted);
-    font-size: 12px;
+    font-size: 13px;
     margin: 0 0 8px;
   }
   h1 {
-    font-size: 26px;
+    font-size: 28px;
     margin: 0;
   }
   h1 span {
@@ -271,6 +271,7 @@
   }
   .categories {
     display: flex;
+    flex-wrap: wrap;
     gap: 8px;
     margin-bottom: 20px;
   }
@@ -280,7 +281,7 @@
   }
   .categories span {
     margin-left: 6px;
-    font-size: 12px;
+    font-size: 13px;
   }
   .filters {
     display: flex;
@@ -311,7 +312,7 @@
     margin: 20px 0 8px;
   }
   .count {
-    font-size: 12px;
+    font-size: 13px;
     color: var(--muted);
   }
   .project-archive {
@@ -326,11 +327,11 @@
     overflow-wrap: anywhere;
   }
   h2 span {
-    font-size: 12px;
+    font-size: 13px;
     font-weight: normal;
   }
   .group-path {
-    font-size: 12px;
+    font-size: 13px;
     overflow-wrap: anywhere;
     margin: 6px 0;
   }
@@ -367,18 +368,18 @@
     font-size: 14px;
   }
   .badge {
-    font-size: 11px;
+    font-size: 12px;
     padding: 3px 7px;
     background: var(--surface);
     border-radius: 5px;
   }
   .path {
     overflow-wrap: anywhere;
-    font-size: 12px;
+    font-size: 13px;
     margin: 7px 0 0;
   }
   .parent-hint {
-    font-size: 12px;
+    font-size: 13px;
     line-height: 1.6;
     margin: 8px 0 0;
   }

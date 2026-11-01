@@ -1,5 +1,8 @@
 /** 浏览器集成夹具绕过原生 IPC，渲染真实主页面；记录未处理异常与长任务。 */
 import { test, expect, type Page } from '@playwright/test';
+
+// 主题切换后截图不应混入过渡中的旧颜色，同时覆盖减少动画偏好。
+test.use({ reducedMotion: 'reduce' });
 /** 安装最小 Tauri 端口；模型、文件系统与网络均不会被调用。 */
 async function mock(
   page: Page,
@@ -1397,12 +1400,13 @@ test('full-content actions only appear for truncated messages and still open the
       .filter({ hasText: '正文 short-answer' })
       .getByRole('button', { name: '查看完整正文' }),
   ).toHaveCount(0);
-  const shortTool = messages.filter({ hasText: '正文 short-tool' });
+  // 折叠工具不展示正文，用消息标识定位，避免依赖尚未展开的内容。
+  const shortTool = page.locator('[data-message-id="short-tool"]');
   await shortTool.locator('.tool-heading').click();
   await expect(
     shortTool.getByRole('button', { name: '分块查看完整输出' }),
   ).toHaveCount(0);
-  const longTool = messages.filter({ hasText: '正文 long-tool' });
+  const longTool = page.locator('[data-message-id="long-tool"]');
   await longTool.locator('.tool-heading').click();
   await expect(
     longTool.getByText('末尾工具正文', { exact: true }),

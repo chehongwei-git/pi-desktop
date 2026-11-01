@@ -400,24 +400,24 @@
   }
   .eyebrow {
     color: var(--accent);
-    font-size: 11px;
-    letter-spacing: 0.12em;
+    font-size: 12px;
+    letter-spacing: 0.04em;
     margin: 0 0 8px;
   }
   h1 {
     margin: 0;
     font-size: 28px;
     font-weight: 600;
-    letter-spacing: -0.04em;
+    letter-spacing: 0;
   }
   p {
     color: var(--settings-muted);
-    font-size: 12px;
+    font-size: 13px;
     line-height: 1.7;
     margin: 6px 0 0;
   }
   button {
-    font-size: 12px;
+    font-size: 13px;
   }
   .return-button {
     display: flex;
@@ -427,7 +427,7 @@
   }
   .settings-layout {
     display: grid;
-    grid-template-columns: 170px minmax(0, 1fr);
+    grid-template-columns: 190px minmax(0, 1fr);
     flex: 1;
     min-height: 0;
     overflow: auto;
@@ -457,13 +457,13 @@
   }
   .local-note strong {
     display: block;
-    font-size: 11px;
+    font-size: 12px;
     margin-top: 10px;
     font-weight: 500;
   }
   .local-note p,
   .local-note span {
-    font-size: 10px;
+    font-size: 12px;
   }
   .local-note span {
     display: block;
@@ -496,8 +496,8 @@
   }
   .settings-card {
     border: 1px solid var(--border);
-    border-radius: 13px;
-    padding: 22px;
+    border-radius: var(--radius-panel);
+    padding: 24px;
     margin-bottom: 18px;
   }
   .theme-options {
@@ -565,26 +565,26 @@
     margin-top: 13px;
   }
   .preview-dark {
-    background: #252622;
-    border-color: #45473f;
+    background: #202124;
+    border-color: #3b3e44;
   }
   .preview-dark .preview-sidebar,
   .preview-dark .preview-body > span {
-    background: #34362f;
-    border-color: #45473f;
+    background: #2b2d31;
+    border-color: #3b3e44;
   }
   .preview-dark i {
-    background: #55594d;
+    background: #646b73;
   }
   .preview-system {
-    background: linear-gradient(115deg, #fff 50%, #252622 50%);
+    background: linear-gradient(115deg, #fff 50%, #202124 50%);
   }
   .theme-caption {
     display: flex;
     justify-content: space-between;
     align-items: center;
     padding: 10px 4px 5px;
-    font-size: 11px;
+    font-size: 12px;
     gap: 4px;
   }
   .radio-mark {
@@ -606,7 +606,7 @@
     align-items: center;
     flex-wrap: wrap;
     gap: 8px;
-    font-size: 10px;
+    font-size: 12px;
     color: var(--settings-muted);
   }
   kbd {
@@ -639,17 +639,17 @@
     margin-top: 20px;
   }
   .field label {
-    font-size: 12px;
+    font-size: 13px;
     font-weight: 500;
   }
   .field label span {
     font-weight: 400;
-    font-size: 10px;
+    font-size: 12px;
     color: var(--settings-muted);
     margin-left: 6px;
   }
   .field p {
-    font-size: 11px;
+    font-size: 12px;
     margin-bottom: 10px;
   }
   .path-row {
@@ -662,7 +662,7 @@
   }
   input,
   textarea {
-    font-size: 12px;
+    font-size: 13px;
   }
   textarea {
     width: 100%;
@@ -682,7 +682,7 @@
     flex-shrink: 0;
   }
   .detect-row p {
-    font-size: 11px;
+    font-size: 12px;
   }
   .diagnostic-result {
     margin-top: 18px;
@@ -690,20 +690,20 @@
     background: var(--sidebar);
     border-radius: 9px;
     padding: 14px;
-    font-size: 12px;
+    font-size: 13px;
   }
   .diagnostic-result.failed {
     color: var(--error);
   }
   pre {
-    font-size: 11px;
+    font-size: 12px;
     line-height: 1.7;
     white-space: pre-wrap;
     overflow-wrap: anywhere;
     margin: 8px 0 0;
   }
   .capabilities {
-    font-size: 12px;
+    font-size: 13px;
     color: var(--settings-muted);
     line-height: 1.7;
   }
@@ -720,13 +720,13 @@
     border-top: 1px solid var(--border);
   }
   .save-hint {
-    font-size: 12px;
+    font-size: 13px;
     min-width: 0;
     overflow-wrap: anywhere;
   }
   .save-hint small {
     display: block;
-    font-size: 10px;
+    font-size: 12px;
     color: var(--settings-muted);
     margin-top: 5px;
   }
@@ -739,7 +739,7 @@
     align-items: center;
     gap: 10px;
     flex-wrap: wrap;
-    font-size: 12px;
+    font-size: 13px;
   }
   @media (max-width: 1100px) {
     .settings-layout {
@@ -761,7 +761,7 @@
   }
   @media (max-width: 600px) {
     .page-header {
-      padding: 22px 18px;
+      padding: 24px 18px;
       align-items: flex-start;
     }
     .page-header > div > p:last-child {
@@ -785,7 +785,7 @@
       justify-content: center;
       padding: 8px 6px;
       margin: 0;
-      font-size: 11px;
+      font-size: 12px;
     }
     nav button :global(svg) {
       display: none;
@@ -794,7 +794,7 @@
       display: none;
     }
     .settings-content {
-      padding: 22px 18px;
+      padding: 24px 18px;
     }
     .settings-card {
       padding: 16px;
@@ -806,7 +806,7 @@
       height: 68px;
     }
     .theme-caption {
-      font-size: 10px;
+      font-size: 12px;
       padding-left: 0;
       padding-right: 0;
     }
