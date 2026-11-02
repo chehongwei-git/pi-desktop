@@ -44,6 +44,16 @@
   --diff-mark: #0002;
   color-scheme: light;
 }
+/* 会话视图保留独立 DOM；隐藏视图不参与几何测量。 */
+.session-transcript {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+.session-transcript[hidden] {
+  display: none;
+}
 :root[data-theme='dark'] {
   --input-surface: #292b2f;
   --selected: #30443c;

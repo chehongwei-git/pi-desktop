@@ -1,8 +1,9 @@
 <!-- 三处会话列表共享打开、选中与置顶交互，按钮彼此独立以支持键盘操作。 -->
 <script lang="ts">
   import { tick } from 'svelte';
-  import type { SessionSummary } from '../types';
+  import type { SidebarSessionEntry } from '../types';
   import Icon from './Icon.svelte';
+  import SessionStatus from './SessionStatus.svelte';
   let {
     session,
     active = false,
@@ -13,7 +14,7 @@
     onopen,
     onpin,
   }: {
-    session: SessionSummary;
+    session: SidebarSessionEntry;
     active?: boolean;
     pinned?: boolean;
     busy?: boolean;
@@ -50,12 +51,32 @@
 <div class="session-row" class:active>
   <button
     class="history-item"
-    data-sidebar-kind="session"
+    data-sidebar-kind={session.path ? 'session' : undefined}
     data-sidebar-path={session.path}
     data-sidebar-label={label}
     class:active
     aria-current={active ? 'page' : undefined}
-    title={session.warning ?? `${label}\n${session.cwd}`}
+    aria-label={[
+      label,
+      showProject
+        ? session.cwd.split(/[\\/]/).filter(Boolean).pop() || session.cwd
+        : '',
+      session.status,
+      session.unread ? '有新回复' : '',
+      session.archived ? '已归档' : '',
+    ]
+      .filter(Boolean)
+      .join(' ')}
+    title={session.warning ??
+      [
+        label,
+        session.cwd,
+        session.status,
+        session.unread ? '有新回复' : '',
+        session.archived ? '已归档' : '',
+      ]
+        .filter(Boolean)
+        .join('\n')}
     {disabled}
     onclick={onopen}
   >
@@ -66,27 +87,61 @@
             session.cwd}</small
         >{/if}
     </span>
+    {#if session.archived}<small class="session-archive" aria-hidden="true"
+        >已归档</small
+      >{/if}
+    {#if session.status || session.unread}<span class="session-status">
+        <SessionStatus
+          status={session.status || '已完成'}
+          unread={session.unread}
+        />
+        {#if session.status && !['运行中', '已完成', '失败'].includes(session.status)}<span
+            class="session-status-text"
+            aria-hidden="true">{session.status}</span
+          >{/if}
+      </span>{/if}
     {#if session.warning}<span title={session.warning}>!</span>{/if}
   </button>
-  <button
-    class="icon-button session-pin"
-    class:pinned
-    aria-label={`${pinned ? '取消置顶' : '置顶'} ${label}`}
-    aria-pressed={pinned}
-    title={pinned ? '取消置顶' : '置顶会话'}
-    disabled={busy}
-    onclick={(event) => {
-      void togglePin(event);
-    }}><Icon name="pin" size={14} /></button
-  >
-  <button
-    class="icon-button sidebar-more"
-    data-sidebar-more
-    aria-haspopup="menu"
-    aria-label={`会话操作 ${label}`}
-    title="更多操作"
-    {disabled}
-  >
-    <Icon name="more" size={14} />
-  </button>
+  {#if session.path}<button
+      class="icon-button session-pin"
+      class:pinned
+      aria-label={`${pinned ? '取消置顶' : '置顶'} ${label}`}
+      aria-pressed={pinned}
+      title={pinned ? '取消置顶' : '置顶会话'}
+      disabled={busy}
+      onclick={(event) => {
+        void togglePin(event);
+      }}><Icon name="pin" size={14} /></button
+    >
+    <button
+      class="icon-button sidebar-more"
+      data-sidebar-more
+      aria-haspopup="menu"
+      aria-label={`会话操作 ${label}`}
+      title="更多操作"
+      {disabled}
+    >
+      <Icon name="more" size={14} />
+    </button>{/if}
 </div>
+
+<style>
+  .session-status {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    flex-shrink: 0;
+    color: var(--muted);
+    font-size: 12px;
+  }
+  .session-archive {
+    flex-shrink: 0;
+    color: var(--muted);
+    font-size: 12px;
+  }
+  @media (max-width: 600px) {
+    .session-status-text {
+      display: none;
+    }
+  }
+</style>

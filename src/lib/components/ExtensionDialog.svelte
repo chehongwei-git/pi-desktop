@@ -2,6 +2,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { terminalText } from '../terminal-text';
+  import { errorMessage } from '../client';
   import type { ExtensionRequest } from '../types';
   /** value/confirmed/cancelled 与 Pi extension_ui_response 字段一一对应。 */
   let {
@@ -13,10 +14,11 @@
       value?: string;
       confirmed?: boolean;
       cancelled?: boolean;
-    }) => void;
+    }) => void | Promise<void>;
   } = $props();
   let value = $state(initialValue());
   let completed = false;
+  let failure = $state('');
   let expanded = $state(true);
   let toggle: HTMLButtonElement;
   /** 收起隐藏区域前将焦点交回入口，避免键盘焦点遗失。 */
@@ -31,14 +33,20 @@
     return request.prefill ?? request.defaultValue ?? '';
   }
   /** 组件卸载清除 timeout，提交/超时竞态最多消费一次。 */
-  function respond(response: {
+  async function respond(response: {
     value?: string;
     confirmed?: boolean;
     cancelled?: boolean;
-  }): void {
+  }): Promise<void> {
     if (completed) return;
     completed = true;
-    onrespond(response);
+    failure = '';
+    try {
+      await onrespond(response);
+    } catch (error) {
+      failure = errorMessage(error);
+      completed = false;
+    }
   }
   onMount(() => {
     if (request.timeout === undefined) return;
@@ -106,6 +114,9 @@
       >
     </div>
   </header>
+  {#if failure}<p role="alert">
+      响应未送达：{failure}。输入已保留，可再次提交。
+    </p>{/if}
   <!-- svelte-ignore a11y_no_static_element_interactions (仅处理子控件冒泡的 Escape，不新增焦点节点。) -->
   <div class="choice-content" hidden={!expanded} onkeydown={collapse}>
     {@render content()}

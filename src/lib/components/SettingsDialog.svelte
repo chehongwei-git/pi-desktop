@@ -81,7 +81,9 @@
       form.runtimePath !== initial.runtimePath ||
       paths !== initial.extraPath.join('\n'),
     models: modelsDirty,
-    storage: form.sessionDir !== initial.sessionDir,
+    storage:
+      form.sessionDir !== initial.sessionDir ||
+      form.maxConcurrentTasks !== initial.maxConcurrentTasks,
   });
   const changedList = $derived(
     sections.filter((item) => changed[item.id as keyof typeof changed]),
@@ -166,6 +168,7 @@
       piPath: form.piPath,
       runtimePath: form.runtimePath,
       sessionDir: form.sessionDir,
+      maxConcurrentTasks: form.maxConcurrentTasks ?? 4,
       theme: form.theme,
       extraPath: paths
         .split('\n')
@@ -431,6 +434,19 @@
         {:else}
           <div class="settings-card fields">
             <div class="field">
+              <label for="max-concurrent-tasks">跨项目并发任务数</label>
+              <p id="concurrency-help">
+                所有项目合计最多同时执行这些会话，超出时依提交顺序排队。等待确认的任务仍占用名额。
+              </p>
+              <input
+                id="max-concurrent-tasks"
+                type="number"
+                min="1"
+                max="16"
+                step="1"
+                bind:value={form.maxConcurrentTasks}
+                aria-describedby="concurrency-help"
+              />
               <label for="session-dir">会话目录 <span>可选</span></label>
               <p id="session-help">
                 留空使用 Pi 默认目录。保存后将刷新侧栏中的会话历史。

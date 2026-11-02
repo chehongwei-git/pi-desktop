@@ -5,7 +5,7 @@ export interface SidebarItem {
   name?: string | null;
   state?: 'archived' | 'deleted' | null;
 }
-/** 同一工作目录的所有会话共享模型与强度，路径使用 Desktop.projectKey 比较。 */
+/** 项目的新会话默认模型与强度；已有会话独立选择，目录按规范路径比较。 */
 export interface ProjectModelPreference {
   project: string;
   provider: string;
@@ -25,6 +25,17 @@ export interface Settings {
   projectModels?: ProjectModelPreference[];
   theme: 'system' | 'light' | 'dark';
   zoom: number;
+  /** 所有项目共享的执行上限。 */
+  maxConcurrentTasks?: number;
+}
+/** 宿主调度摘要不包含提示词和图片。 */
+export interface TaskActivity {
+  taskId: string;
+  runtimeId: string;
+  state:
+    'queued' | 'running' | 'completed' | 'failed' | 'cancelled' | 'stopped';
+  position: number;
+  error?: string | null;
 }
 export interface SessionSummary {
   path: string;
@@ -36,6 +47,18 @@ export interface SessionSummary {
   modified: number;
   lastPromptAt?: string;
   warning: string | null;
+}
+/** 侧栏同时呈现磁盘历史与尚未落盘的草稿；id 稳定，path 仅用于真实文件操作。 */
+export interface SidebarSessionEntry extends Omit<
+  SessionSummary,
+  'id' | 'path'
+> {
+  id: string;
+  path?: string;
+  desktopId?: string;
+  status: string;
+  unread: boolean;
+  archived: boolean;
 }
 export interface ToolPresentation {
   callId: string;
@@ -211,6 +234,12 @@ export interface AppError {
   diagnosticId: string;
 }
 export type Wakeup =
+  | {
+      type: 'initialized';
+      runtimeId: string;
+      snapshot: Snapshot;
+      project: string;
+    }
   | { type: 'available'; runtimeId: string }
   | { type: 'failed'; runtimeId: string; error: AppError };
 export type Action =
@@ -259,6 +288,14 @@ export type Action =
       id: string;
       value: { value?: string; confirmed?: boolean; cancelled?: boolean };
     };
+/** 新会话入队时固定的启动快照，与 Rust NewTaskRequest 对齐。 */
+export interface NewTaskRequest {
+  project: string;
+  submissionId: string;
+  action: Action;
+  model?: [string, string];
+  thinking?: string;
+}
 export const defaultSettings: Settings = {
   schemaVersion: 1,
   piPath: '',
@@ -270,4 +307,5 @@ export const defaultSettings: Settings = {
   pinnedSessions: [],
   theme: 'system',
   zoom: 100,
+  maxConcurrentTasks: 4,
 };

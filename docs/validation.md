@@ -2,20 +2,20 @@
 
 当前交付为 0.1.0 首版，源码实现以 PLAN.md 为目标。下表记录本机实际执行结果，不把 CI 配置、浏览器模拟或目标值当成实机验收。
 
-| 检查 | 本机结果 |
-| --- | --- |
-| Node / Rust | Node 24.13.0、Rust 1.93.1，Windows x64 |
-| TypeScript / Svelte | `npm run check`，0 错误、0 警告 |
-| 前端单元/组件 | `npm test`，13 项通过 |
-| 浏览器集成 | 系统 Edge，2 项通过：欢迎/连接/发送/快捷键，10,000 条消息虚拟化/上滚 |
-| Rust 格式 | cargo fmt --check 通过 |
-| Rust 静态检查 | cargo clippy --all-targets -- -D warnings 通过；本机关闭增量缓存绕开缓存拒绝访问 |
-| Rust 测试 | 8 项通过，包含真实 Node 管道的 20 轮生命周期，约 3.8 秒 |
-| IPC 契约 | Rust/TS 共用 event-batch.json，覆盖 camelCase/null/正文引用 |
-| 前端生产构建 | Vite build 通过；首屏 HTML+CSS+JS gzip 约 109.7KiB，不含延迟高亮 |
-| Windows release | Tauri build 通过，生成 pi-desktop.exe |
-| Windows NSIS | 生成 `Pi Desktop_0.1.0_x64-setup.exe`，约 1.68MiB，未签名 |
-| 原生窗口冒烟 | `node scripts/smoke-windows.mjs`：窗口 Pi Desktop 可响应，WM_CLOSE 后退出码 0 |
+| 检查                | 本机结果                                                                         |
+| ------------------- | -------------------------------------------------------------------------------- |
+| Node / Rust         | Node 24.13.0、Rust 1.93.1，Windows x64                                           |
+| TypeScript / Svelte | `npm run check`，0 错误、0 警告                                                  |
+| 前端单元/组件       | `npm test`，13 项通过                                                            |
+| 浏览器集成          | 系统 Edge，2 项通过：欢迎/连接/发送/快捷键，10,000 条消息虚拟化/上滚             |
+| Rust 格式           | cargo fmt --check 通过                                                           |
+| Rust 静态检查       | cargo clippy --all-targets -- -D warnings 通过；本机关闭增量缓存绕开缓存拒绝访问 |
+| Rust 测试           | 8 项通过，包含真实 Node 管道的 20 轮生命周期，约 3.8 秒                          |
+| IPC 契约            | Rust/TS 共用 event-batch.json，覆盖 camelCase/null/正文引用                      |
+| 前端生产构建        | Vite build 通过；首屏 HTML+CSS+JS gzip 约 109.7KiB，不含延迟高亮                 |
+| Windows release     | Tauri build 通过，生成 pi-desktop.exe                                            |
+| Windows NSIS        | 生成 `Pi Desktop_0.1.0_x64-setup.exe`，约 1.68MiB，未签名                        |
+| 原生窗口冒烟        | `node scripts/smoke-windows.mjs`：窗口 Pi Desktop 可响应，WM_CLOSE 后退出码 0    |
 
 原生冒烟一次采样宿主工作集约 27MiB，仅是空项目状态下 Rust 主进程，不包含 WebView2、Pi 和工具。不能据此推算总内存或作为固定承诺。
 
@@ -143,6 +143,16 @@ TAURI_BUNDLER_TOOLS_GITHUB_MIRROR=https://v4.gh-proxy.org/https://github.com npm
 - `npm run check`：0 错误、0 警告；`npm test`：207 项通过；`npm run build`、`git diff --check` 通过。
 - Chromium 13 项相关流程通过，包含发送失败保留阅读位置、成功发送自动到底、继续回复跟随、再次上翻、延迟引导与后续提交、原滚动及设置回归。新增 3 项状态测试覆盖成功、失败、本地命令与跨会话迟到结果。
 - 本次未进行 Windows/Linux 原生滚轮、触控板或发行安装包验收，浏览器使用模拟 IPC，不构成三平台原生验证完成声明。
+
+## 跨项目、多会话并行任务增量验证（Windows x64）
+
+- `npm run check` 无错误和警告，`npm run build` 通过。前端完整单元/组件测试 247 项通过，新增 Workspace 覆盖两个项目各两个会话、后台事件归属、同会话打开去重、模型独立、取消排队保留新草稿、丢失提交回执后的只读确认、重启不自动执行及 Windows 路径别名。
+- Rust 完整库测试 46 项通过，保留一项原有的本机 Pi 安装测试为 ignored。新增真实 Node 子进程调度验证：四个会话占满名额、第五个等待 settled、提交去重、取消不占名额、新草稿排队不创建进程、领取名额后使用预留标识启动，以及旧配置并发默认值与合法范围。
+- 保留原先 13 项跨会话与阅读位置浏览器回归，并更新并行会话用例只通过现有项目／最近列表访问任务。新增验证覆盖草稿与待创建队列项可导航、排队到真实历史绑定后身份稳定及 Windows 路径别名去重、恢复草稿可重开且不启动进程、归档活动的临时可达性、完成状态在打开后保留而未读点清除，以及运行/完成/失败图标和减少动画。
+- 新流程生成浅色、深色及窄窗口截图，位于 Playwright 的 `test-results/`；此轮未完成人工视觉对比或 WCAG 审核。
+- 生产 Rust 代码通过 `cargo clippy --manifest-path src-tauri/Cargo.toml --lib -- -D warnings`。`--all-targets -- -D warnings` 仍受原有 `images.rs` 的 cloned_ref_to_slice_refs 和 `tool.rs` 的 items_after_test_module 两条测试代码警告阻塞；未为此修改无关测试。Windows 增量缓存偶有“拒绝访问”警告，不影响上述成功结果。
+- 修改的 Rust 文件以 rustfmt 的 skip_children 模式格式化，避免顺带重排已有未格式化文件；前端修改文件通过 Prettier，`git diff --check` 通过。
+- 没有调用在线生成模型，没有改写真实 CLI 历史。未重新制作安装器，未验收真实 Pi 扩展组合、原生窗口退出和强制关闭的完整 GUI 流程，未在 macOS/Linux 实机验证；跨平台路径实现的单元覆盖不等于三平台验证完成。
 
 ## 尚待验收与已知限制
 

@@ -11,11 +11,16 @@ mod rpc;
 mod runtime;
 mod settings;
 mod storage;
+mod supervisor;
 mod tool;
 mod types;
 
 use serde_json::{json, Value};
-use std::{path::PathBuf, sync::Mutex};
+use std::{
+    collections::HashMap,
+    path::PathBuf,
+    sync::{Arc, Mutex},
+};
 use tauri::{ipc::Channel, Manager, State};
 use tokio::sync::Mutex as AsyncMutex;
 use types::*;
@@ -25,17 +30,14 @@ struct AppState {
     config_dir: PathBuf,
     settings: Mutex<Settings>,
     catalog: Mutex<history::Catalog>,
-    runtime: AsyncMutex<Option<runtime::Handle>>,
+    runtimes: Arc<supervisor::Supervisor>,
+    sessions: Mutex<HashMap<String, String>>,
     lifecycle: AsyncMutex<()>,
 }
 impl AppState {
     /// 克隆句柄后立即释放锁，让响应和停止可并发进入 actor。
-    async fn handle(&self) -> Result<runtime::Handle> {
-        self.runtime
-            .lock()
-            .await
-            .clone()
-            .ok_or_else(|| AppError::new("DISCONNECTED", "请先选择项目并连接 Pi"))
+    async fn handle(&self, id: &str) -> Result<runtime::Handle> {
+        self.runtimes.handle(id)
     }
     /// 配置快照不包含任何凭据，普通互斥锁只用于短暂内存读取。
     fn config(&self) -> Result<Settings> {
@@ -58,7 +60,10 @@ fn save_settings(state: State<'_, AppState>, settings: Settings) -> Result<()> {
     *state
         .settings
         .lock()
-        .map_err(|_| AppError::new("LOCK", "配置锁异常"))? = settings;
+        .map_err(|_| AppError::new("LOCK", "配置锁异常"))? = settings.clone();
+    state
+        .runtimes
+        .set_limit(settings.max_concurrent_tasks as usize);
     Ok(())
 }
 /// 显式版本探测，无项目时可在设置中运行，不创建会话。
@@ -66,13 +71,14 @@ fn save_settings(state: State<'_, AppState>, settings: Settings) -> Result<()> {
 async fn detect_pi(state: State<'_, AppState>, settings: Option<Settings>) -> Result<Value> {
     platform::version(&settings.unwrap_or(state.config()?)).await
 }
-/// 跨项目先等待回收旧进程，再启动新进程；初始化失败同样回收。
+/// 每个真实会话启动独立进程，初始化失败只回收该次实例。
 #[tauri::command]
 async fn connect_pi(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
     project: String,
     channel: Channel<Value>,
+    session_path: Option<String>,
 ) -> Result<Value> {
     // 未指定项目时使用系统用户目录，绝不继承应用安装目录。
     let project = if project.is_empty() {
@@ -86,19 +92,35 @@ async fn connect_pi(
     };
     let _gate = state.lifecycle.lock().await;
     let settings = state.config()?;
-    let old = state.runtime.lock().await.take();
-    // 版本探测不加载项目，可与旧进程退出并行；两者结束后才启动新 Agent。
-    // join! 确保探测失败时也等待旧进程完成回收。
-    let (detected, ()) = tokio::join!(platform::version(&settings), async {
-        if let Some(old) = old {
-            let _ = old.shutdown().await;
+    let detected = platform::version(&settings).await?;
+    if let Some(path) = &session_path {
+        let key = session_identity(path)?;
+        let existing = state.sessions.lock().unwrap().get(&key).cloned();
+        if let Some(id) = existing {
+            if state
+                .runtimes
+                .handle(&id)
+                .is_ok_and(|handle| handle.lifecycle.borrow().state != runtime::Lifecycle::Stopped)
+            {
+                return Err(AppError::new("SESSION_OPEN", "该会话已在本窗口中打开"));
+            }
+            // 崩溃实例不再拥有写权限，清除身份映射以允许显式恢复。
+            state.runtimes.remove(&id);
+            state.sessions.lock().unwrap().remove(&key);
         }
-    });
-    let detected = detected?;
+    }
     let handle = runtime::start(&settings, project.clone(), channel).await?;
     // 提前保存句柄，让启动时扩展的交互响应能送达，避免信任弹窗与初始化互锁。
-    *state.runtime.lock().await = Some(handle.clone());
+    state.runtimes.register(handle.clone());
     let init = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        if let Some(path) = &session_path {
+            let switched = handle
+                .action(Action::SwitchSession { path: path.clone() })
+                .await?;
+            if switched["cancelled"] == true {
+                return Err(AppError::new("CANCELLED", "扩展取消了会话打开"));
+            }
+        }
         // 两个只读查询独立提交，仍在握手阶段验证必需的历史快照能力。
         let (snapshot, _) = tokio::try_join!(
             handle.action(Action::State),
@@ -111,24 +133,148 @@ async fn connect_pi(
         Ok(Ok(snapshot)) => snapshot,
         other => {
             let _ = handle.shutdown().await;
-            *state.runtime.lock().await = None;
+            state.runtimes.remove(&handle.id);
             return Err(match other {
                 Ok(Err(e)) => e,
                 _ => AppError::new("INIT_TIMEOUT", "Pi 初始化超过 15 秒，请检查扩展与运行时"),
             });
         }
     };
+    if let Some(path) = snapshot["sessionFile"].as_str() {
+        state
+            .sessions
+            .lock()
+            .unwrap()
+            .insert(session_identity(path)?, handle.id.clone());
+    }
     Ok(
         json!({"runtimeId":handle.id,"project":project,"snapshot":snapshot,"version":detected["version"],"verified":detected["verified"]}),
     )
 }
-/// 正常断开可等待资源释放；再次连接不会与旧实例并存。
+/// 定向关闭一个运行时，其他项目和会话继续执行。
 #[tauri::command]
-async fn disconnect_pi(state: State<'_, AppState>, force: Option<bool>) -> Result<()> {
+async fn disconnect_pi(
+    state: State<'_, AppState>,
+    runtime_id: String,
+    force: Option<bool>,
+) -> Result<()> {
     let _gate = state.lifecycle.lock().await;
-    if let Some(handle) = state.runtime.lock().await.take() {
-        let _ = handle.close(force.unwrap_or(false)).await;
+    if let Ok(handle) = state.runtimes.handle(&runtime_id) {
+        handle.close(force.unwrap_or(false)).await?;
     }
+    state.runtimes.remove(&runtime_id);
+    state
+        .sessions
+        .lock()
+        .unwrap()
+        .retain(|_, runtime| runtime != &runtime_id);
+    state
+        .runtimes
+        .set_limit(state.config()?.max_concurrent_tasks as usize);
+    Ok(())
+}
+/// 文件存在时使用规范路径；Windows 忽略大小写与分隔符别名。
+fn session_identity(path: &str) -> Result<String> {
+    let path = PathBuf::from(path);
+    let absolute = if path.is_absolute() {
+        path
+    } else {
+        std::env::current_dir()?.join(path)
+    };
+    let key = std::fs::canonicalize(&absolute)
+        .unwrap_or(absolute)
+        .to_string_lossy()
+        .into_owned();
+    #[cfg(windows)]
+    let key = {
+        let normalized = key.replace('\\', "/").to_lowercase();
+        normalized
+            .strip_prefix("//?/unc/")
+            .map(|unc| format!("//{unc}"))
+            .unwrap_or_else(|| normalized.trim_start_matches("//?/").to_owned())
+    };
+    Ok(key)
+}
+/// 新会话只在领取执行名额后启动；提交时快照模型和图片，不读取任意文件。
+#[tauri::command]
+async fn submit_new_task(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    request: NewTaskRequest,
+    channel: Channel<Value>,
+) -> Result<Value> {
+    let NewTaskRequest {
+        project,
+        submission_id,
+        action,
+        model,
+        thinking,
+    } = request;
+    if !matches!(action, Action::Prompt { .. }) {
+        return Err(AppError::new("TASK", "新会话只接受初始提示词"));
+    }
+    let project = if project.is_empty() {
+        app.path()
+            .home_dir()
+            .map_err(|_| AppError::new("HOME", "无法读取用户目录"))?
+            .to_string_lossy()
+            .into_owned()
+    } else {
+        project
+    };
+    if !std::path::Path::new(&project).is_dir() {
+        return Err(AppError::new("PROJECT", "项目目录不存在"));
+    }
+    state.runtimes.submit_new(
+        submission_id,
+        action,
+        supervisor::Launch {
+            settings: state.config()?,
+            project,
+            channel,
+            model,
+            thinking,
+        },
+    )
+}
+#[tauri::command]
+fn list_activity(state: State<'_, AppState>) -> Vec<supervisor::Activity> {
+    state.runtimes.list()
+}
+#[tauri::command]
+fn get_submission(
+    state: State<'_, AppState>,
+    submission_id: String,
+) -> Option<supervisor::Activity> {
+    state.runtimes.submission(&submission_id)
+}
+#[tauri::command]
+fn cancel_queued_task(state: State<'_, AppState>, task_id: String) -> Result<()> {
+    state.runtimes.cancel(&task_id)
+}
+#[tauri::command]
+fn pause_tasks(state: State<'_, AppState>, paused: bool) {
+    state.runtimes.pause(paused);
+    if !paused {
+        state.runtimes.set_limit(
+            state
+                .config()
+                .map(|s| s.max_concurrent_tasks as usize)
+                .unwrap_or(4),
+        );
+    }
+}
+#[tauri::command]
+async fn exit_app(app: tauri::AppHandle, state: State<'_, AppState>, force: bool) -> Result<()> {
+    // 强制退出可越过先前正常关闭的等待，不让同一个生命周期锁屏蔽恢复入口。
+    let _gate = if force {
+        None
+    } else {
+        Some(state.lifecycle.lock().await)
+    };
+    state.runtimes.pause(true);
+    state.runtimes.close_all(force).await?;
+    app.exit(0);
     Ok(())
 }
 /// 白名单业务调用；runtimeId 检查防止旧 UI 请求影响新会话。
@@ -138,10 +284,71 @@ async fn perform(
     state: State<'_, AppState>,
     runtime_id: String,
     action: Action,
+    submission_id: Option<String>,
 ) -> Result<Value> {
-    let handle = state.handle().await?;
+    if matches!(action, Action::Stop) && state.runtimes.is_running(&runtime_id) {
+        state.runtimes.mark_stopping(&runtime_id);
+        if state.runtimes.handle(&runtime_id).is_err() {
+            return Ok(json!({"steering":[],"followUp":[]}));
+        }
+    }
+    let handle = state.handle(&runtime_id).await?;
     if handle.id != runtime_id {
         return Err(AppError::new("STALE_RUNTIME", "会话连接已更新"));
+    }
+    if let Some(submission) = &submission_id {
+        if let Some(task) = state.runtimes.submission(submission) {
+            return Ok(json!({"desktopTask":task.task_id}));
+        }
+    }
+    if let Action::SwitchSession { path } = &action {
+        if state
+            .sessions
+            .lock()
+            .unwrap()
+            .get(&session_identity(path)?)
+            .is_some_and(|owner| owner != &runtime_id)
+        {
+            return Err(AppError::new(
+                "SESSION_OPEN",
+                "目标会话已有独立运行实例，请从侧栏打开",
+            ));
+        }
+    }
+    if state.runtimes.is_queued(&runtime_id)
+        && !matches!(
+            action,
+            Action::State
+                | Action::History { .. }
+                | Action::Models
+                | Action::ThinkingLevels
+                | Action::Commands
+                | Action::SessionStats
+                | Action::ExtensionResponse { .. }
+        )
+    {
+        return Err(AppError::new("TASK_QUEUED", "会话正在排队，请先取消排队"));
+    }
+    if matches!(action, Action::Stop) {
+        state.runtimes.mark_stopping(&runtime_id);
+    }
+    if matches!(
+        action,
+        Action::Prompt { .. }
+            | Action::Compact { .. }
+            | Action::NavigateTree {
+                summarize: true,
+                ..
+            }
+    ) && !state.runtimes.is_running(&runtime_id)
+    {
+        let submission = submission_id.ok_or_else(|| {
+            AppError::new(
+                "SUBMISSION_REQUIRED",
+                "新任务需要提交标识，请重新打开会话后发送",
+            )
+        })?;
+        return state.runtimes.submit(runtime_id, submission, action);
     }
     if let Action::NewProjectSession { project } = action {
         let project = if project.is_empty() {
@@ -173,16 +380,29 @@ async fn perform(
         }
         result
     } else {
-        handle.action(action).await
+        let tracks_session = matches!(action, Action::State);
+        let result = handle.action(action).await?;
+        if tracks_session {
+            if let Some(path) = result["sessionFile"].as_str() {
+                let key = session_identity(path)?;
+                let mut sessions = state.sessions.lock().unwrap();
+                if sessions.get(&key).is_some_and(|owner| owner != &runtime_id) {
+                    return Err(AppError::new(
+                        "SESSION_OPEN",
+                        "该会话已被另一个运行实例打开",
+                    ));
+                }
+                sessions.retain(|_, owner| owner != &runtime_id);
+                sessions.insert(key, runtime_id);
+            }
+        }
+        Ok(result)
     }
 }
 /// 可靠批次拉取，前端确认游标才回收 spool。
 #[tauri::command]
 async fn next_events(state: State<'_, AppState>, runtime_id: String, ack: u64) -> Result<Value> {
-    let handle = state.handle().await?;
-    if handle.id != runtime_id {
-        return Err(AppError::new("STALE_RUNTIME", "会话连接已更新"));
-    }
+    let handle = state.handle(&runtime_id).await?;
     handle.events(ack).await
 }
 /// 大正文分页仅接受宿主引用，不接受文件路径。
@@ -193,10 +413,7 @@ async fn read_content(
     id: String,
     offset: usize,
 ) -> Result<Value> {
-    let handle = state.handle().await?;
-    if handle.id != runtime_id {
-        return Err(AppError::new("STALE_RUNTIME", "正文连接已更新"));
-    }
+    let handle = state.handle(&runtime_id).await?;
     handle.content(id, offset).await
 }
 /// 文件扫描放到 blocking 池，不阻塞 Tokio 管道读取或窗口线程。
@@ -280,9 +497,14 @@ pub fn run() {
                 config_dir,
                 settings: Mutex::new(settings),
                 catalog: Mutex::new(catalog),
-                runtime: AsyncMutex::new(None),
+                runtimes: Arc::new(supervisor::Supervisor::default()),
+                sessions: Mutex::new(HashMap::new()),
                 lifecycle: AsyncMutex::new(()),
             });
+            let state = app.state::<AppState>();
+            state
+                .runtimes
+                .set_limit(state.config()?.max_concurrent_tasks as usize);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -295,6 +517,12 @@ pub fn run() {
             detect_pi,
             connect_pi,
             disconnect_pi,
+            list_activity,
+            submit_new_task,
+            cancel_queued_task,
+            get_submission,
+            pause_tasks,
+            exit_app,
             perform,
             next_events,
             read_content,
@@ -303,15 +531,9 @@ pub fn run() {
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();
-                let app = window.app_handle().clone();
-                tauri::async_runtime::spawn(async move {
-                    let state = app.state::<AppState>();
-                    let _gate = state.lifecycle.lock().await;
-                    if let Some(handle) = state.runtime.lock().await.take() {
-                        let _ = handle.shutdown().await;
-                    }
-                    app.exit(0);
-                });
+                // 关闭请求交给页内确认条；确认后由 exit_app 回收各自进程树。
+                use tauri::Emitter;
+                let _ = window.emit("desktop-close-requested", ());
             }
         })
         .run(tauri::generate_context!())

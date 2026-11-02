@@ -16,7 +16,7 @@ use tauri::ipc::Channel;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt, BufReader},
     process::Child,
-    sync::{mpsc, oneshot},
+    sync::{mpsc, oneshot, watch},
     time::{Instant, MissedTickBehavior},
 };
 
@@ -25,7 +25,22 @@ static RUNTIME_ID: AtomicU64 = AtomicU64::new(0);
 #[derive(Clone)]
 pub struct Handle {
     pub id: String,
+    pub lifecycle: watch::Receiver<Progress>,
     tx: mpsc::Sender<Request>,
+}
+/// 生命周期供宿主调度使用，不依赖前端是否正在阅读此会话。
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Lifecycle {
+    Idle,
+    Busy,
+    Stopped,
+}
+/// settled 计数保证快速结束的任务也不会丢失完成通知。
+#[derive(Clone, Copy)]
+pub struct Progress {
+    pub state: Lifecycle,
+    pub settled: u64,
+    pub failed: bool,
 }
 /// Actor 内部请求，外部 API 不可直接创建任意协议调用。
 enum Request {
@@ -335,12 +350,24 @@ impl Handle {
     /// 用户显式强制关闭时跳过 3 秒宽限，Job/进程组仍只影响自有子树。
     pub async fn close(&self, force: bool) -> Result<()> {
         let (reply, rx) = oneshot::channel();
-        self.tx
+        let mut lifecycle = self.lifecycle.clone();
+        if lifecycle.borrow().state == Lifecycle::Stopped {
+            return Ok(());
+        }
+        if self
+            .tx
             .send(Request::Shutdown { force, reply })
             .await
-            .map_err(|_| AppError::new("DISCONNECTED", "Pi 已退出"))?;
-        rx.await
-            .map_err(|_| AppError::new("DISCONNECTED", "Pi 已退出"))??;
+            .is_ok()
+        {
+            let _ = rx.await;
+        }
+        // Shutdown 回执先于 actor 最终清理；等到进程回收后才允许调度器释放名额。
+        while lifecycle.borrow_and_update().state != Lifecycle::Stopped {
+            if lifecycle.changed().await.is_err() {
+                break;
+            }
+        }
         Ok(())
     }
 }
@@ -350,6 +377,15 @@ pub async fn start(
     settings: &Settings,
     project: String,
     channel: Channel<Value>,
+) -> Result<Handle> {
+    start_reserved(settings, project, channel, None).await
+}
+/// 排队任务预先拥有稳定标识，真正获得名额后才创建对应子进程。
+pub async fn start_reserved(
+    settings: &Settings,
+    project: String,
+    channel: Channel<Value>,
+    reserved_id: Option<String>,
 ) -> Result<Handle> {
     if !std::path::Path::new(&project).is_dir() {
         return Err(AppError::new("PROJECT", "项目目录不存在"));
@@ -415,14 +451,33 @@ pub async fn start(
             }
         }
     });
-    let id = format!("runtime-{}", RUNTIME_ID.fetch_add(1, Ordering::Relaxed) + 1);
+    let id = reserved_id
+        .unwrap_or_else(|| format!("runtime-{}", RUNTIME_ID.fetch_add(1, Ordering::Relaxed) + 1));
     tracing::info!(runtime_id=%id, "runtime started");
-    let handle = Handle { id: id.clone(), tx };
+    let (lifecycle_tx, lifecycle) = watch::channel(Progress {
+        state: Lifecycle::Idle,
+        settled: 0,
+        failed: false,
+    });
+    let handle = Handle {
+        id: id.clone(),
+        tx,
+        lifecycle,
+    };
     let projection =
         Projection::with_timing_dir(crate::history::root(settings).join(".desktop-process"));
     tokio::spawn(async move {
         actor(
-            id, child, stdin, tree, store, rx, output_rx, channel, projection,
+            id,
+            child,
+            stdin,
+            tree,
+            store,
+            rx,
+            output_rx,
+            channel,
+            projection,
+            lifecycle_tx,
         )
         .await;
         reader.abort();
@@ -444,6 +499,7 @@ async fn actor(
     mut output: mpsc::Receiver<Result<Option<Value>>>,
     channel: Channel<Value>,
     mut projection: Projection,
+    lifecycle: watch::Sender<Progress>,
 ) {
     let mut pending: HashMap<String, Pending> = HashMap::new();
     let mut serial = 0u64;
@@ -511,7 +567,22 @@ async fn actor(
                         request.bridge_error = Some(event["error"].as_str().unwrap_or("桌面桥接执行失败").to_string());
                     }
                 }
-                Some(Ok(Some(event))) => { if let Err(error) = projection.event(event, &mut store) { failure=Some(error); break; } },
+                Some(Ok(Some(event))) => {
+                    let mut previous = *lifecycle.borrow();
+                    if event["type"] == "agent_start" { previous.failed = false; }
+                    if event["type"] == "message_end" && event["message"]["stopReason"] == "error" {
+                        previous.failed = true; lifecycle.send_replace(previous);
+                    }
+                    let next = match event["type"].as_str() {
+                        Some("agent_start" | "auto_retry_start" | "compaction_start") => Some(Lifecycle::Busy),
+                        Some("agent_settled") => Some(Lifecycle::Idle),
+                        _ => None,
+                    };
+                    if let Err(error) = projection.event(event, &mut store) { failure=Some(error); break; }
+                    if let Some(next) = next {
+                        lifecycle.send_replace(Progress { state: next, settled: previous.settled + u64::from(next == Lifecycle::Idle), failed:previous.failed });
+                    }
+                },
                 Some(Err(error)) => { failure=Some(error); break; },
                 _ => { failure=Some(AppError::new("PROCESS_EXIT", "Pi 进程已退出，当前内容与草稿已保留")); break; }
             },
@@ -533,6 +604,11 @@ async fn actor(
     }
     let _ = child.kill().await;
     drop(tree);
+    let previous = *lifecycle.borrow();
+    lifecycle.send_replace(Progress {
+        state: Lifecycle::Stopped,
+        ..previous
+    });
 }
 
 #[cfg(test)]

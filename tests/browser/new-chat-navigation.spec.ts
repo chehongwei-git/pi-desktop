@@ -57,18 +57,26 @@ test('returns from a new-chat draft to existing sessions', async ({ page }) => {
           return { recentProjects: [], extraPath: [] };
         if (command === 'save_settings') return;
         if (command === 'list_sessions') return sessions;
-        if (command === 'connect_pi')
+        if (command === 'list_activity') return [];
+        if (command === 'submit_new_task') {
+          return { desktopTask: 'new-task', runtimeId: 'reserved-new' };
+        }
+        if (command === 'connect_pi') {
+          sessionFile = args.sessionPath ?? 'original.jsonl';
           return {
-            runtimeId: 'runtime',
+            runtimeId: args.sessionPath
+              ? `runtime-${args.sessionPath}`
+              : 'runtime',
             project: cwd,
             snapshot: snapshot(),
             version: '1.4.0',
             verified: true,
           };
+        }
         if (command === 'next_events') {
           const events = extensionEvents;
           extensionEvents = [];
-          return { runtimeId: 'runtime', sequence: 1, events };
+          return { runtimeId: args.runtimeId, sequence: 1, events };
         }
         if (command === 'perform') {
           switch (args.action.type) {

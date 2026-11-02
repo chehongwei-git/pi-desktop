@@ -25,6 +25,9 @@ pub fn load(dir: &Path) -> Result<Settings> {
 
 /// 同目录临时文件持久化，避免中断时留下半个 JSON；仅保留最近 20 项目。
 pub fn save(dir: &Path, settings: &Settings) -> Result<()> {
+    if !(1..=16).contains(&settings.max_concurrent_tasks) {
+        return Err(AppError::new("SETTINGS", "并发任务数须为 1 至 16"));
+    }
     if !(80..=150).contains(&settings.zoom) {
         return Err(AppError::new(
             "SETTINGS",
@@ -95,17 +98,39 @@ mod tests {
         fs::write(dir.path().join("settings.json"), r#"{"schemaVersion":1}"#).unwrap();
         let mut settings = load(dir.path()).unwrap();
         assert!(settings.project_models.is_empty());
-        settings.project_models.push(crate::types::ProjectModelPreference {
-            project: "工作项目".into(),
-            provider: "test".into(),
-            model: "model-b".into(),
-            thinking_level: "high".into(),
-        });
+        settings
+            .project_models
+            .push(crate::types::ProjectModelPreference {
+                project: "工作项目".into(),
+                provider: "test".into(),
+                model: "model-b".into(),
+                thinking_level: "high".into(),
+            });
         save(dir.path(), &settings).unwrap();
         let saved = load(dir.path()).unwrap();
         assert_eq!(saved.project_models[0].project, "工作项目");
         assert_eq!(saved.project_models[0].model, "model-b");
         assert_eq!(saved.project_models[0].thinking_level, "high");
+    }
+    /// 旧配置补默认值，非法并发上限不能进入调度器。
+    #[test]
+    fn concurrency_limit_is_backward_compatible_and_validated() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("settings.json"), r#"{"schemaVersion":1}"#).unwrap();
+        assert_eq!(load(dir.path()).unwrap().max_concurrent_tasks, 4);
+        for limit in [0, 17] {
+            let settings = Settings {
+                max_concurrent_tasks: limit,
+                ..Settings::default()
+            };
+            assert!(save(dir.path(), &settings).is_err());
+        }
+        let settings = Settings {
+            max_concurrent_tasks: 8,
+            ..Settings::default()
+        };
+        save(dir.path(), &settings).unwrap();
+        assert_eq!(load(dir.path()).unwrap().max_concurrent_tasks, 8);
     }
     #[test]
     fn invalid_zoom_is_rejected() {

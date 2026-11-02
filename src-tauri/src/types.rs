@@ -46,7 +46,7 @@ pub struct SidebarItem {
     pub state: Option<String>,
 }
 
-/// 工作项目的会话统一使用此模型偏好；不含凭据，不修改历史消息。
+/// 工作项目的新会话默认偏好；已有会话独立，不含凭据也不改写历史。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProjectModelPreference {
@@ -72,6 +72,8 @@ pub struct Settings {
     pub project_models: Vec<ProjectModelPreference>,
     pub theme: String,
     pub zoom: u32,
+    /// 全应用共享的执行名额，旧配置默认四个。
+    pub max_concurrent_tasks: u32,
 }
 impl Default for Settings {
     /// 未配置时自动发现 Pi，采用系统主题，不创建默认工作项目。
@@ -89,6 +91,7 @@ impl Default for Settings {
             project_models: vec![],
             theme: "system".into(),
             zoom: 100,
+            max_concurrent_tasks: 4,
         }
     }
 }
@@ -238,6 +241,17 @@ pub enum Action {
         id: String,
         value: Value,
     },
+}
+
+/// 新会话初始提交的启动快照；排队期间不持有子进程。
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NewTaskRequest {
+    pub project: String,
+    pub submission_id: String,
+    pub action: Action,
+    pub model: Option<(String, String)>,
+    pub thinking: Option<String>,
 }
 
 /// 每个批次单调递增；runtimeId 隔离重启前的迟到数据。

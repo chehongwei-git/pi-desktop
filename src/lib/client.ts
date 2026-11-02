@@ -9,6 +9,8 @@ import type {
   Settings,
   Snapshot,
   Wakeup,
+  TaskActivity,
+  NewTaskRequest,
 } from './types';
 export interface Connected {
   runtimeId: string;
@@ -22,14 +24,19 @@ export const bridge = {
   connect(
     project: string,
     receive: (event: Wakeup) => void,
+    sessionPath?: string,
   ): Promise<Connected> {
     const channel = new Channel<Wakeup>();
     channel.onmessage = receive;
-    return invoke('connect_pi', { project, channel });
+    return invoke('connect_pi', { project, channel, sessionPath });
   },
   /** 只允许白名单 Action；泛型仅描述对应业务响应。 */
-  action<T = unknown>(runtimeId: string, action: Action): Promise<T> {
-    return invoke('perform', { runtimeId, action });
+  action<T = unknown>(
+    runtimeId: string,
+    action: Action,
+    submissionId?: string,
+  ): Promise<T> {
+    return invoke('perform', { runtimeId, action, submissionId });
   },
   /** 提交已归并的 sequence，以便宿主释放已确认 spool。 */
   events(runtimeId: string, ack: number): Promise<EventBatch> {
@@ -40,8 +47,43 @@ export const bridge = {
     return invoke('read_content', { runtimeId, id, offset });
   },
   /** 正常退出可等待自身进程树回收。 */
-  disconnect(force = false): Promise<void> {
-    return invoke('disconnect_pi', { force });
+  disconnect(force = false, runtimeId?: string): Promise<void> {
+    return invoke('disconnect_pi', { force, runtimeId });
+  },
+  /** 预分配任务身份，宿主领取名额后才启动 Pi。 */
+  submitNew(
+    project: string,
+    submissionId: string,
+    action: Action,
+    model: [string, string] | undefined,
+    thinking: string | undefined,
+    receive: (event: Wakeup) => void,
+  ): Promise<{ desktopTask: string; runtimeId: string }> {
+    const channel = new Channel<Wakeup>();
+    channel.onmessage = receive;
+    const request: NewTaskRequest = {
+      project,
+      submissionId,
+      action,
+      model,
+      thinking,
+    };
+    return invoke('submit_new_task', { request, channel });
+  },
+  activity(): Promise<TaskActivity[]> {
+    return invoke('list_activity');
+  },
+  submission(submissionId: string): Promise<TaskActivity | null> {
+    return invoke('get_submission', { submissionId });
+  },
+  cancelTask(taskId: string): Promise<void> {
+    return invoke('cancel_queued_task', { taskId });
+  },
+  pauseTasks(paused: boolean): Promise<void> {
+    return invoke('pause_tasks', { paused });
+  },
+  exit(force = false): Promise<void> {
+    return invoke('exit_app', { force });
   },
   /** 专用接口仅返回认证元数据，凭据替换通过明确动作提交。 */
   modelConfig(): Promise<ModelSettings> {

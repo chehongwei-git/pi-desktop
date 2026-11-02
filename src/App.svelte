@@ -4,9 +4,10 @@
   import { open } from '@tauri-apps/plugin-dialog';
   import { getCurrentWebview } from '@tauri-apps/api/webview';
   import { isTauri } from '@tauri-apps/api/core';
-  import { Desktop } from './lib/state/desktop.svelte';
+  import { Workspace } from './lib/state/workspace.svelte';
+  import { listen } from '@tauri-apps/api/event';
   import { errorMessage } from './lib/client';
-  import type { Message, SessionSummary } from './lib/types';
+  import type { Message, SidebarSessionEntry } from './lib/types';
   import ProjectPicker from './lib/components/ProjectPicker.svelte';
   import CommandComposer from './lib/components/CommandComposer.svelte';
   import Icon from './lib/components/Icon.svelte';
@@ -24,8 +25,28 @@
   import MessageNotice from './lib/components/MessageNotice.svelte';
   import ContextUsage from './lib/components/ContextUsage.svelte';
   import PlanTodos from './lib/components/PlanTodos.svelte';
-  const desktop = new Desktop();
-  let resumeFollow = $state(0);
+  const workspace = new Workspace();
+  let desktop = $derived(workspace.active);
+  $effect(() => {
+    if (workspace.error) {
+      desktop.error = workspace.error;
+      workspace.error = '';
+    }
+  });
+  let exitPrimary = $state<HTMLButtonElement>();
+  let exitReturn: HTMLElement | null = null;
+  $effect(() => {
+    if (workspace.exitRequested) {
+      exitReturn =
+        document.activeElement instanceof HTMLElement
+          ? document.activeElement
+          : null;
+      void tick().then(() => exitPrimary?.focus({ preventScroll: true }));
+    } else if (exitReturn?.isConnected) {
+      exitReturn.focus({ preventScroll: true });
+      exitReturn = null;
+    }
+  });
   let noticesExpanded = $state(false);
   let noticeCount = $derived(
     Number(!!desktop.error) +
@@ -263,12 +284,12 @@
     const after = dropAfter;
     clearProjectDrag();
     if (source)
-      void desktop.guard(() => desktop.moveProject(source, target, after));
+      void desktop.guard(() => workspace.moveProject(source, target, after));
   }
   function projectReorderKey(event: KeyboardEvent, path: string): void {
     if (!event.altKey || !['ArrowUp', 'ArrowDown'].includes(event.key)) return;
     event.preventDefault();
-    const order = desktop.projects;
+    const order = workspace.projects;
     const index = order.findIndex(
       (project) =>
         desktop.projectKey(project.path) === desktop.projectKey(path),
@@ -278,20 +299,24 @@
     if (target) {
       const button = event.currentTarget as HTMLButtonElement;
       void desktop.guard(async () => {
-        await desktop.moveProject(path, target.path, after);
+        await workspace.moveProject(path, target.path, after);
         await tick();
         button.focus({ preventScroll: true });
       });
     }
   }
   let searching = $derived(!!search.trim());
-  function matchesSession(session: SessionSummary): boolean {
+  function matchesSession(session: SidebarSessionEntry): boolean {
     return `${session.name} ${session.preview} ${desktop.projectName(session.cwd)} ${session.cwd}`
       .toLowerCase()
       .includes(search.trim().toLowerCase());
   }
-  let pinnedSessions = $derived(desktop.pinnedSessions.filter(matchesSession));
-  let recentSessions = $derived(desktop.recentSessions.filter(matchesSession));
+  let pinnedSessions = $derived(
+    workspace.pinnedSessions.filter(matchesSession),
+  );
+  let recentSessions = $derived(
+    workspace.sidebarSessions.filter(matchesSession),
+  );
   let searchInput: HTMLInputElement;
   let renameOpen = $state(false);
   let renameValue = $state('');
@@ -306,7 +331,7 @@
   let themeDark = $state(false);
   let projects = $derived.by(() => {
     const query = search.trim().toLowerCase();
-    return desktop.projects
+    return workspace.projects
       .map((project) => ({
         ...project,
         sessions: query
@@ -359,7 +384,12 @@
       preferenceError = '未能读取侧栏布局，已使用默认布局。';
     }
     preferencesReady = true;
-    void desktop.init();
+    void workspace.init();
+    const stopClose = isTauri()
+      ? listen('desktop-close-requested', () => {
+          void workspace.requestExit();
+        })
+      : Promise.resolve(() => {});
     const media = window.matchMedia('(prefers-color-scheme: dark)');
     themeDark = media.matches;
     const change = () => {
@@ -368,6 +398,8 @@
     media.addEventListener('change', change);
     return () => {
       media.removeEventListener('change', change);
+      workspace.dispose();
+      void stopClose.then((stop) => stop());
     };
   });
   $effect(() => {
@@ -448,22 +480,31 @@
     });
   }
   /** 复用 Pi 恢复历史；被扩展取消时门面保持原状态。 */
-  function selectSession(project: string, path: string, label = ''): void {
+  function selectSession(session: SidebarSessionEntry): void {
     leaveSettings(
       () => {
         desktop.requestSwitch('打开历史会话', async () => {
-          await desktop.openSession(project, path);
+          await workspace.openEntry(session);
           hideSettings();
           sidebarCollection = null;
           sidebar = window.innerWidth > 900;
         });
       },
-      label ? `打开会话「${label}」` : '打开历史会话',
+      `打开会话「${session.name || session.preview || '新对话'}」`,
     );
   }
   /** 快捷键与普通输入不冲突；原生 dialog 已处理 Escape/焦点约束。 */
   function keydown(event: KeyboardEvent): void {
     if (event.defaultPrevented) return;
+    if (
+      event.key === 'Escape' &&
+      workspace.exitRequested &&
+      !workspace.exiting
+    ) {
+      event.preventDefault();
+      workspace.exitRequested = false;
+      return;
+    }
     if (
       event.key === 'Escape' &&
       sidebar &&
@@ -568,12 +609,12 @@
   }}
 />
 {#snippet sessionItem(
-  session: SessionSummary,
+  session: SidebarSessionEntry,
   showProject = false,
   location = 'project',
 )}
-  <div data-entry={`${location}:${session.path}`}>
-    {#if editing?.kind === 'session' && editing.entry === `${location}:${session.path}`}
+  <div data-entry={`${location}:${session.id}`}>
+    {#if session.path && editing?.kind === 'session' && editing.entry === `${location}:${session.id}`}
       <SidebarRename
         {desktop}
         kind="session"
@@ -587,18 +628,11 @@
       <SidebarSession
         {session}
         {showProject}
-        active={desktop.newChatProject === null &&
-          session.path === desktop.snapshot.sessionFile}
-        pinned={desktop.isPinned(session.path)}
+        active={workspace.isSelected(session)}
+        pinned={workspace.isPinned(session)}
         busy={desktop.pinSaving}
-        disabled={!!desktop.openingSession}
-        onopen={() =>
-          selectSession(
-            session.cwd,
-            session.path,
-            session.name || session.preview || session.timestamp,
-          )}
-        onpin={() => desktop.guard(() => desktop.togglePin(session.path))}
+        onopen={() => selectSession(session)}
+        onpin={() => desktop.guard(() => workspace.togglePin(session))}
       />
     {/if}
   </div>
@@ -673,7 +707,7 @@
             </button>
           </div>
           {#if isSectionExpanded('pinned', pinnedOpen)}
-            {#each pinnedSessions as session (session.path)}
+            {#each pinnedSessions as session (session.id)}
               {@render sessionItem(session, true, 'pinned')}
             {:else}<div class="history-empty">
                 {searching ? '没有匹配的置顶会话' : '点击会话旁的图钉置顶'}
@@ -781,6 +815,9 @@
                       <Icon name="folder" size={17} /><span class="project-name"
                         >{desktop.projectName(project.path)}</span
                       >
+                      {#if workspace.projectArchived(project.path)}<small
+                          >已归档</small
+                        >{/if}
                       <small>{project.sessions.length}</small>
                     </button>
                     <button
@@ -800,7 +837,7 @@
                 {/if}
                 {#if expanded}
                   <div class="project-sessions">
-                    {#each project.sessions.slice(0, projectLimits[project.path] ?? 20) as session (session.path)}
+                    {#each project.sessions.slice(0, projectLimits[project.path] ?? 20) as session (session.id)}
                       {@render sessionItem(session)}
                     {:else}<div class="history-empty">
                         暂无会话，点击 + 开始对话
@@ -858,7 +895,7 @@
             </button>
           </div>
           {#if isSectionExpanded('recent', recentOpen)}
-            {#each recentSessions.slice(0, recentLimit) as session (session.path)}
+            {#each recentSessions.slice(0, recentLimit) as session (session.id)}
               {@render sessionItem(session, true, 'recent')}
             {:else}<div class="history-empty">
                 {searching ? '没有匹配的会话' : '暂无最近会话'}
@@ -900,6 +937,26 @@
     </div>
   </aside>
   <main class="main-pane">
+    {#if workspace.exitRequested}
+      <div class="queue-hint" role="region" aria-label="退出应用确认">
+        <strong
+          >有 {workspace.running} 个执行中、{workspace.queued} 个排队任务</strong
+        >
+        <span>退出会停止所有项目的任务，重启后不会自动重跑。</span>
+        <button
+          disabled={workspace.exiting}
+          onclick={() => (workspace.exitRequested = false)}>继续工作</button
+        >
+        <button
+          bind:this={exitPrimary}
+          disabled={workspace.exiting}
+          onclick={() => workspace.exit()}>停止任务并退出</button
+        >
+        {#if workspace.forceExitAvailable}<button
+            onclick={() => workspace.exit(true)}>强制停止并退出</button
+          >{/if}
+      </div>
+    {/if}
     {#snippet notices(inHeader = false)}
       <!-- svelte-ignore a11y_no_noninteractive_element_interactions (容器仅接收子控件冒泡的 Escape，入口与返回均为原生按钮。) -->
       <section
@@ -1202,41 +1259,56 @@
                 }}>连接 Pi</button
               >{/if}
           </div>
-        {:else}{#key `${desktop.runtimeId}:${desktop.snapshot.sessionFile ?? ''}`}<Transcript
-              messages={desktop.messages}
-              {activity}
-              resumeFollow={resumeFollow + desktop.sentMessageRevision}
-              hasMore={desktop.hasMore}
-              loading={desktop.loadingHistory}
-              onolder={(beforeInsert) =>
-                desktop.refreshHistory(desktop.before, beforeInsert)}
-              onfull={(message) => {
-                void showFull(message);
-              }}
-              toolViews={desktop.toolViews}
-              ontoggletool={(id, section) => desktop.toggleTool(id, section)}
-              read={(id, offset) => desktop.readContent(id, offset)}
-              onvisible={(ids) => desktop.pinVisible(ids)}
-              onload={(message) => desktop.loadPreview(message)}
-              onerror={(message) => {
-                desktop.error = message;
-              }}
-            />{/key}{/if}
+        {/if}
+        {#each workspace.retained as session (session)}
+          <div
+            class="session-transcript"
+            hidden={session !== desktop || empty || !!desktop.openingSession}
+          >
+            {#if session.messages.length}
+              <Transcript
+                messages={session.messages}
+                activity={session === desktop ? activity : null}
+                active={session === desktop &&
+                  !empty &&
+                  !desktop.openingSession}
+                scrollState={session.scrollState}
+                resumeFollow={session.sentMessageRevision}
+                hasMore={session.hasMore}
+                loading={session.loadingHistory}
+                onolder={(beforeInsert) =>
+                  session.refreshHistory(session.before, beforeInsert)}
+                onfull={(message) => {
+                  if (session === desktop) void showFull(message);
+                }}
+                toolViews={session.toolViews}
+                ontoggletool={(id, section) => session.toggleTool(id, section)}
+                read={(id, offset) => session.readContent(id, offset)}
+                onvisible={(ids) => session.pinVisible(ids)}
+                onload={(message) => session.loadPreview(message)}
+                onerror={(message) => {
+                  session.error = message;
+                }}
+              />
+            {/if}
+          </div>
+        {/each}
         <div class="composer-area">
           {#if desktop.extensions[0]}
             {@const request = desktop.extensions[0]}
-            {#key request.id}
+            {#key `${desktop.runtimeId}:${request.id}`}
               <ExtensionDialog
                 {request}
-                onrespond={(value) => {
-                  // 确认扩展选项表示继续当前任务；取消和超时仍保留阅读位置。
-                  // 在当前组件内同步通知，避免异步响应误滚动切换后的会话。
+                onrespond={async (value) => {
+                  const owner = desktop;
+                  await owner.respond(request, value);
+                  // 只有写入成功且用户仍在此会话时恢复底部跟随。
                   if (
+                    owner === desktop &&
                     !value.cancelled &&
                     (value.value !== undefined || value.confirmed === true)
                   )
-                    resumeFollow++;
-                  void desktop.guard(() => desktop.respond(request, value));
+                    owner.sentMessageRevision++;
                 }}
               />
             {/key}
@@ -1277,6 +1349,21 @@
                 </details>{/if}
             {/each}
           {/if}
+          {#if desktop.task?.state === 'queued'}<div
+              class="queue-hint"
+              role="status"
+            >
+              排队中，第 {desktop.task.position || '…'} 位；其他项目的任务仍在执行。
+              <button
+                onclick={() => desktop.guard(() => workspace.cancel(desktop))}
+                >取消排队</button
+              >
+            </div>{/if}
+          {#if workspace.sessions.filter((item) => item.project === desktop.project && item.task?.state === 'running').length > 1}
+            <div class="queue-hint">
+              此项目的多个会话正在执行，它们共享文件修改。
+            </div>
+          {/if}
           {#if desktop.queued.length}<div class="queue-hint">
               已排队 {desktop.queued.length} 条消息
             </div>{/if}
@@ -1293,7 +1380,7 @@
             </div>{/if}
           {#if desktop.newChatProject !== null || empty}
             <ProjectPicker
-              projects={desktop.projects}
+              projects={workspace.projects}
               project={displayProject}
               disabled={!!desktop.openingSession ||
                 desktop.connection === 'starting'}
@@ -1303,14 +1390,14 @@
               }}
             />
           {/if}
-          <CommandComposer
-            {desktop}
-            onsend={(mode) => {
-              void desktop.guard(async () => {
-                await desktop.send(mode);
-              });
-            }}
-          />
+          {#key desktop}<CommandComposer
+              {desktop}
+              onsend={(mode) => {
+                void desktop.guard(async () => {
+                  await desktop.send(mode);
+                });
+              }}
+            />{/key}
           <div class="composer-footnote">
             <p class="composer-note">
               Pi 在本地项目中工作，请检查重要改动。{#if desktop.version}<span

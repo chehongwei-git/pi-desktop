@@ -12,6 +12,8 @@
   import type { ContentPage, Message } from '../types';
   let {
     messages,
+    active = true,
+    scrollState = { top: 0, follow: true },
     activity = null,
     resumeFollow = 0,
     hasMore = false,
@@ -26,6 +28,9 @@
     read,
   }: {
     messages: Message[];
+    active?: boolean;
+    /** 被缓存视图卸载后仍能恢复阅读位置。 */
+    scrollState?: { top: number; follow: boolean; changeId?: string };
     /** 活动提示属于列表内容，复用底部跟随且不干扰上翻阅读。 */
     activity?: Activity | null;
     /** 消息提交成功或确认扩展操作时恢复跟随；普通进度更新不能打断阅读。 */
@@ -73,6 +78,7 @@
     pauseFollow();
     const saved = anchor();
     change = message;
+    scrollState.changeId = message?.id;
     if (trigger) changeTrigger = trigger;
     await tick();
     if (!alive || !viewport) return;
@@ -86,7 +92,7 @@
   function update(): void {
     cancelAnimationFrame(frame);
     frame = requestAnimationFrame(() => {
-      if (!alive || !viewport) return;
+      if (!alive || !viewport || !active) return;
       if (follow && !pending) {
         viewport.scrollTop = viewport.scrollHeight;
         lastScrollTop = viewport.scrollTop;
@@ -145,12 +151,12 @@
     }
   }
   function checkOlder(): void {
-    if (!alive || !viewport) return;
+    if (!alive || !viewport || !active) return;
     if (!error && viewport.scrollTop <= 200 && hasMore && !loading && !pending)
       void older();
   }
   function scroll(): void {
-    if (!alive || !viewport) return;
+    if (!alive || !viewport || !active) return;
     const top = viewport.scrollTop;
     atBottom = isAtBottom();
     // 操作区收起会使浏览器夹紧 scrollTop；布局变化本身不代表用户上翻。
@@ -162,10 +168,14 @@
     lastScrollTop = top;
     lastScrollHeight = viewport.scrollHeight;
     lastClientHeight = viewport.clientHeight;
+    scrollState.top = top;
+    scrollState.follow = follow;
     checkOlder();
   }
   onMount(() => {
     mounted = true;
+    if (scrollState.changeId)
+      change = messages.find((message) => message.id === scrollState.changeId);
     const observer = new IntersectionObserver(checkOlder, {
       root: viewport,
       rootMargin: '200px 0px 0px',
@@ -175,18 +185,37 @@
     const resize = new ResizeObserver(update);
     resize.observe(content);
     resize.observe(viewport);
+    viewport.scrollTop = scrollState.top;
+    follow = scrollState.follow;
     update();
     return () => {
       alive = false;
+      onvisible([]);
       observer.disconnect();
       resize.disconnect();
       cancelAnimationFrame(frame);
     };
   });
   $effect(() => {
-    resumeFollow;
-    follow = true;
-    if (mounted) update();
+    if (active && mounted) {
+      viewport.scrollTop = scrollState.top;
+      follow = scrollState.follow;
+      update();
+    }
+  });
+  let followRevision: number | undefined;
+  $effect(() => {
+    const revision = resumeFollow;
+    if (followRevision === undefined) {
+      followRevision = revision;
+      return;
+    }
+    if (followRevision !== revision) {
+      followRevision = revision;
+      follow = true;
+      scrollState.follow = true;
+      if (mounted) update();
+    }
   });
   $effect(() => {
     // 普通列表的所有节点都仍在使用，禁止正文缓存淘汰导致已读内容突然缩短。

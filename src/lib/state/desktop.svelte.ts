@@ -23,7 +23,32 @@ import {
   type Wakeup,
 } from '../types';
 
+/** 工作区只负责导航与共享配置，单会话保留既有 RPC 状态机。 */
+export interface SessionNavigation {
+  open(project: string, path: string): Promise<void>;
+  draft(project: string, preserve: boolean): void;
+  connect(project: string): Promise<void>;
+  ensure(): Promise<void>;
+  changed(): void;
+}
 export class Desktop {
+  /** 桌面身份早于 Pi 文件存在，排队转历史及恢复时继续沿用。 */
+  desktopId = $state(crypto.randomUUID() as string);
+  createdAt = $state(new Date().toISOString());
+  lastSentAt = $state('');
+  /** 索引尚未收录时保留首条输入摘要，任务结束后侧栏标题仍然可用。 */
+  sidebarPreview = $state('');
+  restored = $state(false);
+  navigation?: SessionNavigation;
+  task = $state<import('../types').TaskActivity | null>(null);
+  taskInput: { text: string; images: MessageImage[] } | null = null;
+  scrollState: { top: number; follow: boolean; changeId?: string } = {
+    top: 0,
+    follow: true,
+  };
+  private loadedHistoryCount = 0;
+  /** 只标记尚未查看的执行结果，不因后台输出抢焦点。 */
+  unread = $state(false);
   settings = $state<Settings>({
     ...defaultSettings,
     recentProjects: [],
@@ -232,9 +257,10 @@ export class Desktop {
     source: string,
     target: string,
     after = false,
+    projectPaths = this.projects.map((project) => project.path),
   ): Promise<void> {
     if (this.projectOrderSaving) return;
-    const order = this.projects.map((project) => project.path);
+    const order = [...projectPaths];
     const from = order.findIndex(
       (path) => this.projectKey(path) === this.projectKey(source),
     );
@@ -259,10 +285,15 @@ export class Desktop {
   expandedProjects = $state<string[]>([]);
   /** 与 Pi header.cwd 分组；Windows 路径忽略大小写与分隔符差异。 */
   projectKey(path: string): string {
-    const normalized = path.replace(/\\/g, '/').replace(/\/$/, '');
-    return /^[a-z]:\//i.test(normalized)
-      ? normalized.toLowerCase()
-      : normalized;
+    const normalized =
+      path
+        .replace(/\\/g, '/')
+        .replace(/^\/\/\?\//, '')
+        .replace(/\/$/, '') || (path ? '/' : '');
+    const key = normalized.replace(/^unc\//i, '//');
+    return /^[a-z]:(?:\/|$)/i.test(key) || key.startsWith('//')
+      ? key.toLowerCase()
+      : key;
   }
   get projects(): { path: string; sessions: SessionSummary[] }[] {
     const groups = new Map<
@@ -391,6 +422,10 @@ export class Desktop {
   }
   /** “+”只准备本地草稿，首次发送前不创建或切换 Pi 会话。 */
   prepareNewChat(project = this.project, preserveDraft = false): void {
+    if (this.navigation) {
+      this.navigation.draft(project, preserveDraft);
+      return;
+    }
     if (this.openingSession || this.submitting) return;
     this.drafts.set(this.draftKey(), this.draft);
     const text = this.draft;
@@ -441,10 +476,7 @@ export class Desktop {
   }
   /** Windows RPC 与磁盘索引可使用不同分隔符、大小写和长路径前缀。 */
   private sessionKey(path: string): string {
-    const normalized = path.replace(/\\/g, '/').replace(/^\/\/\?\//, '');
-    return /^[a-z]:\//i.test(normalized) || normalized.startsWith('//')
-      ? normalized.toLowerCase()
-      : normalized;
+    return this.projectKey(path);
   }
   private sessionLabel(path: string): string {
     const session = this.sessions.find(
@@ -481,11 +513,18 @@ export class Desktop {
   private accessed = new Map<string, number>();
   private accessSerial = 0;
   private submissionSerial = 0;
+  private initialSubmission?: {
+    id: string;
+    fingerprint: string;
+    generation?: number;
+  };
   /** 普通列表报告所有已挂载消息；已读正文不能被缓存淘汰后突然缩短。 */
   pinVisible(ids: string[]): void {
     this.visible = new Set(ids);
     for (const id of ids) this.accessed.set(id, ++this.accessSerial);
   }
+  private respondingExtensions = new Set<string>();
+  private extensionTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private stopTimer?: ReturnType<typeof setTimeout>;
   private stopping = false;
   /** 依赖注入仅用在真正需要替换的 IPC 边界，不建立全局 DI 容器。 */
@@ -530,10 +569,43 @@ export class Desktop {
   }
   /** 所有业务动作自动携带 runtimeId，避免旧窗口请求误入新进程。 */
   async action<T = unknown>(action: Action): Promise<T> {
-    return this.api.action<T>(this.runtimeId, action);
+    const submission =
+      this.navigation &&
+      (action.type === 'prompt' ||
+        action.type === 'compact' ||
+        (action.type === 'navigate_tree' && action.summarize))
+        ? `${this.runtimeId}-${++this.submissionSerial}`
+        : undefined;
+    let result: T;
+    try {
+      result = await (submission
+        ? this.api.action<T>(this.runtimeId, action, submission)
+        : this.api.action<T>(this.runtimeId, action));
+    } catch (error) {
+      // 只查询提交记录，不重新发送；IPC 失败也可能发生在宿主已接受之后。
+      const accepted = submission
+        ? await this.api.submission(submission).catch(() => null)
+        : null;
+      if (!accepted) throw error;
+      result = { desktopTask: accepted.taskId } as T;
+    }
+    if (result && typeof result === 'object' && 'desktopTask' in result) {
+      this.task = {
+        taskId: String(result.desktopTask),
+        runtimeId: this.runtimeId,
+        state: 'queued',
+        position: 0,
+      };
+      this.navigation?.changed();
+    }
+    return result;
   }
   /** 项目/历史切换通过此事务入口；运行时由弹层明确选择停止、等待或取消。 */
   requestSwitch(label: string, execute: () => Promise<void>): void {
+    if (this.navigation) {
+      void this.guard(execute);
+      return;
+    }
     if (this.openingSession) return;
     if (this.run !== 'idle') {
       this.pendingSwitch = { label, execute, waiting: false };
@@ -558,8 +630,13 @@ export class Desktop {
   }
   /** 连接时先安装通知，starting 阶段也处理扩展信任/输入请求。 */
   connect(project: string): Promise<void> {
+    if (this.navigation) return this.navigation.connect(project);
+    return this.connectLocal(project);
+  }
+  /** 工作区绑定的独立实例使用此入口，避免导航递归。 */
+  connectLocal(project: string): Promise<void> {
     if (this.connectionTask)
-      return this.connectionTask.then(() => this.connect(project));
+      return this.connectionTask.then(() => this.connectLocal(project));
     this.connectionTask = this.connectProject(project).finally(() => {
       this.connectionTask = null;
     });
@@ -622,7 +699,19 @@ export class Desktop {
         this.refreshSessions(),
         this.refreshStats(),
       ]);
-      if (generation === this.generation) await this.applyProjectModel();
+      // 空闲进程淘汰后恢复原先已读窗口，避免同一个 scrollTop 落到另一段历史。
+      while (
+        generation === this.generation &&
+        this.hasMore &&
+        this.messages.length < this.loadedHistoryCount
+      ) {
+        await this.refreshHistory(this.before, undefined, true);
+      }
+      if (
+        generation === this.generation &&
+        (!this.navigation || !this.snapshot.sessionFile)
+      )
+        await this.applyProjectModel();
     } catch (error) {
       if (generation === this.generation) {
         this.connection = 'failed';
@@ -636,7 +725,18 @@ export class Desktop {
     if (!this.runtimeId && this.connection === 'starting')
       this.runtimeId = event.runtimeId;
     if (event.runtimeId !== this.runtimeId) return;
+    if (event.type === 'initialized') {
+      this.snapshot = event.snapshot;
+      this.project = event.project;
+      this.connection = 'ready';
+      this.newChatProject = null;
+      void this.refreshMetadata();
+      return;
+    }
     if (event.type === 'failed') {
+      for (const timer of this.extensionTimers.values()) clearTimeout(timer);
+      this.extensionTimers.clear();
+      this.extensions = [];
       this.connection = 'failed';
       this.run = 'idle';
       this.error = errorMessage(event.error);
@@ -668,6 +768,9 @@ export class Desktop {
         for (const event of batch.events) {
           // reset 是会话边界，按事件顺序清理；不能在批次末尾保留旧会话 widget。
           if (event.type === 'reset') {
+            for (const timer of this.extensionTimers.values())
+              clearTimeout(timer);
+            this.extensionTimers.clear();
             this.widgets = {};
             this.statuses = {};
             this.extensions = [];
@@ -718,7 +821,7 @@ export class Desktop {
     }
   }
   /** 正文预算 8MiB，挂载窗口与流式块除外；仅淘汰可由引用重载的文本。 */
-  private trimCache(): void {
+  trimCache(budget = 8 * 1024 * 1024): void {
     let bytes = this.messages.reduce(
       (sum, m) => sum + (m.text.length + m.thinking.length) * 2,
       0,
@@ -733,7 +836,7 @@ export class Desktop {
       (a, b) => (this.accessed.get(a.id) ?? 0) - (this.accessed.get(b.id) ?? 0),
     );
     for (const message of candidates) {
-      if (bytes <= 8 * 1024 * 1024) break;
+      if (bytes <= budget) break;
       bytes -= message.text.length * 2;
       message.text = '';
     }
@@ -761,8 +864,18 @@ export class Desktop {
         });
         return;
       }
-      if (!this.extensions.some((e) => e.id === request.id))
+      if (!this.extensions.some((e) => e.id === request.id)) {
         this.extensions.push(request);
+        // 后台视图不挂载交互组件，超时仍须按到达时间响应，而非等用户打开。
+        if (this.navigation && request.timeout && request.timeout > 0) {
+          this.extensionTimers.set(
+            request.id,
+            setTimeout(() => {
+              void this.guard(() => this.respond(request, { cancelled: true }));
+            }, request.timeout),
+          );
+        }
+      }
       return;
     }
     if (request.method === 'notify') this.notice = request.message ?? '';
@@ -773,7 +886,7 @@ export class Desktop {
         terminalText,
       );
     if (request.method === 'setTitle')
-      document.title = request.title || 'Pi Desktop';
+      this.currentSessionTitle = request.title || '';
     if (request.method === 'set_editor_text') {
       if (this.draft) this.recovered.push(this.draft);
       this.draft = request.text ?? '';
@@ -784,9 +897,22 @@ export class Desktop {
     request: ExtensionRequest,
     value: { value?: string; confirmed?: boolean; cancelled?: boolean },
   ): Promise<void> {
-    if (!this.extensions.some((e) => e.id === request.id)) return;
-    this.extensions = this.extensions.filter((e) => e.id !== request.id);
-    await this.action({ type: 'extension_response', id: request.id, value });
+    if (
+      !this.extensions.some((e) => e.id === request.id) ||
+      this.respondingExtensions.has(request.id)
+    )
+      return;
+    this.respondingExtensions.add(request.id);
+    const generation = this.generation;
+    clearTimeout(this.extensionTimers.get(request.id));
+    this.extensionTimers.delete(request.id);
+    try {
+      await this.action({ type: 'extension_response', id: request.id, value });
+      if (generation === this.generation)
+        this.extensions = this.extensions.filter((e) => e.id !== request.id);
+    } finally {
+      this.respondingExtensions.delete(request.id);
+    }
   }
   /** 查询模型/命令可失败降级，不影响已建立的文本会话。 */
   async refreshMetadata(): Promise<void> {
@@ -865,6 +991,7 @@ export class Desktop {
   }
   /** 已有历史直接交给 Pi 切换，Pi 根据 header.cwd 重建项目服务。 */
   async openSession(project: string, path: string): Promise<void> {
+    if (this.navigation) return this.navigation.open(project, path);
     if (this.openingSession) return;
     // 新对话尚未提交时，后台仍是原会话；返回它只需退出本地草稿页。
     // 避免重新恢复同一会话触发扩展切换钩子，使返回操作被取消或挂起。
@@ -898,6 +1025,10 @@ export class Desktop {
   }
   /** 新建期间屏蔽连接/reset 的中间状态，避免旧记录随 runtime/session key 反复挂载。 */
   async newSession(project = this.project): Promise<void> {
+    if (this.navigation) {
+      this.navigation.draft(project, false);
+      return;
+    }
     if (this.openingSession) return;
     // 直接新建（如 /new）没有草稿页，仍需沿用新建前显示的模型与强度。
     // 草稿首次发送路径由 send() 负责，这里不重复捕获。
@@ -918,8 +1049,12 @@ export class Desktop {
   async refreshHistory(
     before?: number,
     beforeInsert?: () => void,
+    restoring = false,
   ): Promise<void> {
-    if (before !== undefined && (this.loadingHistory || this.openingSession))
+    if (
+      before !== undefined &&
+      (this.loadingHistory || (this.openingSession && !restoring))
+    )
       return;
     const generation = this.generation;
     const session = this.snapshot.sessionFile;
@@ -1011,13 +1146,120 @@ export class Desktop {
       offset = page.next;
     }
   }
+  /** 初始提示词先进入宿主队列，获得名额后才分配进程；附件只在内存保留。 */
+  private async submitDraft(): Promise<void> {
+    if (this.submitting || this.openingSession) return;
+    const text = this.draft;
+    const images = this.images;
+    if (images.length && text.trimStart().startsWith('/'))
+      throw new Error('图片不能与斜杠命令一起发送。');
+    const model = this.selectedModel;
+    if (images.length && model?.input && !model.input.includes('image'))
+      throw new Error('当前模型不支持图片输入。');
+    const project = this.newChatProject ?? this.project;
+    const fingerprint = JSON.stringify([
+      project,
+      text,
+      images.map((image) => image.id),
+      model?.provider,
+      model?.id,
+      this.selectedThinking,
+    ]);
+    if (this.initialSubmission?.fingerprint !== fingerprint)
+      this.initialSubmission = { id: crypto.randomUUID(), fingerprint };
+    const submissionId = this.initialSubmission.id;
+    this.submitting = true;
+    this.project = project;
+    this.connection = 'starting';
+    // 同一未知提交重查时沿用 Channel 代次，宿主去重后原监听仍能接收事件。
+    const generation = (this.initialSubmission.generation ??= ++this
+      .generation);
+    this.ack = 0;
+    try {
+      let result: { desktopTask: string; runtimeId: string };
+      try {
+        result = await this.api.submitNew(
+          project,
+          submissionId,
+          {
+            type: 'prompt',
+            message: text,
+            ...(images.length
+              ? {
+                  images: images.map((image) => ({
+                    type: 'image' as const,
+                    data: image.data!,
+                    mimeType: image.mimeType,
+                  })),
+                }
+              : {}),
+          },
+          model ? [model.provider, model.id] : undefined,
+          this.selectedThinking,
+          (event) => this.receive(event, generation),
+        );
+      } catch (error) {
+        const accepted = await this.api
+          .submission(submissionId)
+          .catch(() => null);
+        if (!accepted) throw error;
+        result = {
+          desktopTask: accepted.taskId,
+          runtimeId: accepted.runtimeId,
+        };
+      }
+      this.initialSubmission = undefined;
+      this.runtimeId = result.runtimeId;
+      this.newChatProject = null;
+      this.connection = 'ready';
+      this.task = {
+        taskId: result.desktopTask,
+        runtimeId: result.runtimeId,
+        state: 'queued',
+        position: 0,
+      };
+      this.taskInput = { text, images };
+      this.sidebarPreview ||= text.replace(/\s+/g, ' ').trim().slice(0, 80);
+      this.lastSentAt = new Date().toISOString();
+      this.restored = false;
+      if (this.draft === text) this.draft = '';
+      const sent = new Set(images.map((image) => image.id));
+      this.images = this.images.filter((image) => !sent.has(image.id));
+      this.sentMessageRevision++;
+      this.navigation?.changed();
+    } catch (error) {
+      this.connection = 'disconnected';
+      throw error;
+    } finally {
+      this.submitting = false;
+    }
+  }
   /** 发送接受前保留原草稿，超时绝不自动重发；用户消息由 Pi 权威事件插入。 */
   async send(mode?: 'steer' | 'followUp'): Promise<void> {
+    if (
+      this.navigation &&
+      this.newChatProject !== null &&
+      (this.draft.trim() || this.images.length) &&
+      !parseBuiltin(this.draft)
+    ) {
+      await this.submitDraft();
+      return;
+    }
+    if (
+      this.navigation &&
+      this.newChatProject === null &&
+      (this.draft.trim() || this.images.length)
+    ) {
+      if (this.submitting || this.openingSession) return;
+      await this.navigation.ensure();
+    }
+    if (this.task?.state === 'queued')
+      throw new Error('此会话正在排队，请等待开始或取消排队。');
     if (
       (!this.draft.trim() && !this.images.length) ||
       this.submitting ||
       this.openingSession ||
-      this.connection !== 'ready'
+      (this.connection !== 'ready' && this.newChatProject === null)
     )
       return;
     const text = this.draft;
@@ -1036,7 +1278,7 @@ export class Desktop {
         this.run = 'compacting';
         this.notice = '正在压缩会话上下文…';
         try {
-          await this.action({
+          const result = await this.action<{ desktopTask?: string }>({
             type: 'compact',
             instructions: builtin.args || undefined,
           });
@@ -1046,6 +1288,10 @@ export class Desktop {
           )
             return;
           if (this.draft === text) this.draft = '';
+          if (result?.desktopTask) {
+            this.notice = '压缩任务已提交，按全局队列执行。';
+            return;
+          }
           await this.refreshCommandSession();
           this.notice = '会话上下文已压缩。';
         } catch (error) {
@@ -1100,7 +1346,11 @@ export class Desktop {
       await this.applyCarriedModel(this.newChatModel, this.newChatThinking);
       this.clearDraftModel();
     }
-    if (this.projectModel(this.project) && this.run === 'idle')
+    if (
+      !this.navigation &&
+      this.projectModel(this.project) &&
+      this.run === 'idle'
+    )
       await this.applyProjectModel();
     if (
       images.length &&
@@ -1136,7 +1386,7 @@ export class Desktop {
     if (this.run !== 'aborting' && this.run !== 'compacting') this.notice = '';
     this.submitting = true;
     try {
-      await this.action({
+      const result = await this.action<{ desktopTask?: string }>({
         type: 'prompt',
         message: text,
         mode: delivery,
@@ -1150,6 +1400,16 @@ export class Desktop {
             }
           : {}),
       });
+      if (result?.desktopTask) {
+        this.task = {
+          taskId: result.desktopTask,
+          runtimeId: this.runtimeId,
+          state: 'queued',
+          position: 0,
+        };
+        this.taskInput = { text, images };
+        this.navigation?.changed();
+      }
       // 迟到的提交结果不能把新会话的阅读位置拉到底部。
       if (
         generation === this.generation &&
@@ -1158,6 +1418,9 @@ export class Desktop {
         !this.openingSession
       )
         this.sentMessageRevision++;
+      this.sidebarPreview ||= text.replace(/\s+/g, ' ').trim().slice(0, 80);
+      this.lastSentAt = sentAt;
+      this.restored = false;
       if (sessionFile) this.sentAt[this.sessionKey(sessionFile)] = sentAt;
       const pending = this.messages.find((message) => message.id === pendingId);
       if (pending?.delivery) pending.delivery.state = 'queued';
@@ -1278,6 +1541,11 @@ export class Desktop {
   }
   /** 新建/切换只在成功且未被扩展取消后提交 UI 状态；返回是否真正切换。 */
   async switchSession(path?: string, project = this.project): Promise<boolean> {
+    if (this.navigation) {
+      if (path) await this.navigation.open(project, path);
+      else this.navigation.draft(project, false);
+      return true;
+    }
     if (!this.project) return false;
     const title = path
       ? this.sessionLabel(path) || this.openingSession?.title || ''
@@ -1334,11 +1602,25 @@ export class Desktop {
     }
     return true;
   }
+  /** 空闲淘汰前确认事件已消费；临时引用随进程关闭失效，随后从历史重载。 */
+  async releaseIdle(canRelease = () => true): Promise<void> {
+    if (this.run !== 'idle' || this.extensions.length || this.submitting)
+      return;
+    await this.drain();
+    if (!canRelease() || this.run !== 'idle' || this.extensions.length) return;
+    this.loadedHistoryCount = this.messages.length;
+    await this.disconnect();
+    this.messages = [];
+    this.visible.clear();
+    this.accessed.clear();
+  }
   /** 强制断开不是重试，不重发任何提示词。 */
   async disconnect(force = false): Promise<void> {
     this.connection = 'stopping';
+    for (const timer of this.extensionTimers.values()) clearTimeout(timer);
+    this.extensionTimers.clear();
     ++this.generation;
-    await this.api.disconnect(force);
+    await this.api.disconnect(force, this.runtimeId);
     this.connection = 'disconnected';
     this.runtimeId = '';
     this.run = 'idle';
@@ -1382,16 +1664,28 @@ export class Desktop {
    * 无偏好时优先显示草稿沿用/显式选择，否则显示当前连接会话的模型。
    */
   get selectedModel(): Model | undefined {
-    const preference = this.projectModel();
-    if (preference)
-      return this.modelByKey(preference.provider, preference.model);
+    const preference =
+      !this.navigation || this.newChatProject !== null
+        ? this.projectModel()
+        : undefined;
     if (this.newChatProject !== null && this.newChatModel)
       return this.modelByKeyString(this.newChatModel);
+    if (preference)
+      return this.modelByKey(preference.provider, preference.model);
+
     return this.snapshot.model;
   }
   get selectedThinking(): string {
+    if (
+      this.navigation &&
+      this.newChatProject !== null &&
+      this.newChatThinking !== undefined
+    )
+      return this.newChatThinking;
     return (
-      this.projectModel()?.thinkingLevel ??
+      (this.navigation && this.newChatProject === null
+        ? undefined
+        : this.projectModel()?.thinkingLevel) ??
       (this.newChatProject !== null && this.newChatThinking !== undefined
         ? this.newChatThinking
         : (this.snapshot.thinkingLevel ?? 'off'))
@@ -1425,6 +1719,12 @@ export class Desktop {
   /** 恢复项目统一值；旧会话自身记录不能覆盖项目选择，发送前也会重新核对。 */
   private async applyProjectModel(): Promise<void> {
     const preference = this.projectModel(this.project);
+    if (
+      this.navigation &&
+      this.snapshot.sessionFile &&
+      this.newChatProject === null
+    )
+      return;
     if (!preference || this.run !== 'idle') return;
     const key = `${preference.provider}/${preference.model}`;
     if (
@@ -1437,23 +1737,34 @@ export class Desktop {
   }
   /** 模型与强度确认后统一保存到工作项目，不修改其他项目。 */
   async setModel(key: string): Promise<void> {
+    if (this.navigation && this.newChatProject !== null) {
+      this.newChatModel = key;
+      return;
+    }
     const model = this.models.find((m) => `${m.provider}/${m.id}` === key);
     if (!model) return;
     const project = this.newChatProject ?? this.project;
     const runtime = this.runtimeId;
     const session = this.snapshot.sessionFile;
-    await this.applyModel(key, this.projectModel(project)?.thinkingLevel);
+    await this.applyModel(
+      key,
+      this.navigation ? undefined : this.projectModel(project)?.thinkingLevel,
+    );
     if (runtime !== this.runtimeId || session !== this.snapshot.sessionFile)
       return;
     if (this.newChatProject !== null) this.newChatModel = key;
-    await this.rememberProjectModel(project);
+    if (!this.navigation) await this.rememberProjectModel(project);
   }
   /** 所有强度入口共用此方法，确保项目模型与强度作为一组持久化。 */
   async setThinking(level: string): Promise<void> {
+    if (this.navigation && this.newChatProject !== null) {
+      this.newChatThinking = level;
+      return;
+    }
     const project = this.newChatProject ?? this.project;
     const runtime = this.runtimeId;
     const session = this.snapshot.sessionFile;
-    const preference = this.projectModel(project);
+    const preference = this.navigation ? undefined : this.projectModel(project);
     if (
       preference &&
       (this.snapshot.model?.provider !== preference.provider ||
@@ -1476,7 +1787,7 @@ export class Desktop {
     await this.syncState();
     if (runtime !== this.runtimeId || session !== this.snapshot.sessionFile)
       return;
-    if (project && this.snapshot.model)
+    if (!this.navigation && project && this.snapshot.model)
       await this.rememberProjectModel(project);
   }
   /**
@@ -1487,7 +1798,7 @@ export class Desktop {
     key: string | null,
     thinking: string | undefined,
   ): Promise<void> {
-    if (!key || this.projectModel(this.project)) return;
+    if (!key || (!this.navigation && this.projectModel(this.project))) return;
     const slash = key.indexOf('/');
     const provider = slash > 0 ? key.slice(0, slash) : '';
     const id = slash > 0 ? key.slice(slash + 1) : key;

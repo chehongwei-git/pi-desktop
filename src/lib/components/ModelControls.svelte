@@ -48,7 +48,8 @@
       busy ||
       desktop.submitting ||
       !!desktop.openingSession ||
-      desktop.connection !== 'ready' ||
+      (desktop.connection !== 'ready' && desktop.newChatProject === null) ||
+      desktop.task?.state === 'queued' ||
       desktop.run !== 'idle',
   );
 

@@ -311,15 +311,14 @@
 
 {#if desktop.recoveredImages.length}<div
     role="group"
-    aria-label="可恢复的图片消息"
+    aria-label="可恢复的未发送消息"
   >
     {#each desktop.recoveredImages as draft, index}<button
         type="button"
         onclick={() => desktop.restoreImages(index)}
-        >恢复图片消息（{draft.images.length} 张）{draft.text.slice(
-          0,
-          60,
-        )}</button
+        >恢复{draft.images.length
+          ? `图片消息（${draft.images.length} 张）`
+          : '未发送消息'}{draft.text.slice(0, 60)}</button
       >{/each}
   </div>{/if}
 <Composer
@@ -341,7 +340,8 @@
     modelChanging ||
     busy ||
     loading ||
-    desktop.connection !== 'ready'}
+    (desktop.connection !== 'ready' && desktop.newChatProject === null) ||
+    desktop.task?.state === 'queued'}
   unavailableCommands={[
     ...(!desktop.commands.some(
       (command) => command.name === 'pi-desktop-reload-v1',

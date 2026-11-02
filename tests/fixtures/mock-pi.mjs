@@ -176,11 +176,16 @@ for await (const line of readline.createInterface({
       reply(request, {});
       streaming = true;
       emit({ type: 'agent_start' });
+      // 调度测试保持执行链，直到显式 abort，避免依赖机器速度。
+      if (request.message.startsWith('hold:')) break;
       emit({
         type: 'message_end',
         message: {
           role: 'user',
-          content: [{ type: 'text', text: request.message }, ...(request.images ?? [])],
+          content: [
+            { type: 'text', text: request.message },
+            ...(request.images ?? []),
+          ],
         },
       });
       emit({
