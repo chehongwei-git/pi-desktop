@@ -24,6 +24,22 @@ function message(
   };
 }
 describe('统一处理过程', () => {
+  it('keeps plan completion visible outside collapsed tools in live and historical messages', () => {
+    for (const status of ['running', 'done', 'error']) {
+      const rows = processRows([
+        message('read', 'toolResult'),
+        message('plan', 'toolResult', { name: 'plan_mode_complete', status }),
+        message('later', 'toolResult'),
+      ]);
+      expect(rows.map((row) => row.kind)).toEqual([
+        'process',
+        'message',
+        'process',
+      ]);
+      expect(rows[1]).toMatchObject({ id: 'plan', message: { status } });
+      expect(rows[0].id).not.toBe(rows[2].id);
+    }
+  });
   it('keeps all commentary visible and folds only tools and thinking between replies', () => {
     const rows = processRows([
       message('progress', 'assistant', {

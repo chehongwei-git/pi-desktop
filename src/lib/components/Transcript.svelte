@@ -5,7 +5,8 @@
   import ProcessGroup from './ProcessGroup.svelte';
   import ConversationActivity from './ConversationActivity.svelte';
   import type { ConversationActivity as Activity } from '../conversation-activity';
-  import { processRows } from '../process-groups';
+  import { isPlanComplete, processRows } from '../process-groups';
+  import PlanMessage from './PlanMessage.svelte';
   import ChangePanel from './ChangePanel.svelte';
   import Icon from './Icon.svelte';
   import type { ContentPage, Message } from '../types';
@@ -240,21 +241,34 @@
     <div class="message-list" bind:this={content}>
       {#snippet renderMessage(message: Message)}
         <div class="message-item" data-message-id={message.id}>
-          <MessageView
-            {message}
-            onchange={(message, trigger) => {
-              void showChange(message, trigger);
-            }}
-            {onfull}
-            {onload}
-            {onerror}
-            {toolViews}
-            {read}
-            ontoggletool={(id, section) => {
-              pauseFollow();
-              ontoggletool(id, section);
-            }}
-          />
+          {#if isPlanComplete(message)}
+            <PlanMessage
+              {message}
+              {read}
+              {onerror}
+              {toolViews}
+              ontoggletool={(id, section) => {
+                pauseFollow();
+                ontoggletool(id, section);
+              }}
+            />
+          {:else}
+            <MessageView
+              {message}
+              onchange={(message, trigger) => {
+                void showChange(message, trigger);
+              }}
+              {onfull}
+              {onload}
+              {onerror}
+              {toolViews}
+              {read}
+              ontoggletool={(id, section) => {
+                pauseFollow();
+                ontoggletool(id, section);
+              }}
+            />
+          {/if}
         </div>
       {/snippet}
       {#each rows as row (row.id)}

@@ -4,12 +4,26 @@ export type TranscriptRow =
   | { kind: 'message'; id: string; message: Message }
   | { kind: 'process'; id: string; messages: Message[]; info?: ProcessInfo };
 
+/** 仅识别 Plan 完成工具，避免把普通工具输出提升为最终回复。 */
+export function isPlanComplete(message: Message): boolean {
+  return (
+    message.role === 'toolResult' &&
+    (message.tool?.name ?? message.name) === 'plan_mode_complete'
+  );
+}
+
 /** 普通正文始终可见；仅将正文之间连续的工具与思考合并，单次线性遍历。 */
 export function processRows(messages: Message[]): TranscriptRow[] {
   const rows: TranscriptRow[] = [];
   let group: Extract<TranscriptRow, { kind: 'process' }> | undefined;
   const usedIds = new Set<string>();
   for (const message of messages) {
+    // 最终计划是面向用户的交付内容，即使没有普通助手正文也必须直接可见。
+    if (isPlanComplete(message)) {
+      rows.push({ kind: 'message', id: message.id, message });
+      group = undefined;
+      continue;
+    }
     const assistant = message.role === 'assistant';
     if (message.role === 'toolResult' || (assistant && message.thinking)) {
       if (!group) {
