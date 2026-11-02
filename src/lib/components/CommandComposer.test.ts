@@ -254,6 +254,7 @@ describe('inline command menus', () => {
       .spyOn(desktop, 'switchSession')
       .mockImplementation(async () => {
         desktop.snapshot.sessionFile = 'next';
+        return true;
       });
     const view = render(CommandComposer, { desktop, onsend: vi.fn() });
     await fireEvent.keyDown(view.getByRole('textbox'), { key: 'Enter' });

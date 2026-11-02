@@ -886,6 +886,7 @@ describe('desktop business behavior', () => {
     });
     vi.spyOn(desktop, 'switchSession').mockImplementation(async (path) => {
       order.push(`session:${path}`);
+      return true;
     });
     await desktop.openSession('other-project', 'history.jsonl');
     expect(order).toEqual(['session:history.jsonl']);
@@ -1040,7 +1041,7 @@ describe('desktop business behavior', () => {
     vi.spyOn(desktop, 'refreshSessions').mockResolvedValue();
     const switchSession = vi
       .spyOn(desktop, 'switchSession')
-      .mockResolvedValue();
+      .mockResolvedValue(true);
     const warming = desktop.connect('alpha');
     const opening = desktop.openSession('beta', 'b.jsonl');
     expect(connect).toHaveBeenCalledOnce();

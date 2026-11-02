@@ -355,6 +355,40 @@ export class Desktop {
   // 首次发送创建真实会话会恢复 Pi 默认模型，显式选择需在创建后再次应用。
   private newChatModel: string | null = null;
   private newChatThinking: string | undefined;
+  private clearDraftModel(): void {
+    this.newChatModel = null;
+    this.newChatThinking = undefined;
+  }
+  /**
+   * 无保存偏好且模型仍在目录中时，返回当前显示的模型与强度。
+   * 目录未就绪或模型已删除时不沿用，退回 Pi 默认值，避免把不可用模型带入发送。
+   */
+  private carriedModel(
+    project: string,
+  ): { key: string; thinking: string } | null {
+    if (this.projectModel(project)) return null;
+    const model = this.selectedModel;
+    if (
+      !model ||
+      !this.models.some(
+        (item) => item.provider === model.provider && item.id === model.id,
+      )
+    )
+      return null;
+    return {
+      key: `${model.provider}/${model.id}`,
+      thinking: this.selectedThinking,
+    };
+  }
+  /** 目标项目已有偏好时交给项目偏好；否则沿用切换前显示的模型，避免首次发送后回落 Pi 默认值。 */
+  private captureDraftModel(project: string): void {
+    // 先读取当前显示值再清理旧草稿选择，否则会读到清空后的快照默认值。
+    const carried = this.carriedModel(project);
+    this.clearDraftModel();
+    if (!carried) return;
+    this.newChatModel = carried.key;
+    this.newChatThinking = carried.thinking;
+  }
   /** “+”只准备本地草稿，首次发送前不创建或切换 Pi 会话。 */
   prepareNewChat(project = this.project, preserveDraft = false): void {
     if (this.openingSession || this.submitting) return;
@@ -362,8 +396,11 @@ export class Desktop {
     const text = this.draft;
     const images = this.images;
     this.saveImageDraft();
-    if (this.newChatProject !== project && !preserveDraft)
-      this.newChatModel = null;
+    // Windows 大小写与分隔符别名视为同一项目，不因路径写法差异重置草稿选择。
+    const changed =
+      this.newChatProject === null ||
+      this.projectKey(this.newChatProject) !== this.projectKey(project);
+    if (changed) this.captureDraftModel(project);
     this.newChatProject = project;
     this.draft = preserveDraft
       ? text
@@ -552,6 +589,8 @@ export class Desktop {
       this.stats = null;
       this.currentSessionTitle = '';
       this.newChatProject = null;
+      // 重连或切换项目后不得把旧草稿模型隐式应用到新会话。
+      this.clearDraftModel();
       this.connection = 'ready';
       if (
         modelRevision === this.modelConfigRevision &&
@@ -838,7 +877,7 @@ export class Desktop {
       this.drafts.set(this.draftKey(), this.draft);
       this.saveImageDraft();
       this.newChatProject = null;
-      this.newChatModel = null;
+      this.clearDraftModel();
       this.draft = this.drafts.get(this.draftKey()) ?? '';
       this.restoreImageDraft();
       await this.applyProjectModel();
@@ -860,11 +899,17 @@ export class Desktop {
   /** 新建期间屏蔽连接/reset 的中间状态，避免旧记录随 runtime/session key 反复挂载。 */
   async newSession(project = this.project): Promise<void> {
     if (this.openingSession) return;
+    // 直接新建（如 /new）没有草稿页，仍需沿用新建前显示的模型与强度。
+    // 草稿首次发送路径由 send() 负责，这里不重复捕获。
+    const carried =
+      this.newChatProject === null ? this.carriedModel(project) : null;
     this.openingSession = { path: '', title: '新对话' };
     try {
       if (this.connectionTask) await this.connectionTask;
       if (this.connection !== 'ready') await this.connect(project);
-      else await this.switchSession(undefined, project);
+      else if (!(await this.switchSession(undefined, project))) return;
+      if (carried && this.connection === 'ready')
+        await this.applyCarriedModel(carried.key, carried.thinking);
     } finally {
       this.openingSession = null;
     }
@@ -1036,7 +1081,8 @@ export class Desktop {
     }
     if (this.newChatProject !== null) {
       // 创建真实会话也会恢复默认强度，在创建前保留输入区的最终选择。
-      if (this.newChatModel)
+      // 已捕获的显示值优先，仅在缺省时补当前快照强度。
+      if (this.newChatModel && this.newChatThinking === undefined)
         this.newChatThinking = this.snapshot.thinkingLevel ?? 'off';
       const project = this.newChatProject;
       try {
@@ -1050,12 +1096,9 @@ export class Desktop {
       this.draft = text;
     }
     if (this.newChatModel) {
-      // 项目偏好优先于早先的草稿选择，失败重试不重复创建会话。
-      const preference = this.projectModel(this.project);
-      if (!preference)
-        await this.applyModel(this.newChatModel, this.newChatThinking);
-      this.newChatModel = null;
-      this.newChatThinking = undefined;
+      // 项目偏好优先于草稿沿用的选择；应用失败时保留选择，重试不再创建会话。
+      await this.applyCarriedModel(this.newChatModel, this.newChatThinking);
+      this.clearDraftModel();
     }
     if (this.projectModel(this.project) && this.run === 'idle')
       await this.applyProjectModel();
@@ -1233,9 +1276,9 @@ export class Desktop {
       }
     }
   }
-  /** 新建/切换只在成功且未被扩展取消后提交 UI 状态。 */
-  async switchSession(path?: string, project = this.project): Promise<void> {
-    if (!this.project) return;
+  /** 新建/切换只在成功且未被扩展取消后提交 UI 状态；返回是否真正切换。 */
+  async switchSession(path?: string, project = this.project): Promise<boolean> {
+    if (!this.project) return false;
     const title = path
       ? this.sessionLabel(path) || this.openingSession?.title || ''
       : '';
@@ -1250,13 +1293,13 @@ export class Desktop {
     );
     if (result.cancelled) {
       this.notice = '切换已被 Pi 扩展取消';
-      return;
+      return false;
     }
     ++this.historyRequest;
     this.loadingHistory = false;
     this.stats = null;
     this.currentSessionTitle = title;
-    if (path) this.newChatModel = null;
+    if (path) this.clearDraftModel();
     // 仅创建成功才消费本地草稿；打开历史、创建取消或失败均保留它。
     if (!path && this.newChatProject !== null) {
       this.drafts.delete(this.draftKey());
@@ -1289,6 +1332,7 @@ export class Desktop {
       ].slice(0, 20);
       await this.api.save($state.snapshot(this.settings));
     }
+    return true;
   }
   /** 强制断开不是重试，不重发任何提示词。 */
   async disconnect(force = false): Promise<void> {
@@ -1315,24 +1359,42 @@ export class Desktop {
       (item) => this.projectKey(item.project) === this.projectKey(project),
     );
   }
-  /** 跨项目本地草稿显示其项目偏好，后台会话仍在原项目。 */
+  /** 目录中精确匹配；偏好引用的模型可能已从配置移除，按原键展示以便提示。 */
+  private modelByKey(provider: string, id: string): Model {
+    return (
+      this.models.find(
+        (model) => model.provider === provider && model.id === id,
+      ) ?? { provider, id, name: id }
+    );
+  }
+  /** 草稿选择以 key 保存，目录刷新后仍可显示；未命中时按首个斜杠拆分。 */
+  private modelByKeyString(key: string): Model | undefined {
+    const exact = this.models.find(
+      (model) => `${model.provider}/${model.id}` === key,
+    );
+    if (exact) return exact;
+    const slash = key.indexOf('/');
+    if (slash <= 0) return undefined;
+    return this.modelByKey(key.slice(0, slash), key.slice(slash + 1));
+  }
+  /**
+   * 跨项目本地草稿显示其项目偏好，后台会话仍在原项目。
+   * 无偏好时优先显示草稿沿用/显式选择，否则显示当前连接会话的模型。
+   */
   get selectedModel(): Model | undefined {
     const preference = this.projectModel();
-    return preference
-      ? (this.models.find(
-          (model) =>
-            model.provider === preference.provider &&
-            model.id === preference.model,
-        ) ?? {
-          provider: preference.provider,
-          id: preference.model,
-          name: preference.model,
-        })
-      : this.snapshot.model;
+    if (preference)
+      return this.modelByKey(preference.provider, preference.model);
+    if (this.newChatProject !== null && this.newChatModel)
+      return this.modelByKeyString(this.newChatModel);
+    return this.snapshot.model;
   }
   get selectedThinking(): string {
     return (
-      this.projectModel()?.thinkingLevel ?? this.snapshot.thinkingLevel ?? 'off'
+      this.projectModel()?.thinkingLevel ??
+      (this.newChatProject !== null && this.newChatThinking !== undefined
+        ? this.newChatThinking
+        : (this.snapshot.thinkingLevel ?? 'off'))
     );
   }
   private async rememberProjectModel(project: string): Promise<void> {
@@ -1416,6 +1478,26 @@ export class Desktop {
       return;
     if (project && this.snapshot.model)
       await this.rememberProjectModel(project);
+  }
+  /**
+   * 新建会话后再次应用草稿沿用的模型；目标项目已有偏好时以偏好为准。
+   * 与 Pi 快照一致时不重复 RPC，失败向上抛出以保留草稿且不发送。
+   */
+  private async applyCarriedModel(
+    key: string | null,
+    thinking: string | undefined,
+  ): Promise<void> {
+    if (!key || this.projectModel(this.project)) return;
+    const slash = key.indexOf('/');
+    const provider = slash > 0 ? key.slice(0, slash) : '';
+    const id = slash > 0 ? key.slice(slash + 1) : key;
+    if (
+      this.snapshot.model?.provider === provider &&
+      this.snapshot.model?.id === id &&
+      (thinking === undefined || this.snapshot.thinkingLevel === thinking)
+    )
+      return;
+    await this.applyModel(key, thinking);
   }
   private async applyModel(
     key: string,
