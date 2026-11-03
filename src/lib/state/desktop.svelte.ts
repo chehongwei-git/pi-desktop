@@ -783,8 +783,7 @@ export class Desktop {
           (p) => this.projectKey(p) !== this.projectKey(this.project),
         ),
       ].slice(0, 20);
-      if (!connected.verified)
-        this.notice = `Pi ${connected.version} 未经本版验证，将按 RPC 能力连接。`;
+      // 版本基线仅供设置诊断；连接成功不提示版本差异，实际 RPC 故障仍按错误展示。
       // 启动 reset 必须先消费，但不能清空正在阅读的旧视图；随后历史给出权威正文。
       this.suppressTranscript = preserve;
       try {

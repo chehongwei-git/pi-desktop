@@ -1,6 +1,6 @@
 # RPC 与平台兼容
 
-协议参考本机 Pi 1.4.0。其他版本显示未经验证提示；连接握手要求 `get_state` 与 `get_entries` 可用，否则清理子进程并报错。客户端不包含 Pi npm 运行依赖。
+协议最初参考 Pi 1.4.0。版本基线仅用于设置页主动检测的诊断信息；连接成功不因版本差异显示全局提示，后续升级 Pi 同样适用。连接握手要求 `get_state` 与 `get_entries` 可用，否则清理子进程并显示具体错误。客户端不包含 Pi npm 运行依赖。
 
 | 能力 | 命令 / 事件 | 行为 |
 | --- | --- | --- |
@@ -31,5 +31,20 @@
 TUI custom 组件、任意终端 UI 与交互式终端命令无法原样呈现。客户端没有内置终端；扩展仍在 Pi 进程内拥有原有工具能力，桌面权限配置不构成 Agent 沙箱。
 
 Windows 使用 npm 布局解析 Node+JS 或直接原生 exe，不执行未知 cmd/ps1。Unix 使用可执行入口、shebang 或显式运行时+JS。额外 PATH 仅对子进程生效，不加载登录 shell。
+
+## Pi 1.5.0 核对
+
+依据本机安装包的 CHANGELOG 与 RPC 文档核对，未发现本版新增的必需 RPC 协议迁移。Windows 下用隔离配置执行 `scripts/verify-process-pool.mjs` 已通过真实进程验证：状态读取、跨项目会话切换、相对路径、桥接命令重新加载和同项目新建。该验证不调用模型，不代表付费请求及第三方扩展已全部验收；macOS/Linux 尚未实机验证。
+
+| 1.5.0 变化 | 桌面影响与适配结论 |
+| --- | --- |
+| GPT-6.1 Terra、模型目录更新、thinking off | 现有模型列表从 Pi 动态读取，无需硬编码新模型；已有关闭思考入口。实际服务商请求仍需单独验收 |
+| 工具参数校验改为 pi-schema | 桌面桥接只注册命令，不定义 TypeBox 工具参数，未直接受影响；第三方扩展使用 Refine、BigInt、Undefined、codecs 或自定义 Format 时需迁移到 JSON Schema 可表达的规则 |
+| 大工具参数增量解析、TUI 渲染缓存 | Pi 的解析优化随升级生效；TUI 渲染优化不会自动优化桌面的 Svelte/Markdown 渲染 |
+| responseModel、cost.totalFromProvider | 可选增强：展示实际响应模型及费用来源。当前桌面消息投影未展示这两项，不影响现有 RPC 连接 |
+| 扩展更新日志、collapseChangelog | 桌面暂无扩展更新日志专用入口，可按产品需求补充 |
+| custom UI 的 blocked 选项 | RPC 的 custom() 仍返回 undefined，不能直接映射到桌面等待交互；扩展应使用 RPC 支持的 select/confirm/input/editor |
+| 自定义更新命令、设备码登录、MCP OAuth 改进 | 由 Pi CLI 或运行时处理；桌面暂无自更新与 OAuth 登录专用流程 |
+| pi.exec 的 maxBuffer/truncated、进程终止和 UTF-8 修复 | 当前桌面桥接不调用 pi.exec，无需迁移；使用该 API 的第三方扩展可利用截断标志 |
 
 Windows x64 NSIS 为优先交付目标，缺少 WebView2 时联网引导。macOS unsigned app、Linux deb 先作为 CI 验证产物，仍待各平台实机验收；没有签名、公证或自动更新支持。

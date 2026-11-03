@@ -625,6 +625,23 @@ describe('cross-project workspace', () => {
         ?.name,
     ).toBe('登录修复');
   });
+  it('shows the final response failure without recovering the submitted prompt', async () => {
+    const { workspace, tasks } = fixture();
+    await workspace.init();
+    const session = workspace.active;
+    session.draft = '已发送的问题';
+    await session.send();
+    session.draft = '正在编辑的下一条';
+    tasks[0] = { ...tasks[0], state: 'running', position: 0 };
+    await workspace['poll']();
+    tasks[0] = { ...tasks[0], state: 'failed', error: '重试后响应仍失败' };
+    await workspace['poll']();
+    expect(session.error).toBe('重试后响应仍失败');
+    expect(session.run).toBe('idle');
+    expect(session.recoveredImages).toEqual([]);
+    expect(session.taskInput).toBeNull();
+    expect(session.draft).toBe('正在编辑的下一条');
+  });
   it('restores a cancelled queued prompt without overwriting the new draft', async () => {
     const { workspace } = fixture();
     await workspace.init();
@@ -894,7 +911,7 @@ describe('cross-project workspace', () => {
     const entry = first.workspace.sidebarSessions.find(
       (entry) => entry.cwd === '/restored',
     )!;
-    expect(entry).toMatchObject({ path: undefined, status: '待恢复' });
+    expect(entry).toMatchObject({ path: undefined, status: '草稿' });
     const connect = vi.spyOn(first.api, 'connect');
     await first.workspace.openEntry(entry);
     expect(first.workspace.active.draft).toBe('saved draft');

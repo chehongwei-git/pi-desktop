@@ -519,8 +519,7 @@ export class Workspace {
     if (session.task?.state === 'running' || session.run !== 'idle')
       return session.run === 'aborting' ? '停止中' : '运行中';
     if (session.task?.state === 'completed') return '已完成';
-    // 已停止不显示状态，保持侧栏清爽
-    if (session.restored) return '待恢复';
+    // 本地恢复只是加载来源，不单独显示状态；未发送内容仍按草稿判断。
     if (
       !session.snapshot.sessionFile &&
       (session.draft.trim() ||
@@ -607,12 +606,13 @@ export class Workspace {
               !session.snapshot.sessionFile &&
               session.runtimeId.startsWith('reserved-')
             ) {
+              // 启动前失败才需要找回未发送输入；响应失败（含重试耗尽）仅展示错误。
+              if (session.taskInput)
+                session.recoveredImages.push(session.taskInput);
               session.runtimeId = '';
               session.connection = 'disconnected';
               session.newChatProject = session.project;
             }
-            if (session.taskInput)
-              session.recoveredImages.push(session.taskInput);
           }
           if (task.state === 'stopped') {
             session.setConnectionPhase('');
