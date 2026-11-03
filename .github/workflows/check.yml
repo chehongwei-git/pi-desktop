@@ -2,13 +2,24 @@
 name: desktop-check
 on:
   push:
+    branches: ['**']
   pull_request:
+  workflow_dispatch:
+  workflow_call:
+permissions:
+  contents: read
 jobs:
   check:
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, macos-latest, ubuntu-24.04]
+        include:
+          - os: windows-latest
+            artifact: src-tauri/target/release/bundle/nsis/*.exe
+          - os: macos-latest
+            artifact: src-tauri/target/release/bundle/macos/*.tar.gz
+          - os: ubuntu-24.04
+            artifact: src-tauri/target/release/bundle/deb/*.deb
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -37,11 +48,20 @@ jobs:
         run: npx playwright install --with-deps chromium
       - run: npm run test:browser
       - run: npm run tauri -- build --ci --no-sign -- --locked
+      # .app 必须先归档，否则 artifact 下载后会丢失可执行权限。
+      - name: Archive macOS app
+        if: runner.os == 'macOS'
+        working-directory: src-tauri/target/release/bundle/macos
+        run: tar -czf "Pi-Desktop-macOS-${{ runner.arch }}.app.tar.gz" "Pi Desktop.app"
       - uses: actions/upload-artifact@v4
         with:
           name: pi-desktop-${{ matrix.os }}-unsigned
-          path: |
-            src-tauri/target/release/bundle/nsis/*
-            src-tauri/target/release/bundle/macos/*.app
-            src-tauri/target/release/bundle/deb/*.deb
-            test-results/*.png
+          path: ${{ matrix.artifact }}
+          if-no-files-found: error
+      # 截图与安装包分开，避免截图掩盖安装包缺失，也保留失败现场。
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: screenshots-${{ matrix.os }}
+          path: test-results/
+          if-no-files-found: ignore

@@ -138,7 +138,33 @@ Tauri 会自动合并对应平台的配置并构建前端：
 
 产物位于 `src-tauri/target/release/bundle/`。当前未配置代码签名、公证或自动更新，macOS / Linux 产物仍需进一步原生验收。
 
-仓库包含 [GitHub Actions 检查配置](.github/workflows/check.yml)，用于在三个平台执行检查、测试与构建，并上传未签名验证产物；**不会自动发布 GitHub Release**。
+仓库包含 [GitHub Actions 检查配置](.github/workflows/check.yml)，分支推送、Pull Request 或手动触发时，在三个平台执行检查、测试与构建，并上传未签名验证产物。macOS `.app` 先归档为 `.app.tar.gz`，避免下载后丢失执行权限。
+
+### 发布 GitHub Release
+
+[Release 流程](.github/workflows/release.yml) 在推送 `v*` 标签时运行：校验版本 → 复用三平台检查与打包 → 创建草稿并上传附件 → 公开 Release。任何平台失败都不会进入发布步骤；上传失败时可重新运行工作流补齐草稿，已公开的版本则禁止覆盖。
+
+1. 在 GitHub 新建空仓库（不要初始化 README），允许仓库运行 GitHub Actions。组织策略也必须允许工作流使用 `contents: write`；流程仅对发布作业申请此权限，使用自动提供的 `GITHUB_TOKEN`，不需要新增 PAT Secret。
+2. 保留现有 Gitee `origin`，添加 GitHub 远程并推送当前分支（替换示例地址）：
+
+   ```sh
+   git remote add github https://github.com/YOUR_ACCOUNT/pi-desktop.git
+   git push -u github HEAD
+   ```
+
+3. 提交所有待发布改动后，确认 `package.json`、`package-lock.json`（包括根包记录）、`src-tauri/tauri.conf.json`、`src-tauri/Cargo.toml` 的版本一致，并更新 `src-tauri/Cargo.lock` 中本项目的版本。当前版本为 `0.1.0`。未来升级版本后应重新运行测试并提交锁文件。
+4. 推送版本标签，即授权自动公开该版本：
+
+   ```sh
+   git tag -a v0.1.0 -m "Release v0.1.0"
+   git push github v0.1.0
+   ```
+
+5. 在 GitHub → Actions 查看 `desktop-release`，全部成功后在 Releases 下载附件。只推送分支不会创建 Release。当前仅支持 `v主版本.次版本.修订版本` 正式版本，不支持预发布标签。
+
+默认发布 Windows runner 原生架构的 NSIS `.exe`、macOS runner 原生架构的 `.app.tar.gz`、Ubuntu 24.04 构建的 `.deb`；不提供 macOS Universal / 双架构包，也不保证 `.deb` 兼容所有 Linux 发行版。macOS 归档解压后得到 `.app`，不是 `.dmg` 安装镜像。未配置代码签名与公证，Windows SmartScreen / macOS Gatekeeper 可能提示或阻止运行。
+
+发布配置仍需在 GitHub 上实际运行三平台流水线验证；本地前端检查通过不代表安装包已完成三平台原生验收。
 
 ## 项目结构
 
