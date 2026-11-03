@@ -1,5 +1,9 @@
 # 排错
 
+“Ctrl+C 退出后再次启动提示 Port 1420 is already in use”：使用 `npm run desktop`，该入口在同一个 Node 进程中运行 Vite 和 Tauri CLI，退出时释放开发端口，避免 npm/shell 层级中的 Vite 子进程残留。正常返回和启动失败还会主动关闭 Vite。回归检查：`node --test scripts/desktop.test.mjs`。直接运行 `npm run tauri -- dev` 仍使用 Tauri 原有的 beforeDevCommand 启动链。
+
+如果旧版启动已留下占用进程，需先结束该残留实例一次；新入口不会自动终止未知的端口占用者。Windows 可在 PowerShell 用 `Get-NetTCPConnection -LocalPort 1420 -State Listen` 查看 OwningProcess，再用 `Get-CimInstance Win32_Process -Filter "ProcessId = <PID>" | Select-Object ProcessId, CommandLine` 确认属于本项目的 Vite，最后执行 `Stop-Process -Id <PID>`。不要批量结束所有 Node 进程。
+
 “未找到 Pi”：先在终端确认 Pi 可独立运行，再到设置执行诊断。Windows npm 用户通常可选择 `%APPDATA%/npm/pi.cmd`，或选择包内 `dist/bundle/cli.js` 并指定 node.exe。运行时版本要符合 Pi 要求。GUI 的 PATH 可能与终端不同，可在额外 PATH 每行补一个目录。
 
 “Pi 无法启动”：从 Finder 等桌面入口启动时不会执行 shell 配置。客户端会在继承 PATH 后补充 Pi 托管安装及运行时、nvm 的版本目录和平台常用安装目录；nvm 后备版本按版本号从高到低排列。设置中的运行时目录优先加入子进程 PATH，额外 PATH 次之，供 Pi 启动脚本及其子进程使用。若 PATH 已有旧 Node，请在设置中指定符合 Pi 要求的 Node，或在额外 PATH 添加其目录；不需要修改全局 PATH。
