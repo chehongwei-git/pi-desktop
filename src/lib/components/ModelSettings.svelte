@@ -196,7 +196,11 @@
       id,
       overrideOnly,
       // 默认关闭时同时关闭能力，指定强度后再启用。
-      values: { ...(name ? { name } : {}), reasoning: false },
+      values: {
+        ...(name ? { name } : {}),
+        reasoning: false,
+        input: ['text', 'image'],
+      },
       defaultThinking: 'off',
     });
     visibleCount = provider.models.length;
@@ -516,7 +520,8 @@
               <h3>模型与能力</h3>
               <p>
                 新模型默认关闭思考；指定强度后启用思考能力并应用对应强度。
-                图片、上下文和输出长度继承 Pi 默认。再次获取不会覆盖已有参数。
+                所有模型默认支持图片输入；上下文和输出长度继承 Pi
+                默认。再次获取不会覆盖已有参数。
               </p>
               {#if !configured.length}<p class="empty-models">
                   尚未配置模型。获取远端列表或手动添加模型 ID。

@@ -191,6 +191,15 @@ describe('model settings', () => {
     ).toBe(false);
     expect(level()).toHaveTextContent('关闭 · off');
     expect(discoverModels).toHaveBeenCalledOnce();
+    expect(
+      save.mock.calls.at(-1)?.[0].providers[0].models[0].values.input,
+    ).toEqual(['text', 'image']);
+    await fireEvent.click(view.getByRole('combobox', { name: '图片输入' }));
+    await fireEvent.click(view.getByRole('option', { name: '仅文字' }));
+    await view.component.save();
+    expect(
+      save.mock.calls.at(-1)?.[0].providers[0].models[0].values.input,
+    ).toEqual(['text']);
   });
   it('resolves inherited thinking from the global level and treats an unset global as off', async () => {
     const { desktop, config } = fixture();
@@ -242,6 +251,9 @@ describe('model settings', () => {
     );
     await fireEvent.click(view.getByRole('button', { name: '手动添加模型' }));
     expect(view.getByText('新模型')).toBeInTheDocument();
+    expect(view.getByRole('combobox', { name: '图片输入' })).toHaveTextContent(
+      '文字与图片',
+    );
     expect(view.queryByLabelText('思考能力')).not.toBeInTheDocument();
     expect(
       view.getByRole('combobox', { name: '此模型的默认思考等级' }),
