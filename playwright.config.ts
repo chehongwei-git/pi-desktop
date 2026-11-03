@@ -3,6 +3,9 @@ import { defineConfig } from '@playwright/test';
 export default defineConfig({
   testDir: 'tests/browser',
   fullyParallel: false,
+  // fullyParallel=false 仍会并行执行不同文件。CI 串行隔离重型滚动采样与页面加载，
+  // 避免有限 runner 资源争用；Windows trace 已记录模块请求 ERR_NO_BUFFER_SPACE。
+  workers: process.env.CI ? 1 : undefined,
   timeout: 30000,
   use: {
     baseURL: 'http://127.0.0.1:1420',

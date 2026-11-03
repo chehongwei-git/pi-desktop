@@ -61,26 +61,38 @@ for (const kind of ['text', 'mixed', 'expanded']) {
             });
             original(options);
           }) as typeof root.scrollTo;
-          let anchors = new Map<Element, { top: number; input: number }>();
+          let anchor:
+            { element: Element; top: number; input: number } | undefined;
+          // 夹具固定挂载全部消息；缓存容器集合，避免每帧扫描数万行代码。
+          const items = [...root.querySelectorAll('[data-message-id]')];
           let step = 0;
           host.scrollDone = false;
           const sample = () => {
             const area = root.getBoundingClientRect();
             const errors: number[] = [];
-            const next = new Map<Element, { top: number; input: number }>();
-            // 原生滚轮与测量独立执行；逐帧比较同一文字。受控模式精确记录每次输入位移。
-            for (const el of root.querySelectorAll(
-              '.markdown p, .tool-code-line',
-            )) {
-              const rect = el.getBoundingClientRect();
-              if (rect.bottom <= area.top || rect.top >= area.bottom) continue;
-              const anchor = anchors.get(el);
-              if (anchor)
+            // 先独立验证上一帧锚点，不能因本帧换了候选文字而漏掉漂移。
+            if (anchor) {
+              const rect = anchor.element.getBoundingClientRect();
+              if (rect.bottom > area.top && rect.top < area.bottom)
                 errors.push(rect.top - anchor.top + input - anchor.input);
-              // 阅读锚点取视口顶部的文字；其下方尚未测量的行折行不应被误判为锚点漂移。
-              if (!next.size) next.set(el, { top: rect.top, input });
             }
-            anchors = next;
+            anchor = undefined;
+            // 只在与视口相交的消息中找首个可见文字，保持原有锚点定义与阈值。
+            for (const item of items) {
+              const bounds = item.getBoundingClientRect();
+              if (bounds.bottom <= area.top || bounds.top >= area.bottom)
+                continue;
+              for (const element of item.querySelectorAll(
+                '.markdown p, .tool-code-line',
+              )) {
+                const rect = element.getBoundingClientRect();
+                if (rect.bottom <= area.top || rect.top >= area.bottom)
+                  continue;
+                anchor = { element, top: rect.top, input };
+                break;
+              }
+              if (anchor) break;
+            }
             trace.push({
               type: 'frame',
               input,
