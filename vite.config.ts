@@ -3,7 +3,12 @@ import { defineConfig } from 'vitest/config';
 import { svelte } from '@sveltejs/vite-plugin-svelte';
 export default defineConfig({
   plugins: [svelte()],
-  server: { port: 1420, strictPort: true },
+  server: {
+    port: 1420,
+    strictPort: true,
+    // 提前转换主页面依赖，避免首次浏览器用例与 Svelte 冷编译争用启动时间。
+    warmup: { clientFiles: ['src/main.ts'] },
+  },
   clearScreen: false,
   test: {
     environment: 'jsdom',

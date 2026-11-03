@@ -420,10 +420,22 @@ test('slash commands list executable commands, complete with keyboard and execut
     localStorage.setItem('mock-settings', JSON.stringify({ theme: 'system' }));
   });
   await mock(page);
+  const startupErrors: string[] = [];
+  page.on('pageerror', (error) => startupErrors.push(error.message));
   await page.emulateMedia({ colorScheme: 'light' });
   await page.goto('/');
   const input = page.getByRole('textbox', { name: '消息输入' });
-  await expect(input).toBeEnabled();
+  // 此文件首次加载完整主页面；仅启动阶段预留冷编译预算，不放宽后续交互断言。
+  // 页面异常立即中止等待，不能把初始化崩溃当作机器慢。
+  await expect
+    .poll(
+      async () => {
+        if (startupErrors.length) throw new Error(startupErrors.join('\n'));
+        return (await input.count()) === 1 && (await input.isEnabled());
+      },
+      { timeout: 15000, message: '主页面应完成初始化且无未处理异常' },
+    )
+    .toBe(true);
   await input.fill('/');
   const menu = page.getByRole('listbox', { name: 'Pi 命令' });
   await expect(menu.getByRole('option')).toHaveCount(13);
@@ -458,6 +470,7 @@ test('slash commands list executable commands, complete with keyboard and execut
   );
   expect(actions.some((action: any) => action.type === 'set_model')).toBe(true);
   expect(actions.some((action: any) => action.type === 'prompt')).toBe(false);
+  expect(startupErrors).toEqual([]);
 });
 
 test('tree Esc restores input during pending loading and after an error', async ({
