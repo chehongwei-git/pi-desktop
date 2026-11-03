@@ -6,11 +6,51 @@ export const bridgeCommands = {
   thinking: 'pi-desktop-thinking-v1',
 };
 
+// 请求格式由能力元数据或上游明确反馈决定，不依赖具体型号与版本。
+function usesAdaptiveThinking(model) {
+  return (
+    model?.api === 'anthropic-messages' &&
+    model.compat?.forceAdaptiveThinking === true
+  );
+}
+
 export default function desktopBridge(pi) {
+  // 仅在当前扩展生命周期缓存；按端点隔离，模型刷新后仍可复用，重载后重新识别。
+  const learnedFormats = new Map();
+  const automaticModels = new WeakSet();
+  const modelKey = (model) =>
+    JSON.stringify([model.provider, model.baseUrl, model.id]);
   // Pi 要求扩展等级显式映射；仅补缺省值，保留服务商映射和显式禁用。
-  function defaultMappings(model) {
+  function defaultMappings(model, registry) {
+    // 自定义供应商同名模型复用官方目录能力，用户无需判断新旧请求格式。
+    // 兼容 anthropic/ 前缀与点号版本；不替换模型 ID 或用户的供应商端点。
+    if (model.api === 'anthropic-messages') {
+      const id = model.id
+        .replace(/^anthropic\//, '')
+        .replace(/(\d)\.(\d)/g, '$1-$2');
+      const builtin = registry?.find('anthropic', id);
+      if (model.compat?.forceAdaptiveThinking === undefined)
+        automaticModels.add(model);
+      const format =
+        learnedFormats.get(modelKey(model)) ??
+        builtin?.compat?.forceAdaptiveThinking;
+      if (
+        model.compat?.forceAdaptiveThinking === undefined &&
+        typeof format === 'boolean'
+      ) {
+        model.compat = { ...model.compat, forceAdaptiveThinking: format };
+      }
+      if (builtin?.thinkingLevelMap) {
+        model.thinkingLevelMap = {
+          ...builtin.thinkingLevelMap,
+          ...model.thinkingLevelMap,
+        };
+      }
+    }
+    // 格式与强度分别处理，未识别模型沿用 Pi 的默认序列化路径。
     model.thinkingLevelMap = {
-      xhigh: 'xhigh',
+      // xhigh 并非所有 Anthropic 模型均支持，原生支持的模型可显式映射覆盖。
+      xhigh: model.api === 'anthropic-messages' ? 'high' : 'xhigh',
       max: 'max',
       ...model.thinkingLevelMap,
     };
@@ -18,7 +58,7 @@ export default function desktopBridge(pi) {
   // 能力反映当前强度；只修改会话正在使用的模型，不重选模型或重置等级。
   const syncReasoning = (_event, ctx) => {
     if (ctx.model) {
-      defaultMappings(ctx.model);
+      defaultMappings(ctx.model, ctx.modelRegistry);
       ctx.model.reasoning = pi.getThinkingLevel() !== 'off';
     }
   };
@@ -26,13 +66,62 @@ export default function desktopBridge(pi) {
   pi.on('model_select', syncReasoning);
   pi.on('thinking_level_select', syncReasoning);
   pi.on('before_agent_start', syncReasoning);
+  pi.on('message_end', (event, ctx) => {
+    const model = ctx.model;
+    const message = event.message;
+    if (
+      model?.api !== 'anthropic-messages' ||
+      !automaticModels.has(model) ||
+      message?.role !== 'assistant' ||
+      message.stopReason !== 'error' ||
+      typeof message.errorMessage !== 'string'
+    )
+      return;
+    // 只识别明确的格式校验错误，认证、限流、网络等故障不能触发能力猜测。
+    const error = message.errorMessage;
+    const adaptive =
+      /requires? adaptive thinking|thinking[.]type\s*(?:=|must be|:)\s*["']?adaptive/i.test(
+        error,
+      )
+        ? true
+        : /requires? (?:budget[- ]based|enabled) thinking|adaptive thinking (?:is )?not supported/i.test(
+              error,
+            )
+          ? false
+          : undefined;
+    if (
+      adaptive === undefined ||
+      model.compat?.forceAdaptiveThinking === adaptive
+    )
+      return;
+    learnedFormats.set(modelKey(model), adaptive);
+    model.compat = { ...model.compat, forceAdaptiveThinking: adaptive };
+    // 不在事件回调中重发任务；保留原始错误，让用户控制重试时机。
+    return {
+      message: {
+        ...message,
+        errorMessage: `${error}\n已识别此服务端要求 ${adaptive ? 'adaptive / effort' : 'enabled / budget_tokens'} 格式，请重试；本会话后续请求将自动适配。`,
+      },
+    };
+  });
+  pi.on('before_provider_request', (event, ctx) => {
+    // adaptive 接口的 off 省略 thinking，兼容拒绝 disabled 的上游。
+    // 省略后由上游决定默认行为，不能保证上游完全停止内部推理。
+    if (
+      usesAdaptiveThinking(ctx.model) &&
+      event.payload?.thinking?.type === 'disabled'
+    ) {
+      const { thinking, ...payload } = event.payload;
+      return payload;
+    }
+  });
   pi.registerCommand(bridgeCommands.thinking, {
     description: 'Desktop bridge v1: apply thinking capability and level',
     handler: async (args, ctx) => {
       if (!ctx.isIdle()) throw new Error('请等待当前任务完成后切换思考强度。');
       const { level } = JSON.parse(args);
       const model = ctx.model;
-      if (model) defaultMappings(model);
+      if (model) defaultMappings(model, ctx.modelRegistry);
       const levels = [
         'off',
         'minimal',

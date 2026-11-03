@@ -9,6 +9,9 @@ type Context = {
   model?: {
     provider: string;
     id: string;
+    baseUrl?: string;
+    api?: string;
+    compat?: { forceAdaptiveThinking?: boolean; supportsTemperature?: boolean };
     reasoning?: boolean;
     thinkingLevelMap?: Record<string, string | null>;
   };
@@ -66,6 +69,196 @@ function fixture() {
   };
 }
 describe('Pi desktop bridge', () => {
+  it.each(['session_start', 'model_select', 'before_agent_start'])(
+    'uses capability metadata on %s independently of model names',
+    (event) => {
+      const { ctx, events } = fixture();
+      for (const adaptive of [true, false]) {
+        ctx.model = {
+          provider: 'proxy',
+          api: 'anthropic-messages',
+          id: 'arbitrary-model',
+          compat: { forceAdaptiveThinking: adaptive },
+        };
+        events.get(event)!({}, ctx);
+        expect(ctx.model.compat?.forceAdaptiveThinking).toBe(adaptive);
+        expect(ctx.model.thinkingLevelMap?.xhigh).toBe('high');
+      }
+    },
+  );
+  it.each(['claude-sonnet-4-6', 'anthropic/claude-sonnet-4.6'])(
+    'automatically inherits official capabilities for proxy model %s',
+    (id) => {
+      const { ctx, events } = fixture();
+      ctx.model = { provider: 'proxy', api: 'anthropic-messages', id };
+      ctx.modelRegistry.find.mockReturnValue({
+        compat: { forceAdaptiveThinking: true },
+        thinkingLevelMap: { xhigh: null, max: 'max' },
+      });
+      events.get('session_start')!({}, ctx);
+      expect(ctx.modelRegistry.find).toHaveBeenCalledWith(
+        'anthropic',
+        'claude-sonnet-4-6',
+      );
+      expect(ctx.model.compat?.forceAdaptiveThinking).toBe(true);
+      expect(ctx.model.thinkingLevelMap?.xhigh).toBeNull();
+      // 用户覆盖必须优先于自动识别结果。
+      ctx.model.compat = { forceAdaptiveThinking: false };
+      ctx.model.thinkingLevelMap = { xhigh: 'high' };
+      events.get('model_select')!({}, ctx);
+      expect(ctx.model.compat.forceAdaptiveThinking).toBe(false);
+      expect(ctx.model.thinkingLevelMap.xhigh).toBe('high');
+    },
+  );
+  it('uses explicit adaptive capability for arbitrary model aliases', () => {
+    const { ctx, events } = fixture();
+    ctx.model = {
+      provider: 'proxy',
+      api: 'anthropic-messages',
+      id: 'custom-model-alias',
+      compat: { forceAdaptiveThinking: true },
+      thinkingLevelMap: { xhigh: 'xhigh' },
+    };
+    events.get('session_start')!({}, ctx);
+    expect(ctx.model.compat?.forceAdaptiveThinking).toBe(true);
+    expect(ctx.model.thinkingLevelMap?.xhigh).toBe('xhigh');
+  });
+  it('preserves explicit compatibility and effort mappings when selecting strength', async () => {
+    const { ctx, handlers } = fixture();
+    ctx.model = {
+      provider: 'proxy',
+      api: 'anthropic-messages',
+      id: 'claude-opus-5-5',
+      compat: { supportsTemperature: false, forceAdaptiveThinking: true },
+      thinkingLevelMap: { xhigh: 'xhigh', max: null },
+    };
+    await handlers.get('pi-desktop-thinking-v1')!('{"level":"xhigh"}', ctx);
+    expect(ctx.model.compat).toEqual({
+      supportsTemperature: false,
+      forceAdaptiveThinking: true,
+    });
+    expect(ctx.model.thinkingLevelMap).toMatchObject({
+      xhigh: 'xhigh',
+      max: null,
+    });
+    ctx.model.compat!.forceAdaptiveThinking = false;
+    await handlers.get('pi-desktop-thinking-v1')!('{"level":"off"}', ctx);
+    expect(ctx.model.compat?.forceAdaptiveThinking).toBe(false);
+    expect(ctx.model.reasoning).toBe(false);
+  });
+  it.each([
+    ['anthropic-messages', 'claude-sonnet-4-5'],
+    ['anthropic-messages', 'custom-model-alias'],
+    ['anthropic-messages', 'claude-opus-5-50'],
+    ['openai-responses', 'claude-sonnet-4-5'],
+    ['openai-completions', 'custom-model-alias'],
+    ['openai-completions', 'claude-opus-5-5'],
+  ])('does not change unrelated transport/model %s %s', (api, id) => {
+    const { ctx, events } = fixture();
+    ctx.model = { provider: 'proxy', api, id };
+    events.get('session_start')!({}, ctx);
+    expect(ctx.model.compat).toBeUndefined();
+  });
+  it('omits disabled thinking for adaptive Anthropic requests without changing the remaining payload', () => {
+    const { ctx, events } = fixture();
+    ctx.model = {
+      provider: 'proxy',
+      api: 'anthropic-messages',
+      id: 'custom-adaptive-model',
+      compat: { forceAdaptiveThinking: true },
+    };
+    const payload = {
+      model: ctx.model.id,
+      thinking: { type: 'disabled' },
+      messages: [],
+    };
+    expect(events.get('before_provider_request')!({ payload }, ctx)).toEqual({
+      model: ctx.model.id,
+      messages: [],
+    });
+    expect(payload.thinking.type).toBe('disabled');
+    ctx.model.compat = { forceAdaptiveThinking: false };
+    expect(
+      events.get('before_provider_request')!({ payload }, ctx),
+    ).toBeUndefined();
+    ctx.model.compat = { forceAdaptiveThinking: true };
+    expect(
+      events.get('before_provider_request')!(
+        { payload: { thinking: { type: 'adaptive' } } },
+        ctx,
+      ),
+    ).toBeUndefined();
+  });
+  it('learns explicit format errors for unknown aliases and isolates endpoints', () => {
+    const { ctx, events } = fixture();
+    ctx.modelRegistry.find.mockReturnValue(undefined);
+    ctx.model = {
+      provider: 'proxy',
+      api: 'anthropic-messages',
+      id: 'unknown-alias',
+      baseUrl: 'https://one.test',
+    };
+    events.get('session_start')!({}, ctx);
+    const error = (errorMessage: string) => ({
+      message: { role: 'assistant', stopReason: 'error', errorMessage },
+    });
+    expect(
+      events.get('message_end')!(error('429 rate limited'), ctx),
+    ).toBeUndefined();
+    expect(ctx.model.compat).toBeUndefined();
+    const result = events.get('message_end')!(
+      error(
+        'unknown-alias requires adaptive thinking; omit thinking or use thinking.type=adaptive and output_config.effort',
+      ),
+      ctx,
+    );
+    expect(result).toMatchObject({
+      message: { errorMessage: expect.stringContaining('请重试') },
+    });
+    expect(ctx.model.compat?.forceAdaptiveThinking).toBe(true);
+    ctx.model = {
+      ...ctx.model,
+      compat: undefined,
+      thinkingLevelMap: undefined,
+    };
+    events.get('model_select')!({}, ctx);
+    expect(ctx.model.compat?.forceAdaptiveThinking).toBe(true);
+    events.get('message_end')!(
+      error('adaptive thinking is not supported'),
+      ctx,
+    );
+    expect(ctx.model.compat?.forceAdaptiveThinking).toBe(false);
+    ctx.model = {
+      ...ctx.model,
+      baseUrl: 'https://two.test',
+      compat: undefined,
+    };
+    events.get('model_select')!({}, ctx);
+    expect(ctx.model.compat).toBeUndefined();
+  });
+  it('does not learn over explicit configuration', () => {
+    const { ctx, events } = fixture();
+    ctx.model = {
+      provider: 'proxy',
+      api: 'anthropic-messages',
+      id: 'alias',
+      compat: { forceAdaptiveThinking: false },
+    };
+    events.get('session_start')!({}, ctx);
+    expect(
+      events.get('message_end')!(
+        {
+          message: {
+            role: 'assistant',
+            stopReason: 'error',
+            errorMessage: 'requires adaptive thinking',
+          },
+        },
+        ctx,
+      ),
+    ).toBeUndefined();
+    expect(ctx.model.compat?.forceAdaptiveThinking).toBe(false);
+  });
   it('enables reasoning for a selected strength and disables it for off', async () => {
     const { handlers, ctx, getLevel, events } = fixture();
     const apply = handlers.get('pi-desktop-thinking-v1')!;

@@ -68,6 +68,16 @@ TAURI_BUNDLER_TOOLS_GITHUB_MIRROR=https://v4.gh-proxy.org/https://github.com npm
 - Playwright 默认 Chromium 未安装，验证使用临时系统 Chrome 配置，完成后移除。修改的 Rust 文件格式与 `git diff --check` 通过。
 - 未重新打包发行安装器，未执行 Windows/Linux 实机或真实服务端思考生成验证。
 
+## Anthropic 推理格式自动适配（Windows）
+
+- 保留统一强度选择器，按模型能力自动选择 adaptive + output_config.effort 或 enabled + budget_tokens，不对所有 Anthropic 模型强制使用新格式。
+- 自定义供应商下的同名模型自动读取 Pi 官方模型目录的 adaptive 能力与强度映射，兼容 anthropic/ 前缀和点号版本。用户显式配置优先；实现不维护具体型号白名单或版本判断。
+- 未知模型或代理别名沿用 Pi 默认格式；遇到明确的 requires adaptive thinking / adaptive thinking not supported 等格式错误，自动学习该供应商、端点、模型所需格式，并在原始错误后就地提示重试。只影响后续请求，不自动重发任务；认证、限流和网络错误不会改变格式。缓存仅限扩展生命周期，重载后重新识别。
+- adaptive 模型缺省 minimal 映射 low、xhigh 映射 high、max 映射 max，官方或用户映射优先。off 省略 disabled thinking；此时由服务端决定默认行为，不保证完全关闭内部推理。
+- `npm run check`、`npm run build` 通过；桥接与强度状态回归共 27 项通过。
+- `node scripts/verify-anthropic-thinking.mjs <pi-ai/dist/api/anthropic-messages.js>` 使用本机 Pi 真实序列化器，以任意模型别名验证 adaptive、budget 和错误学习三条路径各 7 档强度。假密钥、发送前截断且禁用网络；21 项通过。
+- 未调用真实上游服务、未重新打包安装器，未进行 macOS/Linux 实机验证。
+
 ## 思考能力随强度联动验证（macOS）
 
 - off 对应 reasoning=false，指定强度对应 reasoning=true；模型设置中的能力只读联动，新增模型默认关闭。保存时按模型独立等级或全局等级归一化，保留未知配置。
