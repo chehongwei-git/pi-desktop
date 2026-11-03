@@ -9,6 +9,7 @@ import {
 } from '@testing-library/svelte';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import CommandComposer from './CommandComposer.svelte';
+import { Workspace } from '../state/workspace.svelte';
 import { Desktop } from '../state/desktop.svelte';
 import { bridge } from '../client';
 afterEach(cleanup);
@@ -20,6 +21,24 @@ function fixture() {
   return { desktop, action };
 }
 describe('inline command menus', () => {
+  it('completes /plan in a new workspace draft before its first message', async () => {
+    const connect = vi.fn();
+    const workspace = new Workspace({ ...bridge, connect });
+    const source = workspace.active;
+    source.project = '/project';
+    source.commands = [{ name: 'plan', source: 'extension' }];
+    workspace.newDraft(source.project);
+    const desktop = workspace.active;
+    desktop.draft = '/pl';
+    const send = vi.fn();
+    const view = render(CommandComposer, { desktop, onsend: send });
+    expect(view.getByRole('option', { name: /\/plan/ })).toBeInTheDocument();
+    await fireEvent.keyDown(view.getByRole('textbox'), { key: 'Tab' });
+    expect(view.getByRole('textbox')).toHaveValue('/plan ');
+    expect(connect).not.toHaveBeenCalled();
+    expect(send).not.toHaveBeenCalled();
+    expect(desktop.runtimeId).toBe('');
+  });
   it('keeps cached-session drafts editable while reconnecting and allows sending to wait for recovery', async () => {
     const { desktop, action } = fixture();
     desktop.historyCached = true;

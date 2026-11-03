@@ -443,6 +443,11 @@ export class Desktop {
   // 首次发送创建真实会话会恢复 Pi 默认模型，显式选择需在创建后再次应用。
   private newChatModel: string | null = null;
   private newChatThinking: string | undefined;
+  /** 工作区新建入口显式继承显示值，避免项目旧偏好覆盖来源会话的选择。 */
+  initializeDraftModel(model: Model | undefined, thinking: string): void {
+    this.newChatModel = model ? `${model.provider}/${model.id}` : null;
+    this.newChatThinking = thinking;
+  }
   private clearDraftModel(): void {
     this.newChatModel = null;
     this.newChatThinking = undefined;
@@ -703,6 +708,8 @@ export class Desktop {
     this.drafts.set(this.draftKey(), this.draft);
     this.saveImageDraft();
     const preserve = this.historyCached;
+    // 工作区将本地草稿绑定到真实会话时，输入仍属于同一对象，不按新文件键清空。
+    const preserveDraft = !!this.navigation && this.newChatProject !== null;
     const draft = this.draft;
     const images = this.images;
     const generation = ++this.generation;
@@ -743,7 +750,12 @@ export class Desktop {
       }
       this.run = connected.snapshot.isStreaming ? 'running' : 'idle';
       // 重连期间输入仍可编辑，不用连接开始时的副本覆盖新输入。
-      if (!preserve && this.draft === draft && this.images === images) {
+      if (
+        !preserve &&
+        !preserveDraft &&
+        this.draft === draft &&
+        this.images === images
+      ) {
         this.draft = this.drafts.get(this.draftKey()) ?? '';
         this.restoreImageDraft();
       }

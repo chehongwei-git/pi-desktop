@@ -163,6 +163,99 @@ function summary(path: string, cwd: string): SessionSummary {
   };
 }
 describe('cross-project workspace', () => {
+  it('inherits the current selection over project defaults and submits that selection', async () => {
+    const { workspace, api } = fixture();
+    await workspace.init();
+    const source = workspace.active;
+    await source.setModel('mock/b');
+    await source.setThinking('high');
+    source.settings.projectModels = [
+      {
+        project: source.project,
+        provider: 'mock',
+        model: 'a',
+        thinkingLevel: 'off',
+      },
+    ];
+    const submit = vi.spyOn(api, 'submitNew');
+    await source.newSession();
+    const draft = workspace.active;
+    expect(draft.selectedModel?.id).toBe('b');
+    expect(draft.selectedThinking).toBe('high');
+    draft.draft = 'hello';
+    await draft.send();
+    expect(submit.mock.calls[0].slice(3, 5)).toEqual([['mock', 'b'], 'high']);
+    expect(source.selectedModel?.id).toBe('b');
+    expect(source.settings.projectModels[0].model).toBe('a');
+  });
+
+  it('updates reused drafts but preserves their input and explicit choices on ordinary navigation', async () => {
+    const { workspace } = fixture();
+    await workspace.init();
+    const source = workspace.active;
+    workspace.newDraft('/other');
+    const draft = workspace.active;
+    draft.draft = '未发送';
+    await draft.setModel('mock/b');
+    await draft.setThinking('high');
+    workspace.select(source);
+    await workspace.activate(draft);
+    expect(draft.selectedModel?.id).toBe('b');
+    workspace.select(source);
+    workspace.newDraft('/other');
+    expect(workspace.active).toBe(draft);
+    expect(draft.selectedModel?.id).toBe('a');
+    expect(draft.selectedThinking).toBe('off');
+    expect(draft.draft).toBe('未发送');
+    workspace.newDraft('/other', true);
+    expect(draft.draft).toBe('未发送');
+  });
+
+  it('keeps the explicit draft selection and input when runtime model application fails', async () => {
+    const { workspace, action } = fixture();
+    await workspace.init();
+    workspace.newDraft('/other');
+    const draft = workspace.active;
+    await draft.setModel('mock/b');
+    await draft.setThinking('high');
+    draft.draft = '保留输入';
+    const original = action.getMockImplementation()!;
+    action.mockImplementation(async (...args) => {
+      if (args[1].type === 'set_model') throw new Error('model unavailable');
+      return original(...args);
+    });
+    await expect(workspace.ensure(draft)).rejects.toThrow('model unavailable');
+    expect(draft.draft).toBe('保留输入');
+    expect(
+      action.mock.calls.some(([, command]) => command.type === 'prompt'),
+    ).toBe(false);
+    action.mockImplementation(original);
+    await workspace.ensure(draft);
+    expect(draft.selectedModel?.id).toBe('b');
+    expect(draft.selectedThinking).toBe('high');
+  });
+
+  it('inherits project commands before connecting and replaces them with runtime metadata', async () => {
+    const { workspace, api } = fixture();
+    await workspace.init();
+    const source = workspace.active;
+    source.commands = [{ name: 'plan', source: 'extension' }];
+    const connect = vi.spyOn(api, 'connect');
+    workspace.newDraft(source.project);
+    const draft = workspace.active;
+    expect(draft.commands).toEqual(source.commands);
+    expect(draft.commands).not.toBe(source.commands);
+    expect(draft.runtimeId).toBe('');
+    expect(connect).not.toHaveBeenCalled();
+    workspace.newDraft('/other');
+    expect(workspace.active.commands).toEqual([]);
+    workspace.newDraft(source.project);
+    expect(workspace.active).toBe(draft);
+    expect(draft.commands).toEqual(source.commands);
+    await workspace.ensure(draft);
+    expect(draft.commands).toEqual([]);
+  });
+
   it('normalizes Windows drive roots, UNC and long-path aliases without changing POSIX case', () => {
     const { workspace } = fixture();
     const key = (path: string) => workspace.active.projectKey(path);

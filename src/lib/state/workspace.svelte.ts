@@ -189,26 +189,36 @@ export class Workspace {
   }
   newDraft(project: string, preserve = false): void {
     const previous = this.active;
+    // 在复用草稿或改写快照前捕获来源选择，包括当前草稿自身被再次选中的情况。
+    const model = previous.selectedModel;
+    const thinking = previous.selectedThinking;
+    const projectKey = this.key(project);
+    const commandSource =
+      this.key(previous.newChatProject ?? previous.project) === projectKey
+        ? previous
+        : [...this.sessions]
+            .reverse()
+            .find(
+              (item) =>
+                this.key(item.project) === projectKey &&
+                item.connection === 'ready',
+            );
     let session = this.sessions.find(
       (item) =>
         item.newChatProject !== null &&
         this.key(item.newChatProject) === this.key(project) &&
         !item.runtimeId,
     );
-    if (session && !preserve) {
-      this.select(session);
-      return;
-    }
     session ??= this.create();
     session.project = project;
     session.newChatProject = project;
     session.models = previous.models;
     session.levels = previous.levels;
-    session.snapshot = {
-      model: previous.selectedModel,
-      thinkingLevel: previous.selectedThinking,
-    };
-    if (preserve) {
+    session.snapshot = { model, thinkingLevel: thinking };
+    session.initializeDraftModel(model, thinking);
+    // 命令属于项目；未连接草稿沿用已发现的元数据，连接后由实际目录替换。
+    session.commands = [...(commandSource?.commands ?? session.commands)];
+    if (preserve && session !== previous) {
       session.draft = previous.draft;
       session.images = previous.images;
       previous.draft = '';
@@ -252,6 +262,8 @@ export class Workspace {
         session.connection = 'ready';
         await session.restoreHistory();
         await session.refreshMetadata();
+        // 连接已成功但模型应用失败时，重试仍须完成原草稿的选择。
+        await this.applyPendingModel(session);
         return;
       }
       await session.disconnect(true).catch(() => {});
