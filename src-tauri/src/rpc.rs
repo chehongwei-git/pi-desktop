@@ -145,7 +145,9 @@ impl Projection {
         }
         if let Some(process) = &mut self.process {
             if let Some(paused_at) = process.paused_at.take() {
-                let end = process.ended_at.unwrap_or_else(|| chrono::Utc::now().timestamp_millis());
+                let end = process
+                    .ended_at
+                    .unwrap_or_else(|| chrono::Utc::now().timestamp_millis());
                 process.paused_ms += (end - paused_at).max(0);
             }
         }
@@ -417,7 +419,9 @@ impl Projection {
                     }
                     if let Some(process) = &mut self.process {
                         if !message.text.trim().is_empty() {
-                            process.ended_at = process.ended_at.or(self.message_started)
+                            process.ended_at = process
+                                .ended_at
+                                .or(self.message_started)
                                 .or(Some(chrono::Utc::now().timestamp_millis()));
                             process.state = "done".into();
                         } else if matches!(value["stopReason"].as_str(), Some("error" | "aborted"))
@@ -545,7 +549,10 @@ impl Projection {
                 store.push(json!({"type":"run","state":"running"}))?
             }
             "extension_ui_request" => {
-                if matches!(event["method"].as_str(), Some("select" | "confirm" | "input" | "editor")) {
+                if matches!(
+                    event["method"].as_str(),
+                    Some("select" | "confirm" | "input" | "editor")
+                ) {
                     if let Some(id) = event["id"].as_str() {
                         self.waiting_extensions.insert(id.into());
                         if let Some(process) = &mut self.process {
@@ -673,11 +680,23 @@ mod tests {
     fn extension_waiting_pauses_until_all_responses_are_written() {
         let mut projection = Projection::default();
         let mut store = Store::new().unwrap();
-        projection.event(json!({"type":"agent_start"}), &mut store).unwrap();
-        projection.event(json!({"type":"extension_ui_request","method":"setStatus","id":"status"}), &mut store).unwrap();
+        projection
+            .event(json!({"type":"agent_start"}), &mut store)
+            .unwrap();
+        projection
+            .event(
+                json!({"type":"extension_ui_request","method":"setStatus","id":"status"}),
+                &mut store,
+            )
+            .unwrap();
         assert!(projection.process.as_ref().unwrap().paused_at.is_none());
         for method in ["select", "confirm", "input", "editor"] {
-            projection.event(json!({"type":"extension_ui_request","method":method,"id":method}), &mut store).unwrap();
+            projection
+                .event(
+                    json!({"type":"extension_ui_request","method":method,"id":method}),
+                    &mut store,
+                )
+                .unwrap();
         }
         let paused = chrono::Utc::now().timestamp_millis() - 5000;
         projection.process.as_mut().unwrap().paused_at = Some(paused);
@@ -686,12 +705,16 @@ mod tests {
             assert_eq!(projection.process.as_ref().unwrap().paused_at, Some(paused));
             assert_eq!(projection.process.as_ref().unwrap().paused_ms, 0);
         }
-        projection.extension_responded("editor", &mut store).unwrap();
+        projection
+            .extension_responded("editor", &mut store)
+            .unwrap();
         let process = projection.process.as_ref().unwrap();
         assert!(process.paused_at.is_none());
         assert!(process.paused_ms >= 5000);
         let elapsed = process.paused_ms;
-        projection.extension_responded("editor", &mut store).unwrap();
+        projection
+            .extension_responded("editor", &mut store)
+            .unwrap();
         assert_eq!(projection.process.as_ref().unwrap().paused_ms, elapsed);
     }
 
@@ -702,19 +725,39 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let mut projection = Projection::with_timing_dir(dir.path().to_path_buf());
             let mut store = Store::new().unwrap();
-            projection.event(json!({"type":"agent_start"}), &mut store).unwrap();
+            projection
+                .event(json!({"type":"agent_start"}), &mut store)
+                .unwrap();
             let message = json!({"role":"assistant","timestamp":1000,"stopReason":"toolUse","content":[{"type":"thinking","thinking":"分析"}]});
-            projection.event(json!({"type":"message_end","message":message}), &mut store).unwrap();
-            projection.event(json!({"type":"extension_ui_request","method":"input","id":"q"}), &mut store).unwrap();
-            projection.process.as_mut().unwrap().paused_at = Some(chrono::Utc::now().timestamp_millis() - 5000);
+            projection
+                .event(json!({"type":"message_end","message":message}), &mut store)
+                .unwrap();
+            projection
+                .event(
+                    json!({"type":"extension_ui_request","method":"input","id":"q"}),
+                    &mut store,
+                )
+                .unwrap();
+            projection.process.as_mut().unwrap().paused_at =
+                Some(chrono::Utc::now().timestamp_millis() - 5000);
             if finish == "agent_settled" {
-                projection.event(json!({"type":finish}), &mut store).unwrap();
+                projection
+                    .event(json!({"type":finish}), &mut store)
+                    .unwrap();
             } else {
                 let mut failed = message.clone();
                 failed["stopReason"] = finish.into();
-                projection.event(json!({"type":"message_end","message":failed}), &mut store).unwrap();
+                projection
+                    .event(json!({"type":"message_end","message":failed}), &mut store)
+                    .unwrap();
             }
-            let original = projection.messages.last().unwrap().process.as_ref().unwrap();
+            let original = projection
+                .messages
+                .last()
+                .unwrap()
+                .process
+                .as_ref()
+                .unwrap();
             assert!(original.paused_at.is_none());
             assert!(original.paused_ms >= 5000);
             assert!(original.ended_at.is_some());
@@ -725,7 +768,9 @@ mod tests {
             assert_eq!(saved.ended_at, original.ended_at);
             assert!(saved.paused_at.is_none());
         }
-        let legacy: ProcessInfo = serde_json::from_value(json!({"id":"old","startedAt":1,"endedAt":10,"state":"done"})).unwrap();
+        let legacy: ProcessInfo =
+            serde_json::from_value(json!({"id":"old","startedAt":1,"endedAt":10,"state":"done"}))
+                .unwrap();
         assert_eq!(legacy.paused_ms, 0);
         assert!(legacy.paused_at.is_none());
     }

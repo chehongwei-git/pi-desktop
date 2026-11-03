@@ -45,7 +45,7 @@ mod tests {
     #[test]
     fn rejects_invalid_encoding_signature_and_count() {
         let image = json!({"type":"image","mimeType":"image/png","data":STANDARD.encode(b"\x89PNG\r\n\x1a\n")});
-        assert!(validate(&[image.clone()]).is_ok());
+        assert!(validate(std::slice::from_ref(&image)).is_ok());
         assert!(validate(&vec![image; 9]).is_err());
         for data in ["%%%%", "aGVsbG8=", ""] {
             assert!(
