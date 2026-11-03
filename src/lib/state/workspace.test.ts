@@ -322,6 +322,123 @@ describe('cross-project workspace', () => {
     expect(restored?.recovered).toContain('executing');
     expect(second.tasks).toHaveLength(0);
   });
+  it('replays a wakeup received while the new-session event pump is reading an empty batch', async () => {
+    const { workspace, api, states } = fixture();
+    await workspace.init();
+    states.set('reserved-new', { sessionFile: '/b/new.jsonl', cwd: '/b' });
+    let finishEmpty!: (batch: Awaited<ReturnType<Bridge['events']>>) => void;
+    let wake!: (event: Wakeup) => void;
+    let reads = 0;
+    api.submitNew = async (
+      project,
+      _id,
+      _action,
+      _model,
+      _thinking,
+      receive,
+    ) => {
+      wake = receive;
+      receive({
+        type: 'initialized',
+        runtimeId: 'reserved-new',
+        project,
+        snapshot: { sessionFile: '/b/new.jsonl', cwd: project },
+      });
+      return { desktopTask: 'new-task', runtimeId: 'reserved-new' };
+    };
+    api.events = async (runtimeId) => {
+      reads++;
+      if (reads === 1)
+        return new Promise((resolve) => {
+          finishEmpty = resolve;
+        });
+      return {
+        runtimeId,
+        sequence: 1,
+        events:
+          reads === 2
+            ? [
+                {
+                  type: 'message' as const,
+                  message: {
+                    id: 'user-1',
+                    role: 'user' as const,
+                    text: 'hello',
+                    thinking: '',
+                    status: 'done' as const,
+                    contentRef: null,
+                    name: null,
+                  },
+                },
+              ]
+            : [],
+      };
+    };
+    workspace.newDraft('/b');
+    const session = workspace.active;
+    session.draft = 'hello';
+    await session.send();
+    expect(reads).toBe(1);
+    wake({ type: 'available', runtimeId: 'reserved-new' });
+    finishEmpty({ runtimeId: 'reserved-new', sequence: 0, events: [] });
+    await vi.waitFor(() => expect(session.messages[0]?.text).toBe('hello'));
+    expect(workspace.active).toBe(session);
+    expect(reads).toBeGreaterThanOrEqual(2);
+  });
+  it('shows an accepted first prompt before Pi initialization and replaces it without duplication', async () => {
+    const { workspace, api, states, emit } = fixture();
+    await workspace.init();
+    let initialize!: () => void;
+    api.submitNew = async (
+      project,
+      _id,
+      _prompt,
+      _model,
+      _thinking,
+      receive,
+    ) => {
+      // 模拟宿主立即接受任务、Pi 启动较慢，不依赖真实时间等待。
+      const connected = await api.connect(project, receive);
+      initialize = () =>
+        receive({
+          type: 'initialized',
+          runtimeId: connected.runtimeId,
+          project,
+          snapshot: states.get(connected.runtimeId)!,
+        });
+      return { desktopTask: 'slow-task', runtimeId: connected.runtimeId };
+    };
+    workspace.newDraft('/b');
+    const session = workspace.active;
+    session.draft = '你好';
+    await session.send();
+    expect(session.newChatProject).toBeNull();
+    expect(session.messages).toHaveLength(0);
+    expect(session.transcriptMessages.map((message) => message.text)).toEqual([
+      '你好',
+    ]);
+    initialize();
+    expect(session.transcriptMessages).toHaveLength(1);
+    emit(session.runtimeId, [
+      {
+        type: 'message',
+        message: {
+          id: 'official-user',
+          role: 'user',
+          text: '你好',
+          thinking: '',
+          status: 'done',
+          contentRef: null,
+          name: null,
+        },
+      },
+    ]);
+    await vi.waitFor(() => expect(session.messages).toHaveLength(1));
+    expect(session.initialPending).toBeNull();
+    expect(session.transcriptMessages.map((message) => message.id)).toEqual([
+      'official-user',
+    ]);
+  });
   it('creates an independent process for a new project draft on first send', async () => {
     const { workspace, disconnect } = fixture();
     await workspace.init();

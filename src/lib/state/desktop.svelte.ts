@@ -62,6 +62,13 @@ export class Desktop {
   runtimeId = $state('');
   version = $state('');
   messages = $state<Message[]>([]);
+  /** 宿主已接受、Pi 尚未产出权威用户消息时的首条本地展示。 */
+  initialPending = $state<Message | null>(null);
+  get transcriptMessages(): Message[] {
+    return this.initialPending && !this.messages.some((m) => m.role === 'user')
+      ? [this.initialPending, ...this.messages]
+      : this.messages;
+  }
   toolViews = $state<Record<string, Record<string, boolean>>>({});
   toggleTool(id: string, section: string): void {
     const view = this.toolViews[id] ?? {};
@@ -731,9 +738,12 @@ export class Desktop {
       this.connection = 'ready';
       this.newChatProject = null;
       void this.refreshMetadata();
+      // 启动后立刻拉取已有事件；后续唤醒仍通过 drain 合并处理。
+      void this.drain(generation);
       return;
     }
     if (event.type === 'failed') {
+      this.initialPending = null;
       for (const timer of this.extensionTimers.values()) clearTimeout(timer);
       this.extensionTimers.clear();
       this.extensions = [];
@@ -744,10 +754,17 @@ export class Desktop {
     }
     void this.drain(generation);
   }
-  /** 共用拉取任务使切换可等待 reset 事件处理完成，避免新历史被迟到 reset 清空。 */
+  private wakePending = false;
+  /** 唤醒可能发生在上一次空批次返回前；记录重拉请求，避免漏掉新消息。 */
   private drain(generation = this.generation): Promise<void> {
+    this.wakePending = true;
     if (!this.pumpTask)
-      this.pumpTask = this.pump(generation).finally(() => {
+      this.pumpTask = (async () => {
+        do {
+          this.wakePending = false;
+          await this.pump(generation);
+        } while (this.wakePending && generation === this.generation);
+      })().finally(() => {
         this.pumpTask = null;
       });
     return this.pumpTask;
@@ -765,6 +782,8 @@ export class Desktop {
         if (!batch.events.length) break;
         const previous = this.run;
         reduceEvents(this, batch.events);
+        if (this.initialPending && this.messages.some((m) => m.role === 'user'))
+          this.initialPending = null;
         for (const event of batch.events) {
           // reset 是会话边界，按事件顺序清理；不能在批次末尾保留旧会话 widget。
           if (event.type === 'reset') {
@@ -1210,6 +1229,19 @@ export class Desktop {
       }
       this.initialSubmission = undefined;
       this.runtimeId = result.runtimeId;
+      // 回执只证明宿主已接收任务；Pi 的消息会在初始化后替换本地展示。
+      this.initialPending = this.messages.some((m) => m.role === 'user')
+        ? null
+        : {
+            id: `accepted-${submissionId}`,
+            role: 'user',
+            text,
+            thinking: '',
+            images,
+            contentRef: null,
+            status: 'done',
+            name: null,
+          };
       this.newChatProject = null;
       this.connection = 'ready';
       this.task = {

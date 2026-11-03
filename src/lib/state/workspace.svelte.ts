@@ -514,6 +514,7 @@ export class Workspace {
     if (!session.task) return;
     await this.api.cancelTask(session.task.taskId);
     session.task = { ...session.task, state: 'cancelled', position: 0 };
+    session.initialPending = null;
     const input = session.taskInput;
     if (input) session.recoveredImages.push(input);
     session.taskInput = null;
@@ -567,6 +568,8 @@ export class Workspace {
               session.newChatProject = session.project;
             }
           }
+          if (['failed', 'stopped'].includes(task.state))
+            session.initialPending = null;
           if (['completed', 'failed', 'stopped'].includes(task.state)) {
             session.unread = session !== this.active;
             session.taskInput = null;

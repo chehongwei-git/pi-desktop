@@ -350,7 +350,8 @@
   let lastFocus = 0;
   let empty = $derived(
     !desktop.openingSession &&
-      (desktop.newChatProject !== null || desktop.messages.length === 0),
+      (desktop.newChatProject !== null ||
+        desktop.transcriptMessages.length === 0),
   );
   // 本地新草稿与会话加载期间不显示后台旧会话的活动。
   let activity = $derived(
@@ -1252,7 +1253,9 @@
                 class="choose-project"
                 onclick={chooseProject}
                 ><Icon name="folder" size={18} />选择项目文件夹</button
-              >{:else if desktop.connection === 'disconnected' || desktop.connection === 'failed'}<button
+              >{/if}
+            <!-- 新草稿在首次发送时自动连接；未分配运行实例不代表连接故障。 -->
+            {#if displayProject && desktop.newChatProject === null && (desktop.connection === 'disconnected' || desktop.connection === 'failed')}<button
                 class="choose-project"
                 onclick={() => {
                   void desktop.connect(desktop.project);
@@ -1265,9 +1268,9 @@
             class="session-transcript"
             hidden={session !== desktop || empty || !!desktop.openingSession}
           >
-            {#if session.messages.length}
+            {#if session.transcriptMessages.length}
               <Transcript
-                messages={session.messages}
+                messages={session.transcriptMessages}
                 activity={session === desktop ? activity : null}
                 active={session === desktop &&
                   !empty &&
