@@ -2,6 +2,7 @@
 name = "pi-desktop"
 version = "0.1.0"
 description = "A lightweight desktop host for your installed Pi"
+license = "Apache-2.0"
 edition = "2021"
 rust-version = "1.85"
 
