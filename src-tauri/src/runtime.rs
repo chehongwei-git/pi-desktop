@@ -9,7 +9,10 @@ use serde_json::{json, Value};
 use std::{
     collections::HashMap,
     process::Stdio,
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        atomic::{AtomicU64, AtomicUsize, Ordering},
+        Arc,
+    },
     time::Duration,
 };
 use tauri::ipc::Channel;
@@ -25,8 +28,12 @@ static RUNTIME_ID: AtomicU64 = AtomicU64::new(0);
 #[derive(Clone)]
 pub struct Handle {
     pub id: String,
+    /// 物理进程身份保持稳定；id 是兼容现有 IPC 的会话租约身份。
+    pub process_id: String,
+    pub channel: Channel<Value>,
     pub lifecycle: watch::Receiver<Progress>,
     tx: mpsc::Sender<Request>,
+    operations: Arc<AtomicUsize>,
 }
 /// 生命周期供宿主调度使用，不依赖前端是否正在阅读此会话。
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -44,6 +51,15 @@ pub struct Progress {
 }
 /// Actor 内部请求，外部 API 不可直接创建任意协议调用。
 enum Request {
+    Lease {
+        id: String,
+        request: Box<Request>,
+    },
+    Rebind {
+        id: String,
+        channel: Channel<Value>,
+        reply: oneshot::Sender<Result<Value>>,
+    },
     Rpc {
         command: Value,
         kind: Kind,
@@ -83,18 +99,74 @@ struct Pending {
     bridge_error: Option<String>,
 }
 
+impl Request {
+    fn reject(self) {
+        let reply = match self {
+            Self::Lease { request, .. } => {
+                request.reject();
+                return;
+            }
+            Self::Rebind { reply, .. }
+            | Self::Rpc { reply, .. }
+            | Self::Events { reply, .. }
+            | Self::Content { reply, .. }
+            | Self::Shutdown { reply, .. } => reply,
+        };
+        let _ = reply.send(Err(AppError::new("STALE_RUNTIME", "会话连接已更新")));
+    }
+}
+/// 一个业务动作可能分多次 RPC；跨 await 的计数防止在查询与提交间被借走。
+struct Operation(Arc<AtomicUsize>);
+impl Drop for Operation {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
 impl Handle {
+    async fn send(
+        &self,
+        request: Request,
+    ) -> std::result::Result<(), mpsc::error::SendError<Request>> {
+        self.tx
+            .send(Request::Lease {
+                id: self.id.clone(),
+                request: Box::new(request),
+            })
+            .await
+    }
+    /// Actor 再次检查真实空闲状态；租约切换使排队中的旧请求也无法越界。
+    pub async fn rebind(&self, id: String, channel: Channel<Value>) -> Result<Self> {
+        let (reply, rx) = oneshot::channel();
+        self.send(Request::Rebind {
+            id: id.clone(),
+            channel: channel.clone(),
+            reply,
+        })
+        .await
+        .map_err(|_| AppError::new("DISCONNECTED", "Pi 已断开"))?;
+        rx.await
+            .map_err(|_| AppError::new("DISCONNECTED", "Pi 已退出"))??;
+        Ok(Self {
+            id,
+            channel,
+            ..self.clone()
+        })
+    }
+    pub fn notify_released(&self) {
+        let _ = self
+            .channel
+            .send(json!({"type":"released", "runtimeId":self.id}));
+    }
     /// 发送受控请求并等待关联响应。超时由 actor 负责，不做任何隐式重发。
     async fn rpc(&self, command: Value, kind: Kind) -> Result<Value> {
         let (reply, rx) = oneshot::channel();
-        self.tx
-            .send(Request::Rpc {
-                command,
-                kind,
-                reply,
-            })
-            .await
-            .map_err(|_| AppError::new("DISCONNECTED", "Pi 已断开"))?;
+        self.send(Request::Rpc {
+            command,
+            kind,
+            reply,
+        })
+        .await
+        .map_err(|_| AppError::new("DISCONNECTED", "Pi 已断开"))?;
         rx.await
             .map_err(|_| AppError::new("DISCONNECTED", "Pi 已退出"))?
     }
@@ -127,6 +199,8 @@ impl Handle {
     }
     /// 业务动作转换为白名单命令；停止必须先清队列，避免 abort 继续排队任务。
     pub async fn action(&self, action: Action) -> Result<Value> {
+        self.operations.fetch_add(1, Ordering::SeqCst);
+        let _operation = Operation(self.operations.clone());
         match action {
             Action::Prompt {
                 message,
@@ -326,8 +400,7 @@ impl Handle {
     /// 以确认游标获取有界事件批次；由前端成功归并后提交 ack。
     pub async fn events(&self, ack: u64) -> Result<Value> {
         let (reply, rx) = oneshot::channel();
-        self.tx
-            .send(Request::Events { ack, reply })
+        self.send(Request::Events { ack, reply })
             .await
             .map_err(|_| AppError::new("DISCONNECTED", "Pi 已退出"))?;
         rx.await
@@ -336,14 +409,14 @@ impl Handle {
     /// 正文只按宿主分配的 ID 读取，不能变成通用文件读取接口。
     pub async fn content(&self, id: String, offset: usize) -> Result<Value> {
         let (reply, rx) = oneshot::channel();
-        self.tx
-            .send(Request::Content { id, offset, reply })
+        self.send(Request::Content { id, offset, reply })
             .await
             .map_err(|_| AppError::new("DISCONNECTED", "Pi 已退出"))?;
         rx.await
             .map_err(|_| AppError::new("DISCONNECTED", "Pi 已退出"))?
     }
     /// 正常关闭 stdin 并等待，超时回收树；调用方须等待后再创建另一个实例。
+    #[cfg(test)]
     pub async fn shutdown(&self) -> Result<()> {
         self.close(false).await
     }
@@ -354,13 +427,9 @@ impl Handle {
         if lifecycle.borrow().state == Lifecycle::Stopped {
             return Ok(());
         }
-        if self
-            .tx
-            .send(Request::Shutdown { force, reply })
-            .await
-            .is_ok()
-        {
-            let _ = rx.await;
+        if self.send(Request::Shutdown { force, reply }).await.is_ok() {
+            rx.await
+                .map_err(|_| AppError::new("DISCONNECTED", "Pi 已退出"))??;
         }
         // Shutdown 回执先于 actor 最终清理；等到进程回收后才允许调度器释放名额。
         while lifecycle.borrow_and_update().state != Lifecycle::Stopped {
@@ -373,6 +442,7 @@ impl Handle {
 }
 
 /// 验证 cwd 后创建一个 Pi；actor 就绪前订阅已存在，避免初始化事件丢失。
+#[cfg(test)]
 pub async fn start(
     settings: &Settings,
     project: String,
@@ -459,8 +529,12 @@ pub async fn start_reserved(
         settled: 0,
         failed: false,
     });
+    let operations = Arc::new(AtomicUsize::new(0));
     let handle = Handle {
         id: id.clone(),
+        process_id: id.clone(),
+        channel: channel.clone(),
+        operations: operations.clone(),
         tx,
         lifecycle,
     };
@@ -478,6 +552,7 @@ pub async fn start_reserved(
             channel,
             projection,
             lifecycle_tx,
+            operations,
         )
         .await;
         reader.abort();
@@ -490,26 +565,54 @@ pub async fn start_reserved(
 /// 所有可变运行状态集中于单 actor；UI 通知只唤醒拉取，不携带海量正文。
 #[allow(clippy::too_many_arguments)]
 async fn actor(
-    id: String,
+    mut id: String,
     mut child: Child,
     mut stdin: tokio::process::ChildStdin,
     tree: ProcessTree,
     mut store: Store,
     mut requests: mpsc::Receiver<Request>,
     mut output: mpsc::Receiver<Result<Option<Value>>>,
-    channel: Channel<Value>,
+    mut channel: Channel<Value>,
     mut projection: Projection,
     lifecycle: watch::Sender<Progress>,
+    operations: Arc<AtomicUsize>,
 ) {
     let mut pending: HashMap<String, Pending> = HashMap::new();
     let mut serial = 0u64;
     let mut restored = false;
+    let mut previous_store: Option<(String, Store)> = None;
+    // RPC 超时后的副作用未知，禁止把该进程借给其他会话。
+    let mut uncertain = false;
     let mut tick = tokio::time::interval(Duration::from_millis(33));
     tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
     let mut failure: Option<AppError> = None;
     loop {
         tokio::select! {
-            request = requests.recv() => match request {
+            request = requests.recv() => {
+                let request = match request {
+                    Some(Request::Lease { id: lease, request }) if lease == id => Some(*request),
+                    Some(request) => { request.reject(); continue; }
+                    None => None,
+                };
+                match request {
+                Some(Request::Rebind { id: next, channel: target, reply }) => {
+                    if uncertain || operations.load(Ordering::SeqCst) > 0 || !pending.is_empty() || lifecycle.borrow().state != Lifecycle::Idle || projection.waiting_for_extension() {
+                        let _ = reply.send(Err(AppError::new("BUSY", "Pi 尚有在途操作，暂不能复用")));
+                    } else {
+                        // 切换期间旧事件/正文不可进入新页面；取消时恢复原 spool 和 ACK 空间。
+                        if previous_store.as_ref().is_some_and(|(lease,_)| lease == &next) {
+                            store = previous_store.take().unwrap().1;
+                        } else {
+                            match Store::new() {
+                                Ok(empty) => previous_store = Some((id.clone(), std::mem::replace(&mut store, empty))),
+                                Err(error) => { let _ = reply.send(Err(error)); continue; }
+                            }
+                        }
+                        id = next; channel = target;
+                        let _ = reply.send(Ok(Value::Null));
+                    }
+                }
+                Some(Request::Lease { .. }) => unreachable!(),
                 Some(Request::Rpc { mut command, kind, reply }) => {
                     // 桥接期间只接受查询与扩展交互响应，禁止命令错误关联和会话并发修改。
                     if !matches!(kind, Kind::Query | Kind::Restore | Kind::Extension) && pending.values().any(|p| p.bridge_command.is_some()) {
@@ -547,6 +650,7 @@ async fn actor(
                     let _ = reply.send(Ok(Value::Null)); break;
                 }
                 None => break,
+                }
             },
             event = output.recv() => match event {
                 Some(Ok(Some(event))) if event["type"] == "response" => {
@@ -557,7 +661,7 @@ async fn actor(
                             else if matches!(request.kind, Kind::Bridge | Kind::BridgeRefresh) && event["data"]["disposition"] != "handled" { Err(AppError::new("BRIDGE_PROTOCOL", "桥接命令未被扩展处理，请检查 Pi 版本")) }
                             else if matches!(request.kind, Kind::Restore) {
                                 projection.restore(&event["data"], &mut store).map(|()| { restored=true; projection.page(None) })
-                            } else { if matches!(request.kind, Kind::Reset | Kind::Refresh | Kind::LongRefresh | Kind::BridgeRefresh) && event["data"]["cancelled"] != true { if matches!(request.kind, Kind::Reset) { projection.reset(); let _ = store.push(json!({"type":"reset"})); } restored=false; } Ok(event["data"].clone()) };
+                            } else { if matches!(request.kind, Kind::Reset | Kind::Refresh | Kind::LongRefresh | Kind::BridgeRefresh) && event["data"]["cancelled"] != true { if matches!(request.kind, Kind::Reset) { projection.reset(); previous_store = None; let _ = store.push(json!({"type":"reset"})); } restored=false; } Ok(event["data"].clone()) };
                             let _ = request.reply.send(result);
                         }
                     }
@@ -588,7 +692,7 @@ async fn actor(
             },
             _ = tick.tick() => {
                 let expired: Vec<_> = pending.iter().filter(|(_, p)| p.deadline<=Instant::now()).map(|(id, _)| id.clone()).collect();
-                for request_id in expired { if let Some(p) = pending.remove(&request_id) { let _ = p.reply.send(Err(AppError::new("TIMEOUT", "请求超时，可能已执行；请检查状态，不要自动重发"))); } }
+                for request_id in expired { uncertain = true; if let Some(p) = pending.remove(&request_id) { let _ = p.reply.send(Err(AppError::new("TIMEOUT", "请求超时，可能已执行；请检查状态，不要自动重发"))); } }
                 if store.has_pending() { let _ = channel.send(json!({"type":"available","runtimeId":id})); }
             }
         }

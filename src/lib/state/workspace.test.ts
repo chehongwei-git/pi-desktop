@@ -77,6 +77,7 @@ function fixture() {
   const disconnect = vi.fn(async () => {});
   const api: Bridge = {
     ...bridge,
+    syncPool: vi.fn(async () => {}),
     settings: async () => structuredClone(defaultSettings),
     save: async () => {},
     sessions: async () => [],
@@ -142,6 +143,9 @@ function fixture() {
     content,
     action,
     disconnect,
+    release(runtime: string) {
+      channels.get(runtime)?.({ type: 'released', runtimeId: runtime });
+    },
     states,
     tasks,
     emit(runtime: string, events: any[]) {
@@ -341,7 +345,7 @@ describe('cross-project workspace', () => {
     );
     expect(sessions).toHaveLength(1);
   });
-  it('keeps six cached views while releasing all background idle processes', async () => {
+  it('keeps warm connections and six cached views without closing them in the frontend', async () => {
     const { workspace, disconnect } = fixture();
     await workspace.init();
     for (let index = 1; index < 6; index++)
@@ -350,10 +354,8 @@ describe('cross-project workspace', () => {
     await workspace['poll']();
     expect(workspace.retained).toHaveLength(6);
     expect(sessions.every((session) => session.historyCached)).toBe(true);
-    expect(sessions.filter((session) => session.runtimeId)).toEqual([
-      workspace.active,
-    ]);
-    expect(disconnect).toHaveBeenCalledTimes(5);
+    expect(sessions.filter((session) => session.runtimeId)).toHaveLength(6);
+    expect(disconnect).not.toHaveBeenCalled();
     for (const session of sessions) {
       await workspace.activate(session);
       await workspace['poll']();
@@ -403,7 +405,7 @@ describe('cross-project workspace', () => {
   ] as const)(
     'protects a %s session when the idle cache overflows',
     async (state) => {
-      const { workspace, disconnect } = fixture();
+      const { workspace, api, disconnect } = fixture();
       await workspace.init();
       const protectedSession = workspace.active;
       const runtime = protectedSession.runtimeId;
@@ -427,14 +429,17 @@ describe('cross-project workspace', () => {
       for (let index = 1; index <= 7; index++)
         await workspace.open('/a', `/a/${index}.jsonl`);
       await workspace['poll']();
-      expect(disconnect).toHaveBeenCalledTimes(6);
+      expect(disconnect).not.toHaveBeenCalled();
+      const last = vi.mocked(api.syncPool).mock.calls.at(-1)!;
+      expect(last[2]).not.toContain(runtime);
+      expect(last[2].length).toBeGreaterThan(0);
       expect(disconnect).not.toHaveBeenCalledWith(false, runtime);
       expect(protectedSession.runtimeId).toBe(runtime);
       expect(protectedSession.connection).toBe('ready');
     },
   );
   it('shows cached content through reconnect, preserves edits and rebinds old references before reading', async () => {
-    const { workspace, api, histories, content, emit } = fixture();
+    const { workspace, api, histories, content, emit, release } = fixture();
     histories.set('/a/cached.jsonl', [
       {
         id: 'message',
@@ -454,6 +459,7 @@ describe('cross-project workspace', () => {
     cached.draft = '旧草稿';
     await workspace.open('/b', '/b/other.jsonl');
     await workspace['poll']();
+    release(cached.runtimeId);
     expect(cached.runtimeId).toBe('');
     expect(cached.messages[0].text).toBe('已加载内容');
     expect(workspace.retained).toContain(cached);
@@ -492,7 +498,7 @@ describe('cross-project workspace', () => {
     expect(cached.restoring).toBe(false);
   });
   it('retains cached content on reconnect failure and retries without losing the draft', async () => {
-    const { workspace, api, histories } = fixture();
+    const { workspace, api, histories, release } = fixture();
     histories.set('/a/cached.jsonl', [
       {
         id: 'm',
@@ -510,6 +516,7 @@ describe('cross-project workspace', () => {
     cached.draft = '继续编辑';
     await workspace.open('/b', '/b/other.jsonl');
     await workspace['poll']();
+    release(cached.runtimeId);
     vi.spyOn(api, 'connect').mockRejectedValueOnce(new Error('offline'));
     await expect(workspace.activate(cached)).rejects.toThrow('offline');
     expect(cached.connection).toBe('failed');
@@ -524,11 +531,12 @@ describe('cross-project workspace', () => {
     expect(cached.draft).toBe('继续编辑');
   });
   it('waits for connection before sending once', async () => {
-    const { workspace, api, tasks } = fixture();
+    const { workspace, api, tasks, release } = fixture();
     await workspace.init();
     const cached = workspace.active;
     await workspace.open('/b', '/b/other.jsonl');
     await workspace['poll']();
+    release(cached.runtimeId);
     workspace.select(cached);
     cached.draft = '只发一次';
     const original = api.connect;
@@ -556,6 +564,7 @@ describe('cross-project workspace', () => {
     const cached = workspace.active;
     const runtime = cached.runtimeId;
     disconnect.mockRejectedValueOnce(new Error('close failed'));
+    await expect(cached.disconnect()).rejects.toThrow('close failed');
     await workspace.open('/b', '/b/other.jsonl');
     await workspace['poll']();
     expect(cached.connection).toBe('failed');
@@ -567,31 +576,26 @@ describe('cross-project workspace', () => {
     emit(runtime, [{ type: 'run', state: 'running' }]);
     await vi.waitFor(() => expect(cached.run).toBe('running'));
   });
-  it('waits for background eviction to release the native session before reopening', async () => {
-    const { workspace, api, disconnect } = fixture();
+  it('waits for host pool maintenance before reopening a released lease', async () => {
+    const { workspace, api, release } = fixture();
     await workspace.init();
     const evicted = workspace.active;
-    let finishClose!: () => void;
-    disconnect.mockImplementationOnce(
-      () =>
-        new Promise<void>((resolve) => {
-          finishClose = resolve;
-        }),
-    );
-    for (let index = 1; index <= 6; index++)
-      await workspace.open('/a', `/a/${index}.jsonl`);
-    workspace.active.navigation!.changed();
-    await vi.waitFor(() => expect(evicted.connection).toBe('stopping'));
+    await workspace.open('/a', '/a/other.jsonl');
+    let finish!: () => void;
+    const blocked = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    vi.mocked(api.syncPool).mockImplementation(async () => blocked);
     const connect = vi.spyOn(api, 'connect');
     const opening = workspace.activate(evicted);
     await Promise.resolve();
     expect(connect).not.toHaveBeenCalled();
-    finishClose();
+    release(evicted.runtimeId);
+    finish();
     await opening;
     expect(connect).toHaveBeenCalledTimes(1);
     expect(evicted.connection).toBe('ready');
     expect(workspace.active).toBe(evicted);
-    expect(workspace.retained).toContain(evicted);
   });
   it('uses historical prompt previews when Pi sessions have no explicit name', async () => {
     const { workspace } = fixture();

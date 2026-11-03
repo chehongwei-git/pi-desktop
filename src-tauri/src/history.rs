@@ -1,11 +1,11 @@
 //! 历史只读 Repository：逐行解析元数据；Pi 是原始 JSONL 的唯一写入方。
-use crate::types::{Result, SessionSummary, Settings};
+use crate::types::{AppError, Result, SessionSummary, Settings};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
     collections::HashMap,
     fs,
-    io::{BufRead, BufReader, Seek},
+    io::{BufRead, BufReader, Read, Seek},
     path::PathBuf,
     time::UNIX_EPOCH,
 };
@@ -22,6 +22,24 @@ struct Cached {
 pub struct Catalog {
     cache: HashMap<PathBuf, Cached>,
     persistent: Option<PathBuf>,
+}
+
+/// 连接前检查历史所属项目，最多读取 64 KiB 会话头，不扫描长正文。
+pub fn session_cwd(path: &str) -> Result<String> {
+    let mut header = String::new();
+    BufReader::new(fs::File::open(path)?)
+        .take(65_536)
+        .read_line(&mut header)?;
+    let value: Value = serde_json::from_str(&header)
+        .map_err(|_| AppError::new("SESSION_HEADER", "会话头无效或过大"))?;
+    if value["type"] != "session" {
+        return Err(AppError::new("SESSION_HEADER", "缺少会话头"));
+    }
+    value["cwd"]
+        .as_str()
+        .filter(|cwd| !cwd.is_empty())
+        .map(str::to_owned)
+        .ok_or_else(|| AppError::new("SESSION_HEADER", "会话缺少项目目录"))
 }
 
 /// 配置与环境优先级与 Pi CLI 对齐；自定义 sessionDir 不再附加项目编码目录。
@@ -213,7 +231,13 @@ impl Catalog {
                                 .chars()
                                 .take(100)
                                 .collect();
-                            if cached.summary.preview.is_empty() && entry["message"]["content"].as_array().is_some_and(|blocks| blocks.iter().any(|b| b["type"] == "image")) {
+                            if cached.summary.preview.is_empty()
+                                && entry["message"]["content"]
+                                    .as_array()
+                                    .is_some_and(|blocks| {
+                                        blocks.iter().any(|b| b["type"] == "image")
+                                    })
+                            {
                                 cached.summary.preview = "[图片消息]".into();
                             }
                         }

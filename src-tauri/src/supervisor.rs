@@ -30,9 +30,22 @@ struct Job {
     action: Action,
     launch: Option<Launch>,
 }
+struct PoolEntry {
+    project: String,
+    config: String,
+    cross_project: bool,
+    used: u64,
+    eligible: bool,
+    reserved: bool,
+}
 #[derive(Default)]
 struct Inner {
     handles: HashMap<String, runtime::Handle>,
+    pool: HashMap<String, PoolEntry>,
+    pool_revision: u64,
+    use_serial: u64,
+    selected: String,
+    pending_leases: HashMap<String, tokio::sync::watch::Receiver<()>>,
     tasks: HashMap<String, Activity>,
     submissions: HashMap<String, String>,
     stopping: HashSet<String>,
@@ -45,8 +58,326 @@ struct Inner {
 #[derive(Default)]
 pub struct Supervisor {
     inner: Mutex<Inner>,
+    // 仅串行化缓存回收，避免导航在前一次关闭尚未完成时误认为租约仍可用。
+    maintenance: tokio::sync::Mutex<()>,
 }
 impl Supervisor {
+    /// 启动配置只在内存比较，不含凭据，不写入日志。
+    fn config_key(settings: &Settings) -> String {
+        serde_json::to_string(&(
+            &settings.pi_path,
+            &settings.runtime_path,
+            &settings.extra_path,
+            &settings.session_dir,
+        ))
+        .unwrap()
+    }
+    fn project_key(project: &str) -> String {
+        crate::session_identity(project).unwrap_or_else(|_| project.into())
+    }
+    fn available(inner: &Inner, id: &str, entry: &PoolEntry) -> bool {
+        entry.eligible
+            && !entry.reserved
+            && inner.selected != id
+            && !inner
+                .tasks
+                .values()
+                .any(|t| t.runtime_id == id && matches!(t.state.as_str(), "queued" | "running"))
+            && inner
+                .handles
+                .get(id)
+                .is_some_and(|h| h.lifecycle.borrow().state == runtime::Lifecycle::Idle)
+    }
+    /// 页面只上报可借用资格，宿主仍复核任务、Actor 与租约；旧导航快照不能覆盖新选择。
+    pub async fn sync_pool(
+        &self,
+        revision: u64,
+        selected: String,
+        eligible: Vec<String>,
+        settings: &Settings,
+    ) -> Result<()> {
+        let _maintenance = self.maintenance.lock().await;
+        let (victims, pending_selection) = {
+            let mut inner = self.inner.lock().unwrap();
+            if revision <= inner.pool_revision {
+                return Ok(());
+            }
+            inner.pool_revision = revision;
+            if inner.selected != selected {
+                inner.use_serial += 1;
+                let used = inner.use_serial;
+                if let Some(entry) = inner.pool.get_mut(&selected) {
+                    entry.used = used;
+                }
+            }
+            inner.selected = selected.clone();
+            inner
+                .pending_leases
+                .retain(|_, pending| pending.has_changed().is_ok());
+            let pending_selection = inner.pending_leases.get(&selected).cloned();
+            for (id, entry) in &mut inner.pool {
+                entry.eligible = eligible.contains(id);
+            }
+            let config = Self::config_key(settings);
+            let idle_count = inner
+                .pool
+                .iter()
+                .filter(|(id, e)| {
+                    !e.reserved
+                        && inner
+                            .handles
+                            .get(*id)
+                            .is_some_and(|h| h.lifecycle.borrow().state == runtime::Lifecycle::Idle)
+                })
+                .count();
+            let mut excess = idle_count.saturating_sub(settings.idle_process_limit as usize);
+            let mut candidates: Vec<_> = inner
+                .pool
+                .iter()
+                .filter(|(id, e)| Self::available(&inner, id, e))
+                .map(|(id, e)| (id.clone(), e.used, e.config != config))
+                .collect();
+            candidates.sort_by_key(|(_, used, _)| *used);
+            let mut victims = Vec::new();
+            for (id, _, obsolete) in candidates {
+                if excess == 0 && !obsolete {
+                    continue;
+                }
+                if let Some(entry) = inner.pool.get_mut(&id) {
+                    entry.reserved = true;
+                }
+                if let Some(handle) = inner.handles.get(&id) {
+                    victims.push(handle.clone());
+                }
+                excess = excess.saturating_sub(1);
+            }
+            (victims, pending_selection)
+        };
+        for handle in victims {
+            // Actor 的重新绑定是最后一道空闲屏障，也使迟到关闭请求不能关闭下一租约。
+            let retired = match handle
+                .rebind(
+                    format!("retired-{}", uuid::Uuid::new_v4()),
+                    handle.channel.clone(),
+                )
+                .await
+            {
+                Ok(retired) => retired,
+                Err(_) => {
+                    if let Some(e) = self.inner.lock().unwrap().pool.get_mut(&handle.id) {
+                        e.reserved = false;
+                    }
+                    continue;
+                }
+            };
+            retired.close(false).await?;
+            self.remove(&handle.id);
+            handle.notify_released();
+        }
+        // 仅等待被选中的旧租约；其他项目的启动和导航不互相阻塞。
+        drop(_maintenance);
+        if let Some(mut pending) = pending_selection {
+            let _ = pending.changed().await;
+        }
+        Ok(())
+    }
+    /// 原子预留候选后在锁外切换；新建优先复用，历史在额度内按需增长。
+    pub async fn acquire(
+        self: &Arc<Self>,
+        settings: &Settings,
+        project: &str,
+        path: Option<&str>,
+        channel: tauri::ipc::Channel<Value>,
+        id: Option<String>,
+        cross_project: bool,
+    ) -> Result<(runtime::Handle, Value, bool)> {
+        // 通道关闭代表本次获取结束；只让重访被借用租约的导航等待。
+        let (_completion, completion) = tokio::sync::watch::channel(());
+        let project_key = Self::project_key(project);
+        let config = Self::config_key(settings);
+        let target_id = id.unwrap_or_else(|| format!("lease-{}", uuid::Uuid::new_v4()));
+        let mut previous = {
+            let mut inner = self.inner.lock().unwrap();
+            if inner.closing {
+                return Err(AppError::new("CLOSING", "应用正在退出"));
+            }
+            let count = inner
+                .pool
+                .iter()
+                .filter(|(id, e)| {
+                    e.reserved
+                        || inner
+                            .handles
+                            .get(*id)
+                            .is_some_and(|h| h.lifecycle.borrow().state == runtime::Lifecycle::Idle)
+                })
+                .count();
+            let candidate = if path.is_none() || count >= settings.idle_process_limit as usize {
+                inner
+                    .pool
+                    .iter()
+                    .filter(|(id, e)| {
+                        Self::available(&inner, id, e)
+                            && e.config == config
+                            && (e.project == project_key
+                                || (path.is_some() && cross_project && e.cross_project))
+                    })
+                    .min_by_key(|(_, e)| (e.project != project_key, e.used))
+                    .map(|(id, _)| id.clone())
+            } else {
+                None
+            };
+            if let Some(old) = &candidate {
+                inner.pending_leases.insert(old.clone(), completion);
+            }
+            let previous = candidate
+                .and_then(|id| Some((inner.handles.remove(&id)?, inner.pool.remove(&id)?)));
+            inner.use_serial += 1;
+            let used = inner.use_serial;
+            inner.pool.insert(
+                target_id.clone(),
+                PoolEntry {
+                    project: project_key.clone(),
+                    config,
+                    cross_project,
+                    used,
+                    eligible: false,
+                    reserved: true,
+                },
+            );
+            previous
+        };
+        let mut reused = previous.is_some();
+        let _ = channel.send(json!({"type":"acquiring", "runtimeId":target_id, "phase":if !reused { "started" } else if path.is_some() { "opened" } else { "created" }}));
+        let mut handle_result = if let Some((old, _)) = &previous {
+            old.rebind(target_id.clone(), channel.clone()).await
+        } else {
+            runtime::start_reserved(
+                settings,
+                project.into(),
+                channel.clone(),
+                Some(target_id.clone()),
+            )
+            .await
+        };
+        // 前端资格可能落后于后台动作，Actor 拒绝借用时启动独立进程，不重发任何业务动作。
+        if handle_result
+            .as_ref()
+            .is_err_and(|error| error.code == "BUSY")
+        {
+            if let Some((old, mut entry)) = previous.take() {
+                entry.eligible = false;
+                let mut inner = self.inner.lock().unwrap();
+                inner.pool.insert(old.id.clone(), entry);
+                inner.handles.insert(old.id.clone(), old);
+            }
+            reused = false;
+            let _ =
+                channel.send(json!({"type":"acquiring", "runtimeId":target_id, "phase":"started"}));
+            handle_result = runtime::start_reserved(
+                settings,
+                project.into(),
+                channel.clone(),
+                Some(target_id.clone()),
+            )
+            .await;
+        }
+        let handle = match handle_result {
+            Ok(handle) => handle,
+            Err(error) => {
+                self.remove(&target_id);
+                if let Some((old, entry)) = previous {
+                    let mut inner = self.inner.lock().unwrap();
+                    inner.pool.insert(old.id.clone(), entry);
+                    inner.handles.insert(old.id.clone(), old);
+                }
+                return Err(error);
+            }
+        };
+        self.register(handle.clone());
+        let init = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            let switched = if let Some(path) = path {
+                handle
+                    .action(Action::SwitchSession { path: path.into() })
+                    .await?
+            } else if reused {
+                handle.action(Action::NewSession).await?
+            } else {
+                Value::Null
+            };
+            if switched["cancelled"] == true {
+                return Err(AppError::new("CANCELLED", "扩展取消了会话切换"));
+            }
+            let snapshot = handle.action(Action::State).await?;
+            if let Some(cwd) = snapshot["cwd"].as_str() {
+                if Self::project_key(cwd) != project_key {
+                    return Err(AppError::new("PROJECT_MISMATCH", "Pi 返回的项目目录不匹配"));
+                }
+            }
+            if let Some(path) = path {
+                if snapshot["sessionFile"].as_str().map(Self::project_key)
+                    != Some(Self::project_key(path))
+                {
+                    return Err(AppError::new("SESSION_MISMATCH", "Pi 返回的会话不匹配"));
+                }
+            }
+            let commands = handle.action(Action::Commands).await?;
+            if !commands["commands"].as_array().is_some_and(|commands| {
+                commands.iter().any(|command| {
+                    command["name"] == "pi-desktop-models-v1" && command["source"] == "extension"
+                })
+            }) {
+                return Err(AppError::new(
+                    "BRIDGE_UNAVAILABLE",
+                    "Pi 桌面桥接未加载，输入已保留",
+                ));
+            }
+            handle.action(Action::History { before: None }).await?;
+            Ok(snapshot)
+        })
+        .await
+        .unwrap_or_else(|_| Err(AppError::new("INIT_TIMEOUT", "Pi 初始化超时，输入已保留")));
+        match init {
+            Ok(snapshot) => {
+                if self.inner.lock().unwrap().closing {
+                    let _ = handle.close(true).await;
+                    self.remove(&target_id);
+                    if let Some((old, _)) = previous {
+                        old.notify_released();
+                    }
+                    return Err(AppError::new("CLOSING", "应用正在退出"));
+                }
+                if let Some((old, _)) = previous {
+                    old.notify_released();
+                }
+                if let Some(entry) = self.inner.lock().unwrap().pool.get_mut(&target_id) {
+                    entry.reserved = false;
+                }
+                Ok((handle, snapshot, reused))
+            }
+            Err(error) => {
+                if error.code == "CANCELLED" {
+                    if let Some((old, entry)) = previous {
+                        if let Ok(restored) =
+                            handle.rebind(old.id.clone(), old.channel.clone()).await
+                        {
+                            self.remove(&target_id);
+                            let mut inner = self.inner.lock().unwrap();
+                            inner.pool.insert(old.id.clone(), entry);
+                            inner.handles.insert(old.id.clone(), restored);
+                            return Err(error);
+                        }
+                        old.notify_released();
+                    }
+                } else if let Some((old, _)) = previous {
+                    old.notify_released();
+                }
+                let _ = handle.close(true).await;
+                self.remove(&target_id);
+                Err(error)
+            }
+        }
+    }
     pub fn register(&self, handle: runtime::Handle) {
         self.inner
             .lock()
@@ -72,7 +403,17 @@ impl Supervisor {
             task.state = "failed".into();
             task.error = Some("会话连接已关闭".into());
         }
+        inner.pool.remove(id);
         inner.handles.remove(id)
+    }
+    /// 用户业务使用更新 LRU；轮询和事件读取不调用，避免后台活动挤掉常用会话。
+    pub fn touch(&self, id: &str) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.use_serial += 1;
+        let used = inner.use_serial;
+        if let Some(entry) = inner.pool.get_mut(id) {
+            entry.used = used;
+        }
     }
     pub fn submission(&self, id: &str) -> Option<Activity> {
         let inner = self.inner.lock().unwrap();
@@ -143,6 +484,11 @@ impl Supervisor {
                     error: None,
                 },
             );
+            inner.use_serial += 1;
+            let used = inner.use_serial;
+            if let Some(entry) = inner.pool.get_mut(&runtime) {
+                entry.used = used;
+            }
             inner.queue.push_back(Job {
                 id: id.clone(),
                 runtime,
@@ -264,7 +610,11 @@ impl Supervisor {
                     let _ = handle.close(force).await;
                     self.remove(&handle.id);
                 }
-                if self.inner.lock().unwrap().launching.is_empty() {
+                let settled = {
+                    let inner = self.inner.lock().unwrap();
+                    inner.launching.is_empty() && !inner.pool.values().any(|entry| entry.reserved)
+                };
+                if settled {
                     return Ok(());
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(10)).await;
@@ -283,14 +633,20 @@ impl Supervisor {
         if self.inner.lock().unwrap().closing {
             return Err(AppError::new("CLOSING", "应用正在退出，任务未启动"));
         }
-        let handle = runtime::start_reserved(
-            &launch.settings,
-            launch.project.clone(),
-            launch.channel.clone(),
-            Some(runtime.into()),
-        )
-        .await?;
-        self.register(handle.clone());
+        let version = crate::platform::version(&launch.settings).await?;
+        let cross_project = version["version"]
+            .as_str()
+            .is_some_and(|v| v.trim() == "1.5.0");
+        let (handle, _, _) = self
+            .acquire(
+                &launch.settings,
+                &launch.project,
+                None,
+                launch.channel.clone(),
+                Some(runtime.into()),
+                cross_project,
+            )
+            .await?;
         if self.inner.lock().unwrap().closing {
             let _ = handle.close(true).await;
             self.remove(runtime);
@@ -458,6 +814,293 @@ async fn execute(handle: runtime::Handle, action: Action) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn pool_settings() -> Settings {
+        Settings {
+            pi_path: std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .unwrap()
+                .join("tests/fixtures/mock-pi.mjs")
+                .to_string_lossy()
+                .into(),
+            ..Settings::default()
+        }
+    }
+    fn channel() -> tauri::ipc::Channel<Value> {
+        tauri::ipc::Channel::new(|_| Ok(()))
+    }
+
+    /// 新建不受未满额度影响；旧句柄即使已克隆也不能跨租约读取、发送或关闭。
+    #[tokio::test]
+    async fn pool_new_reuses_and_rejects_old_requests() {
+        let project = tempfile::tempdir().unwrap();
+        let project = project.path().to_str().unwrap();
+        let settings = pool_settings();
+        let owner = Arc::new(Supervisor::default());
+        let (old, _, reused) = owner
+            .acquire(&settings, project, None, channel(), None, false)
+            .await
+            .unwrap();
+        assert!(!reused);
+        owner
+            .sync_pool(1, String::new(), vec![old.id.clone()], &settings)
+            .await
+            .unwrap();
+        let (next, snapshot, reused) = owner
+            .acquire(&settings, project, None, channel(), None, false)
+            .await
+            .unwrap();
+        assert!(reused);
+        assert_eq!(old.process_id, next.process_id);
+        assert_ne!(old.id, next.id);
+        assert_eq!(snapshot["newCount"], 1);
+        assert_eq!(snapshot["switchCount"], 0);
+        assert!(old.action(Action::State).await.is_err());
+        assert!(old.events(u64::MAX).await.is_err());
+        assert!(old.content("body-1".into(), 0).await.is_err());
+        assert!(old.close(true).await.is_err());
+        assert!(next.action(Action::State).await.is_ok());
+        owner.close_all(true).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn pool_navigation_waits_only_for_borrowed_lease() {
+        let project = tempfile::tempdir().unwrap();
+        let cwd = project.path().to_string_lossy().into_owned();
+        let settings = pool_settings();
+        let owner = Arc::new(Supervisor::default());
+        let (old, _, _) = owner
+            .acquire(&settings, &cwd, None, channel(), None, false)
+            .await
+            .unwrap();
+        old.action(Action::Rename {
+            name: "slow-new".into(),
+        })
+        .await
+        .unwrap();
+        owner
+            .sync_pool(1, String::new(), vec![old.id.clone()], &settings)
+            .await
+            .unwrap();
+        let acquiring = {
+            let owner = owner.clone();
+            let settings = settings.clone();
+            tokio::spawn(async move {
+                owner
+                    .acquire(&settings, &cwd, None, channel(), None, false)
+                    .await
+            })
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while owner.handle(&old.id).is_ok() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        // 无关导航不等待切换；原租约导航等到切换结束才返回。
+        tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            owner.sync_pool(2, String::new(), vec![], &settings),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        owner
+            .sync_pool(3, old.id.clone(), vec![], &settings)
+            .await
+            .unwrap();
+        let (next, _, reused) = acquiring.await.unwrap().unwrap();
+        assert!(reused);
+        assert!(old.action(Action::State).await.is_err());
+        assert!(next.action(Action::State).await.is_ok());
+        owner.close_all(true).await.unwrap();
+    }
+
+    /// 即使前端尚未看见扩展请求，Actor 也不允许借走正在等待回答的进程。
+    #[tokio::test]
+    async fn pool_stale_eligibility_does_not_steal_extension_wait() {
+        let project = tempfile::tempdir().unwrap();
+        let cwd = project.path().to_str().unwrap();
+        let settings = pool_settings();
+        let owner = Arc::new(Supervisor::default());
+        let (old, _, _) = owner
+            .acquire(&settings, cwd, None, channel(), None, false)
+            .await
+            .unwrap();
+        old.action(Action::Rename {
+            name: "plan-dialog".into(),
+        })
+        .await
+        .unwrap();
+        owner
+            .sync_pool(1, String::new(), vec![old.id.clone()], &settings)
+            .await
+            .unwrap();
+        let stopping = {
+            let old = old.clone();
+            tokio::spawn(async move { old.action(Action::Stop).await })
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                let batch = old.events(0).await.unwrap();
+                if batch["events"]
+                    .as_array()
+                    .is_some_and(|events| events.iter().any(|e| e["type"] == "extension"))
+                {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let (next, _, reused) = owner
+            .acquire(&settings, cwd, None, channel(), None, false)
+            .await
+            .unwrap();
+        assert!(!reused);
+        assert_ne!(next.process_id, old.process_id);
+        old.action(Action::ExtensionResponse {
+            id: "pi-plan-choice".into(),
+            value: json!({"cancelled":true}),
+        })
+        .await
+        .unwrap();
+        stopping.await.unwrap().unwrap();
+        owner.close_all(true).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn pool_cancellation_restores_original_binding() {
+        let project = tempfile::tempdir().unwrap();
+        let settings = pool_settings();
+        let owner = Arc::new(Supervisor::default());
+        let (old, _, _) = owner
+            .acquire(
+                &settings,
+                project.path().to_str().unwrap(),
+                None,
+                channel(),
+                None,
+                false,
+            )
+            .await
+            .unwrap();
+        old.action(Action::Rename {
+            name: "cancel-new".into(),
+        })
+        .await
+        .unwrap();
+        owner
+            .sync_pool(1, String::new(), vec![old.id.clone()], &settings)
+            .await
+            .unwrap();
+        let error = owner
+            .acquire(
+                &settings,
+                project.path().to_str().unwrap(),
+                None,
+                channel(),
+                None,
+                false,
+            )
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(error.code, "CANCELLED");
+        assert!(owner.handle(&old.id).is_ok());
+        assert_eq!(old.action(Action::State).await.unwrap()["newCount"], 0);
+        assert!(old.events(0).await.is_ok());
+        owner.close_all(true).await.unwrap();
+    }
+
+    /// 历史在额度内增长，满额复用 LRU；零额度只回收后台，不回收当前。
+    #[tokio::test]
+    async fn pool_history_capacity_lru_and_zero_limit() {
+        let project = tempfile::tempdir().unwrap();
+        let cwd = project.path().to_str().unwrap();
+        let mut settings = pool_settings();
+        settings.idle_process_limit = 2;
+        let owner = Arc::new(Supervisor::default());
+        let (a, _, _) = owner
+            .acquire(&settings, cwd, Some("a.jsonl"), channel(), None, false)
+            .await
+            .unwrap();
+        owner
+            .sync_pool(1, String::new(), vec![a.id.clone()], &settings)
+            .await
+            .unwrap();
+        let (b, _, reused) = owner
+            .acquire(&settings, cwd, Some("b.jsonl"), channel(), None, false)
+            .await
+            .unwrap();
+        assert!(!reused);
+        assert_ne!(a.process_id, b.process_id);
+        owner
+            .sync_pool(2, b.id.clone(), vec![a.id.clone()], &settings)
+            .await
+            .unwrap();
+        let (c, _, reused) = owner
+            .acquire(&settings, cwd, Some("c.jsonl"), channel(), None, false)
+            .await
+            .unwrap();
+        assert!(reused);
+        assert_eq!(a.process_id, c.process_id);
+        assert_eq!(owner.handles().len(), 2);
+        settings.idle_process_limit = 0;
+        owner
+            .sync_pool(3, c.id.clone(), vec![b.id.clone()], &settings)
+            .await
+            .unwrap();
+        assert!(owner.handle(&b.id).is_err());
+        assert!(c.action(Action::State).await.is_ok());
+        owner.close_all(true).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn pool_cross_project_new_starts_and_config_change_retires_idle() {
+        let a = tempfile::tempdir().unwrap();
+        let b = tempfile::tempdir().unwrap();
+        let mut settings = pool_settings();
+        let owner = Arc::new(Supervisor::default());
+        let (first, _, _) = owner
+            .acquire(
+                &settings,
+                a.path().to_str().unwrap(),
+                None,
+                channel(),
+                None,
+                false,
+            )
+            .await
+            .unwrap();
+        owner
+            .sync_pool(1, String::new(), vec![first.id.clone()], &settings)
+            .await
+            .unwrap();
+        let (second, _, reused) = owner
+            .acquire(
+                &settings,
+                b.path().to_str().unwrap(),
+                None,
+                channel(),
+                None,
+                false,
+            )
+            .await
+            .unwrap();
+        assert!(!reused);
+        assert_ne!(first.process_id, second.process_id);
+        settings.session_dir = b.path().to_string_lossy().into();
+        owner
+            .sync_pool(2, second.id.clone(), vec![first.id.clone()], &settings)
+            .await
+            .unwrap();
+        assert!(owner.handle(&first.id).is_err());
+        owner.close_all(true).await.unwrap();
+    }
+
     /// 两个真实项目目录各两个会话占满四个名额，第五个只在 settled 后开始。
     #[tokio::test]
     async fn cross_project_fifo_waits_for_settled_and_deduplicates() {

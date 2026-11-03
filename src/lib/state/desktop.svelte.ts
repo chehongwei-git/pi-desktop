@@ -51,6 +51,18 @@ export class Desktop {
   /** 内容与进程生命周期分离；空历史也属于已加载的缓存。 */
   historyCached = $state(false);
   restoring = $state(false);
+  connectionPhase = $state('');
+  private phaseTimer?: ReturnType<typeof setTimeout>;
+  private connectionRecovery = false;
+  /** 短操作不闪现连接提示，恢复故障和正常加载使用不同文案。 */
+  setConnectionPhase(label: string): void {
+    clearTimeout(this.phaseTimer);
+    this.connectionPhase = '';
+    if (label)
+      this.phaseTimer = setTimeout(() => {
+        this.connectionPhase = label;
+      }, 200);
+  }
   waitingToSend = $state(false);
   private content = new SessionContent();
   private suppressTranscript = false;
@@ -64,6 +76,7 @@ export class Desktop {
   /** 连接与历史引用均就绪后才唤醒读取；失败一次性通知等待者，避免悬挂请求。 */
   finishRestore(): void {
     this.restoring = false;
+    this.setConnectionPhase('');
     for (const waiter of this.contentWaiters) {
       if (this.connection === 'ready') waiter.resolve();
       else waiter.reject(new Error(this.error || '连接恢复失败，请重试'));
@@ -714,7 +727,12 @@ export class Desktop {
     const images = this.images;
     const generation = ++this.generation;
     const modelRevision = this.modelConfigRevision;
+    this.connectionRecovery = this.connection === 'failed';
     this.connection = 'starting';
+    this.setConnectionPhase(
+      this.connectionRecovery ? '正在恢复连接' : '正在连接',
+    );
+    this.suppressTranscript = preserve;
     this.ack = 0;
     this.runtimeId = '';
     this.extensions = [];
@@ -795,6 +813,10 @@ export class Desktop {
         this.connection = 'failed';
         this.error = errorMessage(error);
       }
+    } finally {
+      this.suppressTranscript = false;
+      this.connectionRecovery = false;
+      this.setConnectionPhase('');
     }
   }
   /** Channel 唤醒只触发一次拉取循环；旧 runtime/generation 的事件全部忽略。 */
@@ -803,7 +825,31 @@ export class Desktop {
     if (!this.runtimeId && this.connection === 'starting')
       this.runtimeId = event.runtimeId;
     if (event.runtimeId !== this.runtimeId) return;
+    if (event.type === 'acquiring') {
+      this.setConnectionPhase(
+        this.connectionRecovery
+          ? '正在恢复连接'
+          : event.phase === 'opened'
+            ? '正在加载会话'
+            : event.phase === 'created'
+              ? '正在创建会话'
+              : '正在连接',
+      );
+      return;
+    }
+    if (event.type === 'released') {
+      // 进程被借给其他会话时仅撤销租约，保留已加载正文、草稿和阅读位置。
+      ++this.generation;
+      this.loadedHistoryCount = this.messages.length;
+      this.runtimeId = '';
+      this.connection = 'disconnected';
+      this.task = null;
+      this.stats = null;
+      this.setConnectionPhase('');
+      return;
+    }
     if (event.type === 'initialized') {
+      this.setConnectionPhase('');
       this.snapshot = event.snapshot;
       this.project = event.project;
       this.connection = 'ready';
@@ -814,6 +860,7 @@ export class Desktop {
       return;
     }
     if (event.type === 'failed') {
+      this.setConnectionPhase('');
       this.initialPending = null;
       for (const timer of this.extensionTimers.values()) clearTimeout(timer);
       this.extensionTimers.clear();
@@ -823,7 +870,7 @@ export class Desktop {
       this.error = errorMessage(event.error);
       return;
     }
-    if (this.restoring) {
+    if (this.restoring && this.connection !== 'starting') {
       this.wakePending = true;
       return;
     }
@@ -1807,24 +1854,9 @@ export class Desktop {
     }
     return true;
   }
-  /** 进程回收只释放运行资源；消息和已挂载详情继续用于离线阅读。 */
-  async releaseIdle(canRelease = () => true): Promise<void> {
-    const eligible = () =>
-      this.run === 'idle' &&
-      !this.extensions.length &&
-      !this.submitting &&
-      !this.waitingToSend &&
-      !this.restoring &&
-      !this.loadingHistory &&
-      !['queued', 'running'].includes(this.task?.state ?? '');
-    if (!eligible() || !canRelease()) return;
-    await this.drain();
-    if (!canRelease() || !eligible()) return;
-    this.loadedHistoryCount = this.messages.length;
-    await this.disconnect();
-  }
   /** 强制断开不是重试，不重发任何提示词。 */
   async disconnect(force = false): Promise<void> {
+    this.setConnectionPhase('');
     this.connection = 'stopping';
     for (const timer of this.extensionTimers.values()) clearTimeout(timer);
     this.extensionTimers.clear();

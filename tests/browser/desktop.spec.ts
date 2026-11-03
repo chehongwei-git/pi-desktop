@@ -140,6 +140,7 @@ async function mock(
                       : session.path,
                   }))
                 : [];
+          if (command === 'sync_process_pool') return;
           if (command === 'connect_pi') {
             if (host.deferConnection)
               await new Promise<void>((resolve) => {

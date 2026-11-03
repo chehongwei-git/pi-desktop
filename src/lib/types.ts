@@ -27,6 +27,7 @@ export interface Settings {
   zoom: number;
   /** 所有项目共享的执行上限。 */
   maxConcurrentTasks?: number;
+  idleProcessLimit?: number;
 }
 /** 宿主调度摘要不包含提示词和图片。 */
 export interface TaskActivity {
@@ -240,6 +241,12 @@ export type Wakeup =
       snapshot: Snapshot;
       project: string;
     }
+  | {
+      type: 'acquiring';
+      runtimeId: string;
+      phase: 'started' | 'opened' | 'created';
+    }
+  | { type: 'released'; runtimeId: string }
   | { type: 'available'; runtimeId: string }
   | { type: 'failed'; runtimeId: string; error: AppError };
 export type Action =
@@ -308,4 +315,5 @@ export const defaultSettings: Settings = {
   theme: 'system',
   zoom: 100,
   maxConcurrentTasks: 4,
+  idleProcessLimit: 5,
 };

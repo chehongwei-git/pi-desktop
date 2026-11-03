@@ -14,6 +14,9 @@ import type {
 } from './types';
 export interface Connected {
   runtimeId: string;
+  leaseId?: string;
+  processId?: string;
+  acquisition?: 'attached' | 'switched' | 'started';
   project: string;
   snapshot: Snapshot;
   version: string;
@@ -69,6 +72,14 @@ export const bridge = {
       thinking,
     };
     return invoke('submit_new_task', { request, channel });
+  },
+  /** 仅上报页面保护与空闲资格；宿主负责原子预留和最终检查。 */
+  syncPool(
+    revision: number,
+    selected: string,
+    eligible: string[],
+  ): Promise<void> {
+    return invoke('sync_process_pool', { revision, selected, eligible });
   },
   activity(): Promise<TaskActivity[]> {
     return invoke('list_activity');

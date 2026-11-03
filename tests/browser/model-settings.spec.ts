@@ -36,6 +36,7 @@ for (const variant of [
             };
           if (command === 'save_settings') return;
           if (command === 'list_sessions') return [];
+          if (command === 'sync_process_pool') return;
           if (command === 'connect_pi')
             return {
               runtimeId: 'r',

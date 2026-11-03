@@ -25,8 +25,32 @@ export class Workspace {
   private timer?: ReturnType<typeof setInterval>;
   private polling = false;
   private cacheTick = 0;
+  private poolRevision = 0;
+  /** 页面顺序仍用于内容缓存；进程 LRU 和预留由宿主管理。 */
+  private syncPool(): Promise<void> {
+    const eligible = this.sessions
+      .filter(
+        (session) =>
+          session !== this.active &&
+          session.runtimeId &&
+          session.connection === 'ready' &&
+          session.run === 'idle' &&
+          !session.submitting &&
+          !session.waitingToSend &&
+          !session.restoring &&
+          !session.loadingHistory &&
+          !session.openingSession &&
+          !session.extensions.length &&
+          !['queued', 'running'].includes(session.task?.state ?? ''),
+      )
+      .map((session) => session.runtimeId);
+    return this.api.syncPool(
+      ++this.poolRevision,
+      this.active.runtimeId,
+      eligible,
+    );
+  }
   private initializing = true;
-  private releasing = new Map<Desktop, Promise<void>>();
   private ensuring = new Map<Desktop, Promise<void>>();
   private pendingModel = new Map<Desktop, { key: string; thinking: string }>();
   private pendingOpen = new Map<string, Promise<void>>();
@@ -49,12 +73,18 @@ export class Workspace {
   private create(path?: string): Desktop {
     const port: Bridge = {
       ...this.api,
-      connect: (project, receive) =>
-        this.api.connect(
+      submitNew: async (...args) => {
+        await this.syncPool();
+        return this.api.submitNew(...args);
+      },
+      connect: async (project, receive) => {
+        await this.syncPool();
+        return this.api.connect(
           project,
           receive,
           path ?? session.snapshot.sessionFile,
-        ),
+        );
+      },
       save: async (settings) => {
         await this.api.save(settings);
         for (const session of this.sessions) session.settings = settings;
@@ -170,6 +200,7 @@ export class Workspace {
   }
   async activate(session: Desktop): Promise<void> {
     this.select(session);
+    await this.syncPool();
     if (
       session.snapshot.sessionFile &&
       (session.connection !== 'ready' || session.restoring)
@@ -186,6 +217,9 @@ export class Workspace {
     ];
     session.unread = false;
     this.retain(session);
+    void this.syncPool().catch((error) => {
+      this.error = errorMessage(error);
+    });
   }
   newDraft(project: string, preserve = false): void {
     const previous = this.active;
@@ -244,8 +278,8 @@ export class Workspace {
     return task;
   }
   private async ensureLocal(session: Desktop): Promise<void> {
-    // 点击可能发生在后台空闲回收等待宿主关闭期间；须等旧写入者释放身份再恢复。
-    await this.releasing.get(session);
+    // 等宿主完成回收及旧租约通知，再决定是否需要重新获取。
+    await this.syncPool();
     if (session.runtimeId && session.connection === 'ready') {
       await this.applyPendingModel(session);
       return;
@@ -566,6 +600,7 @@ export class Workspace {
         if (!task) continue;
         if (session.task?.state !== task.state) {
           if (task.state === 'failed') {
+            session.setConnectionPhase('');
             session.run = 'idle';
             session.error = task.error || '任务执行失败';
             if (
@@ -580,6 +615,7 @@ export class Workspace {
               session.recoveredImages.push(session.taskInput);
           }
           if (task.state === 'stopped') {
+            session.setConnectionPhase('');
             session.run = 'idle';
             if (
               !session.snapshot.sessionFile &&
@@ -601,32 +637,7 @@ export class Workspace {
         }
         session.task = task;
       }
-      // 已结束且非当前会话的运行时按最近访问顺序淘汰；等待用户的会话不释放。
-      const idle = this.sessions.filter(
-        (session) =>
-          session !== this.active &&
-          session.runtimeId &&
-          session.run === 'idle' &&
-          !session.submitting &&
-          !session.waitingToSend &&
-          !session.restoring &&
-          !session.loadingHistory &&
-          !session.openingSession &&
-          !session.extensions.length &&
-          !['queued', 'running'].includes(session.task?.state ?? '') &&
-          !this.releasing.has(session),
-      );
-      // 仅当前会话保留空闲进程；后台内容与视图不随进程回收。
-      for (const session of idle) {
-        const release = session.releaseIdle(() => session !== this.active);
-        this.releasing.set(session, release);
-        try {
-          await release;
-        } finally {
-          this.releasing.delete(session);
-          if (session === this.active) this.retain(session);
-        }
-      }
+      await this.syncPool();
       let cached = this.sessions.filter(
         (session) => session.historyCached,
       ).length;
@@ -640,8 +651,7 @@ export class Workspace {
           session.submitting ||
           session.waitingToSend ||
           session.restoring ||
-          session.loadingHistory ||
-          this.releasing.has(session)
+          session.loadingHistory
         )
           continue;
         session.evictContent();

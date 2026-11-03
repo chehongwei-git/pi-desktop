@@ -74,6 +74,8 @@ pub struct Settings {
     pub zoom: u32,
     /// 全应用共享的执行名额，旧配置默认四个。
     pub max_concurrent_tasks: u32,
+    /// 全局空闲进程额度；零表示不缓存后台进程。
+    pub idle_process_limit: u32,
 }
 impl Default for Settings {
     /// 未配置时自动发现 Pi，采用系统主题，不创建默认工作项目。
@@ -92,6 +94,7 @@ impl Default for Settings {
             theme: "system".into(),
             zoom: 100,
             max_concurrent_tasks: 4,
+            idle_process_limit: 5,
         }
     }
 }

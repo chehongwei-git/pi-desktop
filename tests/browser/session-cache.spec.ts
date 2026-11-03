@@ -27,6 +27,7 @@ test('cached conversation stays readable and editable during reconnect without l
       theme: 'light',
       zoom: 100,
       maxConcurrentTasks: 4,
+      idleProcessLimit: 5,
     };
     const catalog = Array.from({ length: 13 }, (_, i) => ({
       path: `/cache/${i + 1}.jsonl`,
@@ -60,6 +61,22 @@ test('cached conversation stays readable and editable during reconnect without l
         }
         if (command === 'list_sessions') return catalog;
         if (command === 'list_activity') return [];
+        if (command === 'sync_process_pool') {
+          let excess = runtimes.size - settings.idleProcessLimit;
+          for (const id of args.eligible) {
+            if (excess <= 0) break;
+            const runtime = runtimes.get(id);
+            if (!runtime || id === args.selected) continue;
+            runtimes.delete(id);
+            const callback = callbacks.get(runtime.channel.id);
+            callback?.({
+              message: { type: 'released', runtimeId: id },
+              index: runtime.index++,
+            });
+            excess--;
+          }
+          return;
+        }
         if (command === 'connect_pi') {
           const path = args.sessionPath ?? '/cache/1.jsonl';
           if (opened.has(path) && host.holdReconnect)
@@ -74,7 +91,11 @@ test('cached conversation stays readable and editable during reconnect without l
             model: { provider: 'mock', id: 'm', name: 'Mock' },
             thinkingLevel: 'off',
           };
-          runtimes.set(runtimeId, snapshot);
+          runtimes.set(runtimeId, {
+            ...snapshot,
+            channel: args.channel,
+            index: 0,
+          });
           return {
             runtimeId,
             project: '/cache',
@@ -143,12 +164,28 @@ test('cached conversation stays readable and editable during reconnect without l
   await expect(transcript).toContainText('/cache/2.jsonl');
   await expect
     .poll(() => page.evaluate(() => (window as any).cacheLiveCount()))
+    .toBe(2);
+  // 常用会话命中原租约，不重新启动，也不显示恢复提示。
+  await open(1);
+  await expect(page.locator('.connection')).toHaveText('已连接');
+  await expect(
+    transcript.locator('[data-message-id="entry-0"]'),
+  ).toHaveAttribute('data-cache-marker', 'original');
+  await open(2);
+  await page.evaluate(() => {
+    // 降为 1 触发宿主回收，单独验证失去租约后的恢复体验。
+    (window as any).__TAURI_INTERNALS__.invoke('save_settings', {
+      settings: { idleProcessLimit: 1 },
+    });
+  });
+  await expect
+    .poll(() => page.evaluate(() => (window as any).cacheLiveCount()))
     .toBe(1);
   await page.evaluate(() => {
     (window as any).holdReconnect = true;
   });
   await open(1);
-  await expect(page.getByText('正在恢复连接', { exact: true })).toBeVisible();
+  await expect(page.getByText('正在连接', { exact: true })).toBeVisible();
   await expect(transcript).toContainText('/cache/1.jsonl');
   await expect(page.locator('.session-loading')).toHaveCount(0);
   await expect(page.locator('.composer textarea')).toHaveValue('切换前草稿');
@@ -183,7 +220,7 @@ test('cached conversation stays readable and editable during reconnect without l
   }
   await expect
     .poll(() => page.evaluate(() => (window as any).cacheLiveCount()))
-    .toBe(1);
+    .toBe(5);
   await expect(page.locator('.session-transcript')).toHaveCount(6);
   await open(1);
   await expect(transcript).toContainText('/cache/1.jsonl');

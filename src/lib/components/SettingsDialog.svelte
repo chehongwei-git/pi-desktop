@@ -83,7 +83,8 @@
     models: modelsDirty,
     storage:
       form.sessionDir !== initial.sessionDir ||
-      form.maxConcurrentTasks !== initial.maxConcurrentTasks,
+      form.maxConcurrentTasks !== initial.maxConcurrentTasks ||
+      form.idleProcessLimit !== initial.idleProcessLimit,
   });
   const changedList = $derived(
     sections.filter((item) => changed[item.id as keyof typeof changed]),
@@ -169,6 +170,7 @@
       runtimePath: form.runtimePath,
       sessionDir: form.sessionDir,
       maxConcurrentTasks: form.maxConcurrentTasks ?? 4,
+      idleProcessLimit: form.idleProcessLimit ?? 5,
       theme: form.theme,
       extraPath: paths
         .split('\n')
@@ -446,6 +448,20 @@
                 step="1"
                 bind:value={form.maxConcurrentTasks}
                 aria-describedby="concurrency-help"
+              />
+              <label for="idle-process-limit">空闲进程缓存数量</label>
+              <p id="idle-process-help">
+                全局按需保留，切换会话时复用。默认 5 个，0
+                表示不缓存后台进程；运行任务另计。缓存不会因空闲时间自动释放，会持续占用内存。
+              </p>
+              <input
+                id="idle-process-limit"
+                type="number"
+                min="0"
+                max="20"
+                step="1"
+                bind:value={form.idleProcessLimit}
+                aria-describedby="idle-process-help"
               />
               <label for="session-dir">会话目录 <span>可选</span></label>
               <p id="session-help">

@@ -1,10 +1,15 @@
 /** 可重复的 RPC 子进程夹具：不加载真实配置、不创建真实会话、不访问模型网络。 */
 import readline from 'node:readline';
+import { readFileSync } from 'node:fs';
 if (process.argv.includes('--version')) {
   console.log('1.4.0');
   process.exit(0);
 }
 let name = 'mock';
+let sessionFile = 'mock.jsonl';
+let cwd = process.cwd();
+let newCount = 0;
+let switchCount = 0;
 let streaming = false;
 let pendingAbort;
 const emit = (value) => process.stdout.write(JSON.stringify(value) + '\n');
@@ -46,7 +51,10 @@ for await (const line of readline.createInterface({
   switch (request.type) {
     case 'get_state':
       reply(request, {
-        sessionFile: 'mock.jsonl',
+        sessionFile,
+        cwd,
+        newCount,
+        switchCount,
         sessionName: name,
         isStreaming: streaming,
         thinkingLevel: 'off',
@@ -146,8 +154,26 @@ for await (const line of readline.createInterface({
       emit({ type: 'agent_settled' });
       break;
     case 'new_session':
+      if (name === 'cancel-new') {
+        reply(request, { cancelled: true });
+        break;
+      }
+      if (name === 'slow-new')
+        await new Promise((resolve) => setTimeout(resolve, 150));
+      sessionFile = `mock-new-${++newCount}.jsonl`;
+      reply(request, { cancelled: false });
+      break;
     case 'switch_session':
-      reply(request, { cancelled: request.sessionPath === 'cancel' });
+      if (request.sessionPath === 'cancel') {
+        reply(request, { cancelled: true });
+        break;
+      }
+      sessionFile = request.sessionPath;
+      switchCount++;
+      try {
+        cwd = JSON.parse(readFileSync(sessionFile, 'utf8').split('\n')[0]).cwd;
+      } catch {}
+      reply(request, { cancelled: false });
       break;
     case 'extension_ui_response':
       if (

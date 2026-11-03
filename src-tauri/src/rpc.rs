@@ -85,6 +85,10 @@ fn timing_key(value: &Value) -> Option<String> {
     ))
 }
 impl Projection {
+    /// 等待用户的扩展不能被进程池借走。
+    pub fn waiting_for_extension(&self) -> bool {
+        !self.waiting_extensions.is_empty()
+    }
     /// 新会话或恢复成功后才能清空；取消切换不得调用。
     pub fn reset(&mut self) {
         self.messages.clear();

@@ -71,7 +71,20 @@ fn save_settings(state: State<'_, AppState>, settings: Settings) -> Result<()> {
 async fn detect_pi(state: State<'_, AppState>, settings: Option<Settings>) -> Result<Value> {
     platform::version(&settings.unwrap_or(state.config()?)).await
 }
-/// 每个真实会话启动独立进程，初始化失败只回收该次实例。
+/// 页面同步只影响缓存资格；业务调度和 Actor 共同确认是否可复用。
+#[tauri::command]
+async fn sync_process_pool(
+    state: State<'_, AppState>,
+    revision: u64,
+    selected: String,
+    eligible: Vec<String>,
+) -> Result<()> {
+    state
+        .runtimes
+        .sync_pool(revision, selected, eligible, &state.config()?)
+        .await
+}
+/// 获取会话租约，物理进程可从全局空闲池复用。
 #[tauri::command]
 async fn connect_pi(
     app: tauri::AppHandle,
@@ -92,6 +105,17 @@ async fn connect_pi(
     };
     let _gate = state.lifecycle.lock().await;
     let settings = state.config()?;
+    if let Some(path) = session_path.clone() {
+        let cwd = tokio::task::spawn_blocking(move || history::session_cwd(&path))
+            .await
+            .map_err(|_| AppError::new("SESSION_HEADER", "读取会话头失败"))??;
+        if session_identity(&cwd)? != session_identity(&project)? {
+            return Err(AppError::new(
+                "PROJECT_MISMATCH",
+                "历史会话不属于所选项目，请刷新侧栏",
+            ));
+        }
+    }
     let detected = platform::version(&settings).await?;
     if let Some(path) = &session_path {
         let key = session_identity(path)?;
@@ -109,37 +133,21 @@ async fn connect_pi(
             state.sessions.lock().unwrap().remove(&key);
         }
     }
-    let handle = runtime::start(&settings, project.clone(), channel).await?;
-    // 提前保存句柄，让启动时扩展的交互响应能送达，避免信任弹窗与初始化互锁。
-    state.runtimes.register(handle.clone());
-    let init = tokio::time::timeout(std::time::Duration::from_secs(15), async {
-        if let Some(path) = &session_path {
-            let switched = handle
-                .action(Action::SwitchSession { path: path.clone() })
-                .await?;
-            if switched["cancelled"] == true {
-                return Err(AppError::new("CANCELLED", "扩展取消了会话打开"));
-            }
-        }
-        // 两个只读查询独立提交，仍在握手阶段验证必需的历史快照能力。
-        let (snapshot, _) = tokio::try_join!(
-            handle.action(Action::State),
-            handle.action(Action::History { before: None }),
-        )?;
-        Ok::<Value, AppError>(snapshot)
-    })
-    .await;
-    let snapshot = match init {
-        Ok(Ok(snapshot)) => snapshot,
-        other => {
-            let _ = handle.shutdown().await;
-            state.runtimes.remove(&handle.id);
-            return Err(match other {
-                Ok(Err(e)) => e,
-                _ => AppError::new("INIT_TIMEOUT", "Pi 初始化超过 15 秒，请检查扩展与运行时"),
-            });
-        }
-    };
+    // 跨项目复用在真实 Pi 集成测试覆盖后按精确版本开放。
+    let cross_project = detected["version"]
+        .as_str()
+        .is_some_and(|v| v.trim() == "1.5.0");
+    let (handle, snapshot, reused) = state
+        .runtimes
+        .acquire(
+            &settings,
+            &project,
+            session_path.as_deref(),
+            channel,
+            None,
+            cross_project,
+        )
+        .await?;
     if let Some(path) = snapshot["sessionFile"].as_str() {
         state
             .sessions
@@ -148,7 +156,7 @@ async fn connect_pi(
             .insert(session_identity(path)?, handle.id.clone());
     }
     Ok(
-        json!({"runtimeId":handle.id,"project":project,"snapshot":snapshot,"version":detected["version"],"verified":detected["verified"]}),
+        json!({"runtimeId":handle.id,"leaseId":handle.id,"processId":handle.process_id,"acquisition":if reused { "switched" } else { "started" },"project":project,"snapshot":snapshot,"version":detected["version"],"verified":detected["verified"]}),
     )
 }
 /// 定向关闭一个运行时，其他项目和会话继续执行。
@@ -381,12 +389,30 @@ async fn perform(
         result
     } else {
         let tracks_session = matches!(action, Action::State);
+        let user_action = !matches!(
+            action,
+            Action::State
+                | Action::History { .. }
+                | Action::Models
+                | Action::ThinkingLevels
+                | Action::Commands
+                | Action::SessionStats
+                | Action::LastAssistant
+                | Action::ForkMessages
+                | Action::SessionTree
+                | Action::ExtensionResponse { .. }
+        );
         let result = handle.action(action).await?;
+        if user_action {
+            state.runtimes.touch(&runtime_id);
+        }
         if tracks_session {
             if let Some(path) = result["sessionFile"].as_str() {
                 let key = session_identity(path)?;
                 let mut sessions = state.sessions.lock().unwrap();
-                if sessions.get(&key).is_some_and(|owner| owner != &runtime_id) {
+                if sessions.get(&key).is_some_and(|owner| {
+                    owner != &runtime_id && state.runtimes.handle(owner).is_ok()
+                }) {
                     return Err(AppError::new(
                         "SESSION_OPEN",
                         "该会话已被另一个运行实例打开",
@@ -516,6 +542,7 @@ pub fn run() {
             discover_models,
             detect_pi,
             connect_pi,
+            sync_process_pool,
             disconnect_pi,
             list_activity,
             submit_new_task,

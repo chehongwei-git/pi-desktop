@@ -28,6 +28,9 @@ pub fn save(dir: &Path, settings: &Settings) -> Result<()> {
     if !(1..=16).contains(&settings.max_concurrent_tasks) {
         return Err(AppError::new("SETTINGS", "并发任务数须为 1 至 16"));
     }
+    if settings.idle_process_limit > 20 {
+        return Err(AppError::new("SETTINGS", "空闲进程缓存数量须为 0 至 20"));
+    }
     if !(80..=150).contains(&settings.zoom) {
         return Err(AppError::new(
             "SETTINGS",
@@ -131,6 +134,19 @@ mod tests {
         };
         save(dir.path(), &settings).unwrap();
         assert_eq!(load(dir.path()).unwrap().max_concurrent_tasks, 8);
+    }
+    #[test]
+    fn idle_pool_default_and_bounds() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("settings.json"), r#"{"schemaVersion":1}"#).unwrap();
+        assert_eq!(load(dir.path()).unwrap().idle_process_limit, 5);
+        for limit in [0, 5, 20, 21] {
+            let settings = Settings {
+                idle_process_limit: limit,
+                ..Settings::default()
+            };
+            assert_eq!(save(dir.path(), &settings).is_ok(), limit <= 20);
+        }
     }
     #[test]
     fn invalid_zoom_is_rejected() {

@@ -61,6 +61,7 @@ test('returns from a new-chat draft to existing sessions', async ({ page }) => {
         if (command === 'submit_new_task') {
           return { desktopTask: 'new-task', runtimeId: 'reserved-new' };
         }
+        if (command === 'sync_process_pool') return;
         if (command === 'connect_pi') {
           sessionFile = args.sessionPath ?? 'original.jsonl';
           return {
@@ -220,7 +221,9 @@ test('returns from a new-chat draft to existing sessions', async ({ page }) => {
   await expect(input).toHaveValue('');
   // mock 尚未发 initialized，提交回执已足以展示首条消息。
   await expect(page.locator('.welcome')).toHaveCount(0);
-  await expect(page.locator('.session-transcript:not([hidden])')).toContainText('New draft');
+  await expect(page.locator('.session-transcript:not([hidden])')).toContainText(
+    'New draft',
+  );
   await expect(page.locator('.session-loading')).toHaveCount(0);
   await page.getByRole('button', { name: /^新对话/ }).click();
   await expect(page.locator('.welcome')).toBeVisible();

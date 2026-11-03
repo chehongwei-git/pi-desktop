@@ -1190,16 +1190,14 @@
           <span
             class="connection"
             class:connected={desktop.connection === 'ready'}
-            ><span class="status-dot"></span>{desktop.restoring &&
-            desktop.historyCached
-              ? '正在恢复连接'
-              : desktop.connection === 'ready'
-                ? '已连接'
-                : desktop.connection === 'starting'
-                  ? '连接中'
+            ><span class="status-dot"></span>{desktop.connectionPhase ||
+              (desktop.restoring || desktop.connection === 'starting'
+                ? '准备中'
+                : desktop.connection === 'ready'
+                  ? '已连接'
                   : desktop.connection === 'failed'
                     ? '连接失败'
-                    : '未连接'}</span
+                    : '未连接')}</span
           >
           <div class="session-menu-wrap">
             <button
