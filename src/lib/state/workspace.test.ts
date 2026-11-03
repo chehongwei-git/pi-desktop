@@ -846,6 +846,13 @@ describe('cross-project workspace', () => {
     await workspace.openEntry(draftEntry);
     expect(workspace.active).toBe(local);
     expect(connect).not.toHaveBeenCalled();
+    // 固定为同毫秒，强制覆盖发送时间相同后的创建时间排序，不依赖执行速度。
+    local.createdAt = '2026-01-02T00:00:00.000Z';
+    local.lastSentAt = local.createdAt;
+    const other = workspace.sessions.find(
+      (session) => session.draft === 'other draft',
+    )!;
+    other.createdAt = local.createdAt;
     const before = workspace.sidebarSessions.map((entry) => entry.id);
     local.snapshot = { sessionFile: 'C:/Sessions/One.jsonl' };
     local.newChatProject = null;

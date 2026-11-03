@@ -172,6 +172,15 @@ TAURI_BUNDLER_TOOLS_GITHUB_MIRROR=https://v4.gh-proxy.org/https://github.com npm
 - Windows Edge 的 6 项 Playwright 浏览器用例通过：`session-cache.spec.ts`、`multi-session.spec.ts`、`images.spec.ts`、`tool-output.spec.ts` 和 `history-scroll.spec.ts`（后者两项）。新增用例顺序打开十三个会话，确认六个保留视图、模拟宿主最终仅剩当前空闲运行时，缓存切回与重连提交保留正文节点、阅读位置和新编辑的草稿。浏览器冷启动与并行全量测试曾超时，独立重跑通过；这不是切换速度基准。
 - 浏览器使用模拟 IPC；未测量真实 Pi 进程内存、冷启动延迟或长历史 p95 切换耗时，未进行原生安装包及 macOS/Linux 实机验收，不宣称三平台原生或性能验证已完成。
 
+## GitHub CI 浏览器回归修复（macOS）
+
+- 模拟宿主按 runtime 隔离 Channel、事件队列与历史路径，补充任务查询与新任务提交，并以结构化克隆模拟 IPC 序列化，避免正文句柄污染共享夹具。
+- 多会话缓存下的正文定位限定可见视图；导航断言覆盖独立连接、延迟启动、已接受首条消息和返回旧会话时节点不重挂载。保留全部浏览器用例，未跳过失败检查。
+- 修复独立连接恢复历史后索引暂时为空导致标题丢失；修复本地草稿绑定历史文件时创建时间改变引起的同毫秒排序不稳定，补充确定性时间输入。
+- 本机 Chromium 全量浏览器 82 项通过，并在 `CI=true` 下再次 82 项通过；前端单元/组件 297 项通过，启动脚本 3 项通过；类型检查 0 错误、0 警告，生产构建通过。
+- 修正当前 `model_config.rs` 的 rustfmt 差异；Rust 格式检查、Clippy `--locked --all-targets -- -D warnings` 通过，Rust 测试 54 项通过、1 项原有环境依赖测试忽略。
+- 本次未在 Windows/Linux runner 重跑，未制作原生安装包。浏览器使用模拟 IPC，不能替代三平台原生验收；远端发布应等待新提交的三平台 CI 全部通过。
+
 ## 尚待验收与已知限制
 
 - Pi 1.4.0 的真实模型发送、真实 CLI 历史恢复、工具和扩展交互仍需使用者实机验收；模拟协议不等同于完整用户环境。

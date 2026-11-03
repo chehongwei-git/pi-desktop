@@ -36,6 +36,7 @@ for (const variant of [
             };
           if (command === 'save_settings') return;
           if (command === 'list_sessions') return [];
+          if (command === 'list_activity') return [];
           if (command === 'sync_process_pool') return;
           if (command === 'connect_pi')
             return {
@@ -94,6 +95,8 @@ for (const variant of [
       name: 'API 协议',
       exact: true,
     });
+    // 字体加载会改变表单高度；先等待字体与布局稳定，再测量菜单是否挤动正文。
+    await page.evaluate(() => document.fonts.ready);
     await protocol.scrollIntoViewIfNeeded();
     await protocol.focus();
     const layout = page.locator('.settings-layout');

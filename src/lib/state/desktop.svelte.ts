@@ -749,7 +749,11 @@ export class Desktop {
       this.version = connected.version;
       this.snapshot = connected.snapshot;
       this.stats = null;
-      this.currentSessionTitle = '';
+      // 独立连接直接恢复历史，不再经过 switchSession；趁索引尚在缓存标题。
+      // 只查新快照路径，避免跨会话连接继承旧会话名称。
+      this.currentSessionTitle = this.snapshot.sessionFile
+        ? this.sessionLabel(this.snapshot.sessionFile)
+        : '';
       this.newChatProject = null;
       // 重连或切换项目后不得把旧草稿模型隐式应用到新会话。
       this.clearDraftModel();

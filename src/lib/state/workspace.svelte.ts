@@ -425,7 +425,11 @@ export class Workspace {
           summary ||
           (session?.restored ? '恢复的会话' : '新对话'),
         preview: history?.preview || summary,
-        timestamp: history?.timestamp || session?.createdAt || '',
+        // 本地草稿绑定文件后保留原创建时间；否则同毫秒发送时索引时间会改变排序。
+        timestamp:
+          session && !session.desktopId.startsWith('history:')
+            ? session.createdAt
+            : history?.timestamp || session?.createdAt || '',
         modified: history?.modified ?? 0,
         lastPromptAt: session?.lastSentAt || history?.lastPromptAt,
         warning: history?.warning ?? null,

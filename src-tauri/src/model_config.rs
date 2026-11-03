@@ -224,7 +224,9 @@ fn read_model(
     // 自定义模型以最终强度决定能力；无独立等级时跟随全局默认。
     if !override_only {
         // 缺省支持图片，但保留用户显式配置的仅文字能力。
-        values.entry("input".into()).or_insert_with(|| json!(["text", "image"]));
+        values
+            .entry("input".into())
+            .or_insert_with(|| json!(["text", "image"]));
         let thinking = settings["modelThinkingLevels"][format!("{provider}/{id}")]
             .as_str()
             .or_else(|| settings["defaultThinkingLevel"].as_str())
@@ -773,21 +775,37 @@ mod tests {
     #[test]
     fn image_input_defaults_survive_save_and_respect_explicit_text_only() {
         let dir = tempfile::tempdir().unwrap();
-        fs::write(dir.path().join("models.json"), json!({"providers": {"test": {
-            "models": [{"id": "default"}, {"id": "text", "input": ["text"]}],
-            "modelOverrides": {"catalog": {"maxTokens": 1000}}
-        }}}).to_string()).unwrap();
+        fs::write(
+            dir.path().join("models.json"),
+            json!({"providers": {"test": {
+                "models": [{"id": "default"}, {"id": "text", "input": ["text"]}],
+                "modelOverrides": {"catalog": {"maxTokens": 1000}}
+            }}})
+            .to_string(),
+        )
+        .unwrap();
         let mut form = load(dir.path()).unwrap();
-        assert_eq!(form.providers[0].models[0].values["input"], json!(["text", "image"]));
+        assert_eq!(
+            form.providers[0].models[0].values["input"],
+            json!(["text", "image"])
+        );
         assert_eq!(form.providers[0].models[1].values["input"], json!(["text"]));
         assert!(!form.providers[0].models[2].values.contains_key("input"));
         // 默认选项删除字段后，宿主仍须写入图片能力，不能退回 Pi 的仅文字默认。
         form.providers[0].models[0].values.remove("input");
         save(dir.path(), form).unwrap();
         let stored = parse(&raw(dir.path()).unwrap()[0], "models.json").unwrap();
-        assert_eq!(stored["providers"]["test"]["models"][0]["input"], json!(["text", "image"]));
-        assert_eq!(stored["providers"]["test"]["models"][1]["input"], json!(["text"]));
-        assert!(stored["providers"]["test"]["modelOverrides"]["catalog"].get("input").is_none());
+        assert_eq!(
+            stored["providers"]["test"]["models"][0]["input"],
+            json!(["text", "image"])
+        );
+        assert_eq!(
+            stored["providers"]["test"]["models"][1]["input"],
+            json!(["text"])
+        );
+        assert!(stored["providers"]["test"]["modelOverrides"]["catalog"]
+            .get("input")
+            .is_none());
     }
 
     #[test]

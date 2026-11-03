@@ -15,12 +15,14 @@ async function mock(
       const host = window as any;
       let serial = 0;
       const callbacks = new Map();
-      let channel: any;
-      let sequence = 0;
-      let index = 0;
-      let pending: any[] = [];
-      let sessionFile = 'mock.jsonl';
-      let cwd = 'C:/Users/mock';
+      // 每个连接独立保存历史路径、事件队列和 Channel，后台会话不能串用前台状态。
+      const runtimes = new Map<string, any>();
+      let activeRuntime: any;
+      const wake = (runtime: any, message: any) =>
+        callbacks.get(runtime.channel.id)?.({
+          index: runtime.index++,
+          message: { ...message, runtimeId: runtime.id },
+        });
       host.ipcCalls = [];
       const settings = {
         schemaVersion: 1,
@@ -56,6 +58,7 @@ async function mock(
             command,
             project: args.project,
             action: args.action,
+            sessionPath: args.sessionPath,
           });
           if (command === 'get_settings') return settings;
           if (command === 'save_settings') {
@@ -81,6 +84,8 @@ async function mock(
               await new Promise<void>((resolve) => {
                 host.releaseContent = resolve;
               });
+            if (host.bodies?.[args.id] === undefined)
+              throw new Error(`夹具缺少正文 ${args.id}`);
             const text = (host.bodies[args.id] as string).slice(
               args.offset,
               args.offset + 65536,
@@ -140,21 +145,66 @@ async function mock(
                       : session.path,
                   }))
                 : [];
+          // 工作区会轮询任务状态；空闲夹具没有宿主任务，不能把轮询当成 IPC 错误。
+          if (command === 'list_activity') return [];
+          if (command === 'get_submission') return null;
           if (command === 'sync_process_pool') return;
+          if (command === 'submit_new_task') {
+            if (host.failPrompt) throw new Error('模拟发送失败');
+            const { request, channel } = args;
+            const connected = await host.__TAURI_INTERNALS__.invoke(
+              'connect_pi',
+              {
+                project: request.project,
+                sessionPath: 'new-project.jsonl',
+                channel,
+              },
+            );
+            const runtime = runtimes.get(connected.runtimeId)!;
+            // 接受响应先返回，初始化与正文事件在后续轮次通知。
+            setTimeout(async () => {
+              if (host.deferTaskStart)
+                await new Promise<void>((resolve) => {
+                  host.releaseTaskStart = resolve;
+                });
+              wake(runtime, {
+                type: 'initialized',
+                snapshot: connected.snapshot,
+                project: runtime.cwd,
+              });
+              await host.__TAURI_INTERNALS__.invoke('perform', {
+                runtimeId: runtime.id,
+                action: request.action,
+              });
+            }, 0);
+            return { desktopTask: 'task-' + runtime.id, runtimeId: runtime.id };
+          }
           if (command === 'connect_pi') {
             if (host.deferConnection)
               await new Promise<void>((resolve) => {
                 host.releaseConnection = resolve;
               });
-            channel = args.channel;
-            cwd = args.project || 'C:/Users/mock';
+            const runtime = {
+              id: '',
+              channel: args.channel,
+              index: 0,
+              sequence: 0,
+              pending: [] as any[],
+              sessionFile:
+                args.sessionPath ||
+                (workspaces || host.sessionCatalog ? '' : 'mock.jsonl'),
+              cwd: args.project || 'C:/Users/mock',
+            };
+            runtime.id = 'mock-' + ++serial;
+            runtimes.set(runtime.id, runtime);
+            activeRuntime = runtime;
             return {
-              runtimeId: 'mock',
-              project: args.project || 'C:/Users/mock',
+              runtimeId: runtime.id,
+              project: runtime.cwd,
               version: '1.4.0',
               verified: true,
               snapshot: {
-                sessionFile: 'mock.jsonl',
+                sessionFile: runtime.sessionFile,
                 model: { provider: 'mock', id: 'model' },
                 thinkingLevel: 'off',
                 isStreaming: false,
@@ -162,12 +212,17 @@ async function mock(
             };
           }
           if (command === 'next_events') {
-            const events = pending;
-            pending = [];
-            if (events.length) sequence++;
-            return { runtimeId: 'mock', sequence, events };
+            const runtime = runtimes.get(args.runtimeId)!;
+            const events = runtime.pending.splice(0);
+            if (events.length) runtime.sequence++;
+            return {
+              runtimeId: runtime.id,
+              sequence: runtime.sequence,
+              events,
+            };
           }
           if (command === 'perform') {
+            const runtime = runtimes.get(args.runtimeId)!;
             switch (args.action.type) {
               case 'extension_response':
                 if (
@@ -196,14 +251,14 @@ async function mock(
                 }
                 return {};
               case 'new_project_session':
-                cwd = args.action.project || 'C:/Users/mock';
-                sessionFile = 'new-project.jsonl';
+                runtime.cwd = args.action.project || 'C:/Users/mock';
+                runtime.sessionFile = 'new-project.jsonl';
                 return { cancelled: false };
               case 'new_session':
-                sessionFile = 'new.jsonl';
+                runtime.sessionFile = 'new.jsonl';
                 return { cancelled: false };
               case 'switch_session':
-                sessionFile = args.action.path;
+                runtime.sessionFile = args.action.path;
                 return { cancelled: false };
               case 'models':
                 return {
@@ -221,16 +276,12 @@ async function mock(
                 return { commands: host.bridgeCommands ?? [] };
               case 'session_tree':
                 if (host.fatalTree) {
-                  callbacks.get(channel.id)({
-                    index: index++,
-                    message: {
-                      type: 'failed',
-                      runtimeId: 'mock',
-                      error: {
-                        code: 'PROTOCOL',
-                        message: 'Pi stdout 不是有效 JSONL',
-                        diagnosticId: 'test-tree',
-                      },
+                  wake(runtime, {
+                    type: 'failed',
+                    error: {
+                      code: 'PROTOCOL',
+                      message: 'Pi stdout 不是有效 JSONL',
+                      diagnosticId: 'test-tree',
                     },
                   });
                   throw new Error('Pi stdout 不是有效 JSONL');
@@ -242,7 +293,7 @@ async function mock(
                 if (host.treeError) throw new Error('模拟树加载失败');
                 return { nodes: [] };
               case 'history':
-                if (host.slowSession === sessionFile)
+                if (host.slowSession === runtime.sessionFile)
                   await new Promise<void>((resolve) => {
                     host.releaseHistory = resolve;
                   });
@@ -262,8 +313,9 @@ async function mock(
                   };
                 }
                 return {
+                  // 真实 IPC 返回独立对象；前端绑定正文句柄不能污染下一次历史响应。
                   messages:
-                    host.historyMessages ??
+                    structuredClone(host.historyMessages) ??
                     Array.from({ length: count }, (_, i) =>
                       message(
                         String(i),
@@ -282,7 +334,7 @@ async function mock(
                   });
                 if (host.queuePrompts && args.action.mode)
                   return { disposition: 'queued' };
-                pending = [
+                runtime.pending = [
                   { type: 'run', state: 'running' },
                   {
                     type: 'message',
@@ -298,20 +350,13 @@ async function mock(
                   },
                   ...(!host.holdRun ? [{ type: 'run', state: 'idle' }] : []),
                 ];
-                setTimeout(
-                  () =>
-                    callbacks.get(channel.id)({
-                      index: index++,
-                      message: { type: 'available', runtimeId: 'mock' },
-                    }),
-                  10,
-                );
+                setTimeout(() => wake(runtime, { type: 'available' }), 10);
                 return {};
               case 'session_stats':
                 // 用量叠在真实统计形状上，浏览器验收同时覆盖折叠读数与展开明细。
                 if (host.statsError) throw new Error('模拟统计失败');
                 return {
-                  sessionFile,
+                  sessionFile: runtime.sessionFile,
                   sessionId: 'mock',
                   userMessages: 1,
                   assistantMessages: 1,
@@ -343,10 +388,10 @@ async function mock(
                 };
               case 'state':
                 return {
-                  cwd,
+                  cwd: runtime.cwd,
                   sessionFile: host.windowsPaths
-                    ? sessionFile.replace(/\//g, '\\').toUpperCase()
-                    : sessionFile,
+                    ? runtime.sessionFile.replace(/\//g, '\\').toUpperCase()
+                    : runtime.sessionFile,
                   model: { provider: 'mock', id: 'model' },
                   thinkingLevel: 'off',
                   isStreaming: false,
@@ -357,11 +402,8 @@ async function mock(
         },
       };
       host.emitEvents = (events: unknown[]) => {
-        pending.push(...events);
-        callbacks.get(channel.id)({
-          index: index++,
-          message: { type: 'available', runtimeId: 'mock' },
-        });
+        activeRuntime.pending.push(...events);
+        wake(activeRuntime, { type: 'available' });
       };
       host.longTasks = [];
       new PerformanceObserver((list) => {
@@ -480,7 +522,15 @@ test('fatal tree protocol failure still allows draft editing after clicking retu
   await expect(input).toHaveValue('连接失败后仍能编辑');
   await expect(
     page.getByRole('button', { name: '发送消息', exact: true }),
-  ).toBeDisabled();
+  ).toBeEnabled();
+  // 失败连接允许显式重连发送，但编辑草稿本身不得自动重发。
+  expect(
+    await page.evaluate(() =>
+      (window as any).ipcCalls.some(
+        (call: any) => call.action?.type === 'prompt',
+      ),
+    ),
+  ).toBe(false);
 });
 
 test('closing an inline plan choice sends cancellation with its original ID', async ({
@@ -670,7 +720,9 @@ for (const { width, theme, zoom } of [
     await input.fill('第一条计划消息');
     await input.press('Enter');
     await expect(
-      page.getByText('第一条计划消息', { exact: true }),
+      page
+        .getByRole('region', { name: '对话消息' })
+        .getByText('第一条计划消息', { exact: true }),
     ).toBeVisible();
     await input.focus();
     await page.evaluate(() =>
@@ -686,7 +738,9 @@ for (const { width, theme, zoom } of [
       ]),
     );
     await expect(page.locator('.extension-status')).toHaveText('⏸ plan');
-    const originalViewport = await page.locator('.transcript').boundingBox();
+    const originalViewport = await page
+      .locator('.transcript:visible')
+      .boundingBox();
     const originalInput = await input.boundingBox();
     await page.evaluate(() =>
       (window as any).emitEvents([
@@ -712,16 +766,17 @@ for (const { width, theme, zoom } of [
     await expect(input).toBeFocused();
     const feedback = await notice.boundingBox();
     const message = await page
+      .getByRole('region', { name: '对话消息' })
       .getByText('第一条计划消息', { exact: true })
       .boundingBox();
     expect(feedback!.y + feedback!.height).toBeLessThanOrEqual(message!.y);
     expect(feedback!.height / zoom).toBeLessThan(85);
-    expect(await page.locator('.transcript').boundingBox()).toEqual(
+    expect(await page.locator('.transcript:visible').boundingBox()).toEqual(
       originalViewport,
     );
     expect(await input.boundingBox()).toEqual(originalInput);
     await page.getByRole('button', { name: '查看消息提示' }).click();
-    expect(await page.locator('.transcript').boundingBox()).toEqual(
+    expect(await page.locator('.transcript:visible').boundingBox()).toEqual(
       originalViewport,
     );
     expect(await input.boundingBox()).toEqual(originalInput);
@@ -920,7 +975,7 @@ test('settings preserve conversation, retain failed edits and save across catego
   const input = page.getByRole('textbox', { name: '消息输入', exact: true });
   await expect(input).toBeEnabled();
   await input.fill('保留设置前的草稿');
-  await page.locator('.transcript').evaluate((node) => {
+  await page.locator('.transcript:visible').evaluate((node) => {
     (window as any).savedTranscript = node;
     node.scrollTop = 100;
   });
@@ -963,7 +1018,7 @@ test('settings preserve conversation, retain failed edits and save across catego
   await expect(input).toBeFocused();
   expect(
     await page
-      .locator('.transcript')
+      .locator('.transcript:visible')
       .evaluate((node) => node === (window as any).savedTranscript),
   ).toBe(true);
   const saved = await page.evaluate(() =>
@@ -1086,10 +1141,11 @@ test('loaded conversation keeps its name when Windows state paths differ and the
   });
   await recent.locator('.history-item').filter({ hasText: '添加测试' }).click();
   await expect(page.locator('.session-loading')).toHaveCount(0);
-  await expect(page.locator('.message')).toHaveCount(2);
-  await expect(recent.locator('.history-item')).toHaveCount(0);
+  await expect(page.locator('.message:visible')).toHaveCount(2);
+  // 索引暂时为空仍保留已打开的会话入口。
+  await expect(recent.locator('.history-item')).toHaveCount(2);
   await expect(page.locator('.session-title')).toHaveText('添加测试');
-  await page.getByRole('button', { name: /^新对话/ }).click();
+  await page.locator('.nav-new').click();
   await expect(page.locator('.session-title')).toHaveText('新对话');
 });
 test('session title updates before slow cross-project loading completes', async ({
@@ -1102,7 +1158,7 @@ test('session title updates before slow cross-project loading completes', async 
   const recent = page.getByRole('region', { name: '最近', exact: true });
   await recent.locator('.history-item').filter({ hasText: '修复登录' }).click();
   await expect(page.locator('.session-title')).toHaveText('修复登录');
-  await expect(page.locator('.message')).toHaveCount(2);
+  await expect(page.locator('.message:visible')).toHaveCount(2);
   await page.evaluate(() => {
     (window as any).deferConnection = true;
     (window as any).slowSession = 'beta.jsonl';
@@ -1118,7 +1174,7 @@ test('session title updates before slow cross-project loading completes', async 
     'aria-busy',
     'true',
   );
-  await expect(page.locator('.message')).toHaveCount(0);
+  await expect(page.locator('.message:visible')).toHaveCount(0);
   await expect(
     page.getByRole('textbox', { name: '消息输入', exact: true }),
   ).toBeDisabled();
@@ -1128,20 +1184,24 @@ test('session title updates before slow cross-project loading completes', async 
         (window as any).ipcCalls.filter((c: any) => c.command === 'connect_pi')
           .length,
     ),
-  ).toBe(1);
+  ).toBe(3);
+  await page.evaluate(() => {
+    (window as any).deferConnection = false;
+    (window as any).releaseConnection();
+  });
   await expect
     .poll(() => page.evaluate(() => typeof (window as any).releaseHistory))
     .toBe('function');
   await expect(page.locator('.session-title')).toHaveText('添加测试');
   await expect(page.locator('.session-loading')).toBeVisible();
-  await expect(page.locator('.message')).toHaveCount(0);
+  await expect(page.locator('.message:visible')).toHaveCount(0);
   await page.screenshot({ path: 'test-results/session-loading.png' });
   await page.evaluate(() => {
     (window as any).releaseHistory();
   });
   await expect(page.locator('.session-loading')).toHaveCount(0);
   await expect(page.locator('.session-title')).toHaveText('添加测试');
-  await expect(page.locator('.message')).toHaveCount(2);
+  await expect(page.locator('.message:visible')).toHaveCount(2);
   await expect(page.locator('.conversation')).toHaveAttribute(
     'aria-busy',
     'false',
@@ -1158,105 +1218,58 @@ test('creating a session in another project never remounts the old long transcri
   page.on('pageerror', (error) => errors.push(error.message));
   await mock(page, 300, true);
   await page.goto('/');
-  await page
-    .getByRole('region', { name: '最近', exact: true })
-    .locator('.history-item')
-    .filter({ hasText: '修复登录' })
-    .click();
-  const transcript = page.locator('.transcript');
+  const recent = page.getByRole('region', { name: '最近', exact: true });
+  await recent.locator('.history-item').filter({ hasText: '修复登录' }).click();
+  const transcript = page.locator('.transcript:visible');
   await expect(transcript).toBeVisible();
-  await expect
-    .poll(() =>
-      transcript.evaluate(
-        (node) => node.scrollHeight - node.clientHeight - node.scrollTop,
-      ),
-    )
-    .toBeLessThan(3);
+  await transcript.evaluate((node) => {
+    (window as any).originalTranscript = node;
+  });
   await page.evaluate(() => {
-    const host = window as any;
-    host.deferConnection = true;
-    host.slowSession = 'new-project.jsonl';
-    host.historyMessages = [];
-    host.transcriptMounts = 0;
-    host.transcriptObserver = new MutationObserver((records) => {
-      for (const record of records) {
-        for (const node of record.addedNodes) {
-          if (
-            node instanceof Element &&
-            (node.matches('.transcript') || node.querySelector('.transcript'))
-          )
-            host.transcriptMounts++;
-        }
-      }
-    });
-    host.transcriptObserver.observe(document.querySelector('.conversation'), {
-      childList: true,
-      subtree: true,
-    });
+    (window as any).deferTaskStart = true;
+    (window as any).historyMessages = [];
   });
   await page
     .getByRole('button', { name: '在 C:/work/beta 中新建会话', exact: true })
     .click();
-  await expect(page.locator('.session-title')).toHaveText('新对话');
   await expect(page.locator('.welcome p')).toHaveText('C:/work/beta');
-  expect(
-    await page.evaluate(
-      () =>
-        (window as any).ipcCalls.filter((call: any) =>
-          ['new_session', 'new_project_session'].includes(call.action?.type),
-        ).length,
-    ),
-  ).toBe(0);
+  await expect(transcript).toHaveCount(0);
   const input = page.getByRole('textbox', { name: '消息输入', exact: true });
-  await expect(input).toBeEnabled();
   await input.fill('首条消息');
   await input.press('Enter');
-  await expect(page.locator('.conversation')).toHaveAttribute(
-    'aria-busy',
-    'true',
-  );
-  await expect(transcript).toHaveCount(0);
-  await expect(page.locator('.welcome')).toHaveCount(0);
+  // 当前实现先展示已接受的用户消息，再等待原生任务初始化；旧会话始终隐藏。
   await expect(
-    page.getByRole('textbox', { name: '消息输入', exact: true }),
-  ).toBeDisabled();
+    page
+      .getByRole('region', { name: '对话消息' })
+      .getByText('首条消息', { exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole('region', { name: '对话消息' }),
+  ).not.toContainText('这是模拟正文');
+  await expect
+    .poll(() => page.evaluate(() => typeof (window as any).releaseTaskStart))
+    .toBe('function');
+  await page.evaluate(() => (window as any).releaseTaskStart());
+  await expect(
+    page
+      .getByRole('region', { name: '对话消息' })
+      .getByText('这是模拟回答。', { exact: true }),
+  ).toBeVisible();
   expect(
     await page.evaluate(
       () =>
         (window as any).ipcCalls.filter(
-          (call: any) => call.command === 'connect_pi',
+          (call: any) => call.command === 'submit_new_task',
         ).length,
     ),
   ).toBe(1);
-  await expect
-    .poll(() => page.evaluate(() => typeof (window as any).releaseHistory))
-    .toBe('function');
-  await expect(transcript).toHaveCount(0);
-  await expect(page.locator('.welcome')).toHaveCount(0);
-  await page.evaluate(() => (window as any).releaseHistory());
-  await expect(page.locator('.conversation')).toHaveAttribute(
-    'aria-busy',
-    'false',
-  );
-  await expect(page.getByText('这是模拟回答。', { exact: true })).toBeVisible();
-  const actions = await page.evaluate(() =>
-    (window as any).ipcCalls
-      .filter((call: any) => call.command === 'perform')
-      .map((call: any) => call.action),
-  );
+  await recent.locator('.history-item').filter({ hasText: '修复登录' }).click();
+  await expect(transcript).toBeVisible();
   expect(
-    actions.filter((action: any) => action.type === 'new_project_session'),
-  ).toEqual([{ type: 'new_project_session', project: 'C:/work/beta' }]);
-  expect(actions.filter((action: any) => action.type === 'prompt')).toEqual([
-    { type: 'prompt', message: '首条消息' },
-  ]);
-  expect(
-    await page.evaluate(() => {
-      const host = window as any;
-      host.transcriptObserver.disconnect();
-      return host.transcriptMounts;
-    }),
-  ).toBe(1);
+    await transcript.evaluate(
+      (node) => node === (window as any).originalTranscript,
+    ),
+  ).toBe(true);
   expect(errors).toEqual([]);
 });
 test('new conversation without a project starts in the user directory', async ({
@@ -1264,13 +1277,14 @@ test('new conversation without a project starts in the user directory', async ({
 }) => {
   await mock(page, 0);
   await page.goto('/');
-  await page.getByRole('button', { name: /^新对话/ }).click();
-  await expect(page.getByText('已连接', { exact: true })).toBeVisible();
+  await page.locator('.nav-new').click();
+  // 新草稿延迟启动进程。
+  await expect(page.getByText('已连接', { exact: true })).toHaveCount(0);
   await expect(page.locator('.welcome p')).toHaveText('C:/Users/mock');
   await expect(
     page.getByRole('textbox', { name: '消息输入', exact: true }),
   ).toBeEnabled();
-  await page.getByRole('button', { name: /^新对话/ }).click();
+  await page.locator('.nav-new').click();
   await expect
     .poll(() =>
       page.evaluate(
@@ -1401,7 +1415,8 @@ test('workspace tree discovers, expands, searches and restores across projects',
       .filter((c: any) => c.command === 'connect_pi')
       .map((c: any) => c.project),
   );
-  expect(calls).toEqual(['']);
+  // 每个历史会话拥有独立连接，展开项目本身不启动连接。
+  expect(calls).toEqual(['', 'C:/work/alpha', 'C:/work/beta']);
   expect(await projectTree.locator('.project-name').allTextContents()).toEqual(
     originalOrder,
   );
@@ -1511,7 +1526,7 @@ test('new conversation project picker searches all projects and supports new dir
 }) => {
   await mock(page, 0, true, 8);
   await page.goto('/');
-  await page.getByRole('button', { name: /^新对话/ }).click();
+  await page.locator('.nav-new').click();
   const picker = page.getByRole('button', {
     name: '选择新对话项目',
     exact: true,
@@ -1587,7 +1602,7 @@ test('welcome, project, conversation, send and shortcuts', async ({ page }) => {
     .last()
     .click();
   await expect(page.getByText('已连接', { exact: true })).toBeVisible();
-  await expect(page.locator('.message')).toHaveCount(2);
+  await expect(page.locator('.message:visible')).toHaveCount(2);
   await page
     .getByRole('textbox', { name: '消息输入', exact: true })
     .fill('测试发送');
@@ -1635,8 +1650,8 @@ test('full-content actions only appear for truncated messages and still open the
     .getByRole('button', { name: '选择项目文件夹', exact: true })
     .last()
     .click();
-  await page.locator('.process-heading').click();
-  const messages = page.locator('.message');
+  await page.locator('.process-heading:visible').click();
+  const messages = page.locator('.message:visible');
   await expect(messages).toHaveCount(4);
   await expect(
     messages
@@ -1749,15 +1764,15 @@ test('tool summaries expand inline with code, edit diff, parameters and truncati
     .getByRole('button', { name: '选择项目文件夹', exact: true })
     .last()
     .click();
-  await page.locator('.process-heading').click();
+  await page.locator('.process-heading:visible').click();
   const read = page
     .locator('.tool-step')
     .filter({ has: page.locator('.tool-path', { hasText: 'src/read.ts' }) });
   await expect(read.locator('.tool-code')).toHaveCount(0);
   // 先模拟用户上滚退出底部跟随，避免 WebKit 的自动滚入与跟随帧争夺位置。
-  await page.locator('.transcript').hover();
+  await page.locator('.transcript:visible').hover();
   await page.mouse.wheel(0, -240);
-  await page.locator('.transcript').evaluate((node) => {
+  await page.locator('.transcript:visible').evaluate((node) => {
     node.scrollTop = 0;
   });
   await read.locator('.tool-heading').click();
@@ -1848,7 +1863,7 @@ test('large tool output retries and reads explicit chunks in its own scroll box'
     .getByRole('button', { name: '选择项目文件夹', exact: true })
     .last()
     .click();
-  await page.locator('.process-heading').click();
+  await page.locator('.process-heading:visible').click();
   const tool = page.locator('.tool-step');
   await tool.locator('.tool-heading').click();
   await expect(tool.getByRole('alert')).toContainText('模拟正文读取失败');
@@ -1864,7 +1879,7 @@ test('large tool output retries and reads explicit chunks in its own scroll box'
       .click();
   }
   await expect(tool).toContainText('已到末尾');
-  await page.locator('.transcript').evaluate((node) => {
+  await page.locator('.transcript:visible').evaluate((node) => {
     node.scrollTop = node.scrollHeight;
   });
   await expect(tool.getByText('最后一行', { exact: true })).toBeVisible();
@@ -1920,7 +1935,7 @@ test('tool expansion survives scrolling and updates from running to complete', a
     .getByRole('button', { name: '选择项目文件夹', exact: true })
     .last()
     .click();
-  await page.locator('.process-heading').click();
+  await page.locator('.process-heading:visible').click();
   const tool = page.locator('.tool-step');
   await expect(tool.locator('.tool-state')).toHaveText('执行中');
   await tool.locator('.tool-heading').click();
@@ -1993,7 +2008,7 @@ test('queued guidance is visible immediately and is replaced when Pi consumes it
   await input.fill('先修复登录，再处理样式');
   await input.press('Enter');
   const row = page
-    .locator('.message.user')
+    .locator('.message.user:visible')
     .filter({ hasText: '先修复登录，再处理样式' });
   await expect(row).toHaveCount(1);
   await expect(row.locator('.delivery-status')).toHaveText(
@@ -2042,7 +2057,9 @@ test('running tasks accept direct steering and follow-up messages without stoppi
   await input.fill('先处理登录问题');
   await input.press('Enter');
   await expect(input).toHaveValue('');
-  await expect(page.getByText('引导消息已提交', { exact: true })).toBeVisible();
+  await expect(
+    page.getByRole('status').filter({ hasText: '引导消息已提交' }),
+  ).toBeVisible();
   await input.fill('增加测试覆盖');
   await page.getByRole('button', { name: '发送引导', exact: true }).click();
   await expect(input).toHaveValue('');
@@ -2088,12 +2105,12 @@ test('long tool output scrolls independently and contains boundary gestures', as
     }));
   });
   await page.goto('/');
-  await page.locator('.process-heading').click();
+  await page.locator('.process-heading:visible').click();
   const tool = page.locator('.tool-step').last();
   await tool.locator('.tool-heading').click();
   const code = tool.locator('.tool-expanded .tool-code');
   await code.hover();
-  const root = page.locator('.transcript');
+  const root = page.locator('.transcript:visible');
   const top = await root.evaluate((node) => node.scrollTop);
   await page.mouse.wheel(0, 240);
   await expect
@@ -2168,7 +2185,7 @@ for (const kind of ['many lines', 'few wrapped lines', 'virtual rows']) {
       name: '对话消息',
       exact: true,
     });
-    await page.locator('.process-heading').click();
+    await page.locator('.process-heading:visible').click();
     const heading = page.locator('.tool-heading');
     await heading.click();
     await expect(page.locator('.tool-code-line')).toHaveCount(
@@ -2250,7 +2267,7 @@ test('successful sends resume bottom follow while failures preserve reading posi
 }) => {
   await mock(page, 100);
   await page.goto('/');
-  const transcript = page.locator('.transcript');
+  const transcript = page.locator('.transcript:visible');
   const input = page.getByRole('textbox', { name: '消息输入', exact: true });
   const distance = () =>
     transcript.evaluate(
@@ -2269,7 +2286,9 @@ test('successful sends resume bottom follow while failures preserve reading posi
   });
   const before = await transcript.evaluate((node) => node.scrollTop);
   await input.press('Enter');
-  await expect(page.getByText('模拟发送失败', { exact: true })).toBeVisible();
+  await expect(
+    page.getByRole('alert').filter({ hasText: '模拟发送失败' }),
+  ).toBeVisible();
   await expect(input).toHaveValue('失败时保留阅读位置');
   await expect
     .poll(() => transcript.evaluate((node) => node.scrollTop))
@@ -2354,7 +2373,7 @@ test('manual bottom scrolling resumes streaming follow and blank clicks keep it 
     host.historyMessages = [host.followMessage];
   });
   await page.goto('/');
-  const transcript = page.locator('.transcript');
+  const transcript = page.locator('.transcript:visible');
   const arrow = page.getByRole('button', { name: '回到底部', exact: true });
   const distance = () =>
     transcript.evaluate(
@@ -2429,7 +2448,7 @@ for (const width of [1200, 600]) {
     const choice = page.getByRole('region', { name: 'Plan mode - what next?' });
     await expect(choice).toBeVisible();
     await expect(input).toBeFocused();
-    const transcript = page.locator('.transcript');
+    const transcript = page.locator('.transcript:visible');
     const before = (await transcript.boundingBox())!;
     // 窄屏输入器本身会换行；按操作区实际占用约束，避免混入输入器高度。
     expect(before.height).toBeGreaterThan(240);
@@ -2642,7 +2661,7 @@ for (const deferred of [false, true]) {
     }, deferred);
     await recent.locator('[data-sidebar-path="beta.jsonl"]').click();
     await expect(page.locator('.session-title')).toHaveText('添加测试');
-    const transcript = page.locator('.transcript');
+    const transcript = page.locator('.transcript:visible');
     await expect
       .poll(() =>
         transcript.evaluate(
@@ -2735,7 +2754,7 @@ test('growing a message across the viewport edge preserves its reading position'
     host.historyMessages = [host.growingMessage];
   });
   await page.goto('/');
-  const transcript = page.locator('.transcript');
+  const transcript = page.locator('.transcript:visible');
   await expect
     .poll(() =>
       transcript.evaluate(
@@ -3033,6 +3052,8 @@ test('settings navigation during save keeps the latest destination and submits o
     ),
   ).toBe(1);
   await page.evaluate(() => {
+    // 只延迟本次保存；切换会话也可能持久化工作区偏好。
+    (window as any).deferSettingsSave = false;
     (window as any).releaseSettingsSave();
   });
   await expect(settings).toHaveCount(0);
@@ -3160,7 +3181,7 @@ test('history management preserves transcript and draft, filters and restores ke
   await session.click();
   const input = page.getByRole('textbox', { name: '消息输入', exact: true });
   await input.fill('保留草稿');
-  await page.locator('.transcript').evaluate((node) => {
+  await page.locator('.transcript:visible').evaluate((node) => {
     (window as any).savedTranscript = node;
   });
   await session.click({ button: 'right' });
@@ -3191,7 +3212,7 @@ test('history management preserves transcript and draft, filters and restores ke
   await expect(input).toHaveValue('保留草稿');
   expect(
     await page
-      .locator('.transcript')
+      .locator('.transcript:visible')
       .evaluate((node) => node === (window as any).savedTranscript),
   ).toBe(true);
   await page.getByRole('button', { name: '已归档', exact: true }).click();
