@@ -23,6 +23,7 @@
     onload,
     onvisible,
     onerror,
+    oncommit,
     toolViews,
     ontoggletool,
     read,
@@ -43,6 +44,8 @@
     onload: (message: Message) => Promise<void>;
     onvisible: (ids: string[]) => void;
     onerror: (message: string) => void;
+    /** 同会话重连提交前捕获最新阅读锚点；卸载时解除回调。 */
+    oncommit?: (handler: (() => () => void) | undefined) => void;
     toolViews: Record<string, Record<string, boolean>>;
     ontoggletool: (id: string, section: string) => void;
     read: (id: string, offset: number) => Promise<ContentPage>;
@@ -62,6 +65,7 @@
   let pending = $state(false);
   let error = $state('');
   let mounted = false;
+  let reconciling = false;
   let alive = true;
   let frame = 0;
   let lastScrollTop = 0;
@@ -93,7 +97,7 @@
     cancelAnimationFrame(frame);
     frame = requestAnimationFrame(() => {
       if (!alive || !viewport || !active) return;
-      if (follow && !pending) {
+      if (follow && !pending && !reconciling) {
         viewport.scrollTop = viewport.scrollHeight;
         lastScrollTop = viewport.scrollTop;
       }
@@ -174,6 +178,35 @@
   }
   onMount(() => {
     mounted = true;
+    oncommit?.(() => {
+      if (!active) return () => {};
+      const saved = anchor();
+      const id = saved?.node.dataset.messageId;
+      const top = viewport.scrollTop;
+      reconciling = true;
+      return () => {
+        void tick().then(() => {
+          if (!alive) return;
+          if (active) {
+            const node = saved?.node.isConnected
+              ? saved.node
+              : [
+                  ...content.querySelectorAll<HTMLElement>('[data-message-id]'),
+                ].find((item) => item.dataset.messageId === id);
+            if (node && saved)
+              viewport.scrollTop +=
+                node.getBoundingClientRect().top - saved.top;
+            else viewport.scrollTop = top;
+            lastScrollTop = viewport.scrollTop;
+            scrollState.top = viewport.scrollTop;
+            if (change)
+              change = messages.find((message) => message.id === change?.id);
+          }
+          reconciling = false;
+          update();
+        });
+      };
+    });
     if (scrollState.changeId)
       change = messages.find((message) => message.id === scrollState.changeId);
     const observer = new IntersectionObserver(checkOlder, {
@@ -190,6 +223,7 @@
     update();
     return () => {
       alive = false;
+      oncommit?.(undefined);
       onvisible([]);
       observer.disconnect();
       resize.disconnect();

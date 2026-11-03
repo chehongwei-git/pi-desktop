@@ -1190,13 +1190,16 @@
           <span
             class="connection"
             class:connected={desktop.connection === 'ready'}
-            ><span class="status-dot"></span>{desktop.connection === 'ready'
-              ? '已连接'
-              : desktop.connection === 'starting'
-                ? '连接中'
-                : desktop.connection === 'failed'
-                  ? '连接失败'
-                  : '未连接'}</span
+            ><span class="status-dot"></span>{desktop.restoring &&
+            desktop.historyCached
+              ? '正在恢复连接'
+              : desktop.connection === 'ready'
+                ? '已连接'
+                : desktop.connection === 'starting'
+                  ? '连接中'
+                  : desktop.connection === 'failed'
+                    ? '连接失败'
+                    : '未连接'}</span
           >
           <div class="session-menu-wrap">
             <button
@@ -1278,7 +1281,12 @@
                 scrollState={session.scrollState}
                 resumeFollow={session.sentMessageRevision}
                 hasMore={session.hasMore}
-                loading={session.loadingHistory}
+                loading={session.loadingHistory ||
+                  session.restoring ||
+                  session.connection !== 'ready'}
+                oncommit={(handler) => {
+                  session.beforeHistoryCommit = handler;
+                }}
                 onolder={(beforeInsert) =>
                   session.refreshHistory(session.before, beforeInsert)}
                 onfull={(message) => {
@@ -1297,6 +1305,16 @@
           </div>
         {/each}
         <div class="composer-area">
+          {#if desktop.historyCached && desktop.connection === 'failed' && !desktop.restoring}
+            <div class="queue-hint" role="status">
+              连接恢复失败，已缓存内容仍可阅读。
+              <button
+                onclick={() =>
+                  void desktop.guard(() => workspace.ensure(desktop))}
+                >重试连接</button
+              >
+            </div>
+          {/if}
           {#if desktop.extensions[0]}
             {@const request = desktop.extensions[0]}
             {#key `${desktop.runtimeId}:${request.id}`}
@@ -1330,6 +1348,7 @@
                     lines={value}
                     running={desktop.run !== 'idle'}
                     disabled={desktop.connection !== 'ready' ||
+                      desktop.restoring ||
                       desktop.submitting}
                     oncontinue={desktop.commands.some(
                       (command) => command.name === 'todos',

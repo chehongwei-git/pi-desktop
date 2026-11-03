@@ -5,6 +5,7 @@ import { bridge, type Bridge } from '../client';
 import {
   defaultSettings,
   type Snapshot,
+  type Message,
   type SessionSummary,
   type Wakeup,
   type TaskActivity,
@@ -17,6 +18,14 @@ afterEach(() => {
 function fixture() {
   let serial = 0;
   const faults = { lostResponse: false };
+  const histories = new Map<string, Message[]>();
+  const content = vi.fn(
+    async (_runtime: string, id: string, _offset: number) => ({
+      text: id,
+      next: id.length,
+      done: true,
+    }),
+  );
   const states = new Map<string, Snapshot>();
   const channels = new Map<string, (event: Wakeup) => void>();
   const pending = new Map<string, any[]>();
@@ -27,7 +36,13 @@ function fixture() {
       const state = states.get(runtime)!;
       if (action.type === 'state') return state;
       if (action.type === 'history')
-        return { messages: [], before: 0, hasMore: false };
+        return {
+          messages: structuredClone(
+            histories.get(state.sessionFile ?? '') ?? [],
+          ),
+          before: 0,
+          hasMore: false,
+        };
       if (action.type === 'models')
         return {
           models: [
@@ -84,6 +99,7 @@ function fixture() {
     },
     action: action as Bridge['action'],
     disconnect,
+    content,
     submitNew: async (
       project,
       submission,
@@ -122,6 +138,8 @@ function fixture() {
     workspace,
     api,
     faults,
+    histories,
+    content,
     action,
     disconnect,
     states,
@@ -181,7 +199,8 @@ describe('cross-project workspace', () => {
     await vi.waitFor(() => expect(first.run).toBe('running'));
     expect(workspace.active).not.toBe(first);
     expect(workspace.active.run).toBe('idle');
-    expect(disconnect).not.toHaveBeenCalled();
+    for (const session of sessions)
+      expect(disconnect).not.toHaveBeenCalledWith(false, session.runtimeId);
     const runtime = first.runtimeId;
     await workspace.open('/a', '/a/one.jsonl');
     expect(workspace.active).toBe(first);
@@ -229,6 +248,232 @@ describe('cross-project workspace', () => {
     );
     expect(sessions).toHaveLength(1);
   });
+  it('keeps six cached views while releasing all background idle processes', async () => {
+    const { workspace, disconnect } = fixture();
+    await workspace.init();
+    for (let index = 1; index < 6; index++)
+      await workspace.open('/a', `/a/${index}.jsonl`);
+    const sessions = [...workspace.sessions];
+    await workspace['poll']();
+    expect(workspace.retained).toHaveLength(6);
+    expect(sessions.every((session) => session.historyCached)).toBe(true);
+    expect(sessions.filter((session) => session.runtimeId)).toEqual([
+      workspace.active,
+    ]);
+    expect(disconnect).toHaveBeenCalledTimes(5);
+    for (const session of sessions) {
+      await workspace.activate(session);
+      await workspace['poll']();
+      expect(workspace.retained).toContain(session);
+      expect(session.connection).toBe('ready');
+      expect(session.historyCached).toBe(true);
+    }
+  });
+  it('keeps twelve content caches and six views, evicting the least recently visited content', async () => {
+    const { workspace } = fixture();
+    await workspace.init();
+    const first = workspace.active;
+    first.draft = '保留草稿';
+    first.scrollState = { top: 120, follow: false };
+    first.toolViews = { tool: { output: true } };
+    for (let index = 1; index < 12; index++)
+      await workspace.open('/a', `/a/${index}.jsonl`);
+    await workspace['poll']();
+    expect(
+      workspace.sessions.filter((session) => session.historyCached),
+    ).toHaveLength(12);
+    expect(workspace.retained).toHaveLength(6);
+    // 重访使第一个会话变为最近访问，淘汰对象应是第二个。
+    const oldest = workspace.sessions[1];
+    await workspace.activate(first);
+    await workspace.open('/b', '/b/thirteenth.jsonl');
+    await workspace['poll']();
+    expect(oldest.historyCached).toBe(false);
+    expect(first.historyCached).toBe(true);
+    expect(first.draft).toBe('保留草稿');
+    expect(first.scrollState).toEqual({ top: 120, follow: false });
+    expect(first.toolViews).toEqual({ tool: { output: true } });
+    expect(
+      workspace.sessions.filter((session) => session.historyCached),
+    ).toHaveLength(12);
+    expect(workspace.retained).toHaveLength(6);
+    expect(workspace.retained).not.toContain(oldest);
+  });
+  it.each([
+    'running',
+    'queued',
+    'extension',
+    'submitting',
+    'restoring',
+    'history',
+    'sending',
+  ] as const)(
+    'protects a %s session when the idle cache overflows',
+    async (state) => {
+      const { workspace, disconnect } = fixture();
+      await workspace.init();
+      const protectedSession = workspace.active;
+      const runtime = protectedSession.runtimeId;
+      if (state === 'running') protectedSession.run = 'running';
+      else if (state === 'submitting') protectedSession.submitting = true;
+      else if (state === 'restoring') protectedSession.restoring = true;
+      else if (state === 'history') protectedSession.loadingHistory = true;
+      else if (state === 'sending') protectedSession.waitingToSend = true;
+      else if (state === 'queued')
+        protectedSession.task = {
+          taskId: 'protected-task',
+          runtimeId: runtime,
+          state: 'queued',
+          position: 1,
+        };
+      else
+        protectedSession.extensions = [
+          { id: 'confirm', type: 'extension_ui_request', method: 'confirm' },
+        ];
+      // 保护会话以外再打开七个空闲会话，确保确实发生淘汰。
+      for (let index = 1; index <= 7; index++)
+        await workspace.open('/a', `/a/${index}.jsonl`);
+      await workspace['poll']();
+      expect(disconnect).toHaveBeenCalledTimes(6);
+      expect(disconnect).not.toHaveBeenCalledWith(false, runtime);
+      expect(protectedSession.runtimeId).toBe(runtime);
+      expect(protectedSession.connection).toBe('ready');
+    },
+  );
+  it('shows cached content through reconnect, preserves edits and rebinds old references before reading', async () => {
+    const { workspace, api, histories, content, emit } = fixture();
+    histories.set('/a/cached.jsonl', [
+      {
+        id: 'message',
+        role: 'assistant',
+        text: '已加载内容',
+        thinking: '',
+        contentRef: 'body-1',
+        status: 'done',
+        name: null,
+      },
+    ]);
+    await workspace.init();
+    await workspace.open('/a', '/a/cached.jsonl');
+    const cached = workspace.active;
+    const handle = cached.messages[0].contentRef!;
+    cached.toolViews = { message: { output: true } };
+    cached.draft = '旧草稿';
+    await workspace.open('/b', '/b/other.jsonl');
+    await workspace['poll']();
+    expect(cached.runtimeId).toBe('');
+    expect(cached.messages[0].text).toBe('已加载内容');
+    expect(workspace.retained).toContain(cached);
+    // 隐藏视图读取只等待恢复，不能自行唤醒进程。
+    const original = api.connect;
+    const connect = vi.spyOn(api, 'connect');
+    const reading = cached.readContent(handle, 0);
+    await Promise.resolve();
+    expect(connect).not.toHaveBeenCalled();
+    expect(content).not.toHaveBeenCalled();
+    let resume!: () => void;
+    connect.mockImplementationOnce(async (...args) => {
+      await new Promise<void>((resolve) => {
+        resume = resolve;
+      });
+      const result = await original(...args);
+      emit(result.runtimeId, [{ type: 'reset' }]);
+      return result;
+    });
+    histories.get('/a/cached.jsonl')![0].contentRef = 'body-9';
+    const opening = workspace.activate(cached);
+    await vi.waitFor(() => expect(resume).toBeTypeOf('function'));
+    expect(cached.openingSession).toBeNull();
+    expect(cached.restoring).toBe(true);
+    expect(cached.messages[0].text).toBe('已加载内容');
+    cached.draft = '连接期间新编辑';
+    await workspace['poll']();
+    resume();
+    await opening;
+    await expect(reading).resolves.toMatchObject({ text: 'body-9' });
+    expect(content).toHaveBeenCalledWith(cached.runtimeId, 'body-9', 0);
+    expect(cached.messages[0].contentRef).toBe(handle);
+    expect(cached.messages[0].text).toBe('已加载内容');
+    expect(cached.draft).toBe('连接期间新编辑');
+    expect(cached.toolViews).toEqual({ message: { output: true } });
+    expect(cached.restoring).toBe(false);
+  });
+  it('retains cached content on reconnect failure and retries without losing the draft', async () => {
+    const { workspace, api, histories } = fixture();
+    histories.set('/a/cached.jsonl', [
+      {
+        id: 'm',
+        role: 'assistant',
+        text: '可离线阅读',
+        thinking: '',
+        contentRef: null,
+        status: 'done',
+        name: null,
+      },
+    ]);
+    await workspace.init();
+    await workspace.open('/a', '/a/cached.jsonl');
+    const cached = workspace.active;
+    cached.draft = '继续编辑';
+    await workspace.open('/b', '/b/other.jsonl');
+    await workspace['poll']();
+    vi.spyOn(api, 'connect').mockRejectedValueOnce(new Error('offline'));
+    await expect(workspace.activate(cached)).rejects.toThrow('offline');
+    expect(cached.connection).toBe('failed');
+    expect(cached.messages[0].text).toBe('可离线阅读');
+    expect(cached.draft).toBe('继续编辑');
+    vi.spyOn(api, 'connect').mockRejectedValueOnce(new Error('still offline'));
+    await expect(cached.send()).rejects.toThrow('still offline');
+    expect(cached.draft).toBe('继续编辑');
+    expect(cached.waitingToSend).toBe(false);
+    await workspace.ensure(cached);
+    expect(cached.connection).toBe('ready');
+    expect(cached.draft).toBe('继续编辑');
+  });
+  it('waits for connection before sending once', async () => {
+    const { workspace, api, tasks } = fixture();
+    await workspace.init();
+    const cached = workspace.active;
+    await workspace.open('/b', '/b/other.jsonl');
+    await workspace['poll']();
+    workspace.select(cached);
+    cached.draft = '只发一次';
+    const original = api.connect;
+    let resume!: () => void;
+    vi.spyOn(api, 'connect').mockImplementationOnce(async (...args) => {
+      await new Promise<void>((resolve) => {
+        resume = resolve;
+      });
+      return original(...args);
+    });
+    const sending = cached.send();
+    await vi.waitFor(() => expect(resume).toBeTypeOf('function'));
+    await cached.send();
+    expect(tasks).toHaveLength(0);
+    expect(cached.waitingToSend).toBe(true);
+    resume();
+    await sending;
+    expect(tasks).toHaveLength(1);
+    expect(cached.draft).toBe('');
+    expect(cached.waitingToSend).toBe(false);
+  });
+  it('recovers a failed native close without duplicating the runtime or losing its event channel', async () => {
+    const { workspace, api, disconnect, emit } = fixture();
+    await workspace.init();
+    const cached = workspace.active;
+    const runtime = cached.runtimeId;
+    disconnect.mockRejectedValueOnce(new Error('close failed'));
+    await workspace.open('/b', '/b/other.jsonl');
+    await workspace['poll']();
+    expect(cached.connection).toBe('failed');
+    expect(cached.runtimeId).toBe(runtime);
+    const connect = vi.spyOn(api, 'connect');
+    await workspace.activate(cached);
+    expect(connect).not.toHaveBeenCalled();
+    expect(cached.connection).toBe('ready');
+    emit(runtime, [{ type: 'run', state: 'running' }]);
+    await vi.waitFor(() => expect(cached.run).toBe('running'));
+  });
   it('waits for background eviction to release the native session before reopening', async () => {
     const { workspace, api, disconnect } = fixture();
     await workspace.init();
@@ -240,8 +485,8 @@ describe('cross-project workspace', () => {
           finishClose = resolve;
         }),
     );
-    await workspace.open('/a', '/a/one.jsonl');
-    await workspace.open('/b', '/b/two.jsonl');
+    for (let index = 1; index <= 6; index++)
+      await workspace.open('/a', `/a/${index}.jsonl`);
     workspace.active.navigation!.changed();
     await vi.waitFor(() => expect(evicted.connection).toBe('stopping'));
     const connect = vi.spyOn(api, 'connect');

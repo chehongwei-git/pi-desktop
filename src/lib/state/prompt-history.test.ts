@@ -65,9 +65,18 @@ describe('prompt history', () => {
       .fn()
       .mockResolvedValueOnce({ text: '中文🙂', next: 10, done: false })
       .mockResolvedValueOnce({ text: '\n完整正文', next: 30, done: true });
-    const desktop = new Desktop({ ...bridge, content });
+    const desktop = new Desktop({
+      ...bridge,
+      content,
+      action: vi.fn().mockResolvedValue({
+        messages: [{ ...message, contentRef: 'body', truncated: true }],
+        before: 0,
+        hasMore: false,
+      }),
+    });
     desktop.runtimeId = 'runtime';
-    const long = { ...message, contentRef: 'body', truncated: true };
+    desktop.connection = 'ready';
+    const long = (await desktop.promptHistory(50)).messages[0];
     expect(await desktop.promptText(long)).toBe('中文🙂\n完整正文');
     expect(content.mock.calls).toEqual([
       ['runtime', 'body', 0],

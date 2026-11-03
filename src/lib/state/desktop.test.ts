@@ -8,6 +8,54 @@ function fixture(action: Bridge['action']) {
   return new Desktop({ ...bridge, action });
 }
 describe('desktop business behavior', () => {
+  it('restores the entire read window offscreen and commits once using the latest reading position', async () => {
+    let finish!: (value: unknown) => void;
+    const old = {
+      id: 'old',
+      role: 'assistant',
+      text: '较早内容',
+      thinking: '',
+      contentRef: null,
+      status: 'done',
+      name: null,
+    };
+    const recent = { ...old, id: 'recent', text: '最新内容' };
+    const action = vi
+      .fn()
+      .mockResolvedValueOnce({ messages: [recent], before: 1, hasMore: true })
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            finish = resolve;
+          }),
+      );
+    const desktop = fixture(action);
+    desktop.runtimeId = 'restored';
+    desktop.messages = [old, recent];
+    desktop.historyCached = true;
+    const previous = desktop.messages;
+    const restored = vi.fn();
+    const capture = vi.fn(() => {
+      expect(desktop.messages).toBe(previous);
+      expect(desktop.scrollState.top).toBe(240);
+      return restored;
+    });
+    desktop.beforeHistoryCommit = capture;
+    const pending = desktop.restoreHistory();
+    await vi.waitFor(() => expect(finish).toBeTypeOf('function'));
+    expect(desktop.messages).toBe(previous);
+    expect(capture).not.toHaveBeenCalled();
+    desktop.scrollState.top = 240;
+    finish({ messages: [old], before: 0, hasMore: false });
+    await pending;
+    expect(desktop.messages.map((message) => message.id)).toEqual([
+      'old',
+      'recent',
+    ]);
+    expect(capture).toHaveBeenCalledTimes(1);
+    expect(restored).toHaveBeenCalledTimes(1);
+    expect(desktop.loadingHistory).toBe(false);
+  });
   it('sends plan controls once without consuming text or image drafts', async () => {
     let release!: () => void;
     const action = vi.fn(
@@ -541,17 +589,32 @@ describe('desktop business behavior', () => {
     );
     const desktop = new Desktop({ ...bridge, content });
     desktop.runtimeId = 'runtime-a';
+    desktop.connection = 'ready';
     desktop.snapshot = { sessionFile: 'a.jsonl' };
+    const handle = desktop['content'].bind(
+      {
+        id: 'm',
+        role: 'assistant',
+        text: '',
+        thinking: '',
+        contentRef: 'body',
+        status: 'done',
+        name: null,
+      },
+      desktop.runtimeId,
+    ).contentRef!;
     desktop.toggleTool('t', 'output');
     desktop.toggleTool('t', 'args');
     expect(desktop.toolViews.t).toEqual({ output: true, args: true });
     desktop.toggleTool('t', 'output');
     expect(desktop.toolViews.t.output).toBe(false);
-    const pending = desktop.readContent('body', 0);
+    const pending = desktop.readContent(handle, 0);
+    await vi.waitFor(() => expect(content).toHaveBeenCalledTimes(1));
     desktop.snapshot = { sessionFile: 'b.jsonl' };
     finish({ text: 'stale', next: 5, done: true });
     await expect(pending).rejects.toThrow('会话已切换');
-    const restarted = desktop.readContent('body', 0);
+    const restarted = desktop.readContent(handle, 0);
+    await vi.waitFor(() => expect(content).toHaveBeenCalledTimes(2));
     desktop.runtimeId = 'runtime-b';
     finish({ text: 'stale', next: 5, done: true });
     await expect(restarted).rejects.toThrow('会话已切换');

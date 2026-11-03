@@ -100,6 +100,10 @@
       )
     )
       return false;
+    if (desktop.restoring) {
+      desktop.notice = '正在恢复连接，完成后可执行命令；草稿仍可编辑。';
+      return true;
+    }
     if (desktop.connection !== 'ready') {
       desktop.error = 'Pi 已断开，请重新连接后执行命令；草稿仍可编辑。';
       return true;
@@ -334,13 +338,17 @@
   onhistory={(before) => desktop.promptHistory(before)}
   onhistorytext={(message) => desktop.promptText(message)}
   disabled={!!desktop.openingSession ||
-    ['starting', 'stopping'].includes(desktop.connection)}
+    (!desktop.historyCached &&
+      ['starting', 'stopping'].includes(desktop.connection))}
   running={desktop.run !== 'idle'}
   submitting={desktop.submitting ||
+    desktop.waitingToSend ||
     modelChanging ||
     busy ||
     loading ||
-    (desktop.connection !== 'ready' && desktop.newChatProject === null) ||
+    (!desktop.historyCached &&
+      desktop.connection !== 'ready' &&
+      desktop.newChatProject === null) ||
     desktop.task?.state === 'queued'}
   unavailableCommands={[
     ...(!desktop.commands.some(
@@ -373,7 +381,7 @@
     <ModelControls
       {desktop}
       bind:busy={modelChanging}
-      disabled={busy || loading || page !== null}
+      disabled={busy || loading || page !== null || desktop.restoring}
     />
   {/snippet}
 </Composer>

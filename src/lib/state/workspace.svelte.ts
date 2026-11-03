@@ -7,6 +7,10 @@ import type {
 } from '../types';
 import { Desktop } from './desktop.svelte';
 
+// 内容缓存与 DOM、进程分开管理；增加内容额度不要求保留更多后台进程。
+const SESSION_CONTENT_LIMIT = 12;
+const SESSION_VIEW_LIMIT = 6;
+
 export class Workspace {
   sessions = $state<Desktop[]>([]);
   active = $state<Desktop>()!;
@@ -162,11 +166,14 @@ export class Workspace {
     this.retained = [
       ...this.retained.filter((item) => item !== session),
       session,
-    ].slice(-4);
+    ].slice(-SESSION_VIEW_LIMIT);
   }
   async activate(session: Desktop): Promise<void> {
     this.select(session);
-    if (session.snapshot.sessionFile && session.connection !== 'ready')
+    if (
+      session.snapshot.sessionFile &&
+      (session.connection !== 'ready' || session.restoring)
+    )
       await this.ensure(session);
   }
   select(session: Desktop): void {
@@ -212,9 +219,17 @@ export class Workspace {
   ensure(session: Desktop): Promise<void> {
     const pending = this.ensuring.get(session);
     if (pending) return pending;
-    const task = this.ensureLocal(session).finally(() =>
-      this.ensuring.delete(session),
-    );
+    session.restoring = true;
+    const task = this.ensureLocal(session)
+      .catch((error) => {
+        session.connection = 'failed';
+        session.error = errorMessage(error);
+        throw error;
+      })
+      .finally(() => {
+        this.ensuring.delete(session);
+        session.finishRestore();
+      });
     this.ensuring.set(session, task);
     return task;
   }
@@ -235,15 +250,13 @@ export class Workspace {
       }
       if (alive) {
         session.connection = 'ready';
-        await session.refreshHistory();
+        await session.restoreHistory();
         await session.refreshMetadata();
         return;
       }
       await session.disconnect(true).catch(() => {});
     }
     const project = session.newChatProject ?? session.project;
-    const text = session.draft;
-    const images = session.images;
     const isNew = session.newChatProject !== null;
     const model = session.selectedModel;
     const thinking = session.selectedThinking;
@@ -252,18 +265,17 @@ export class Workspace {
         key: `${model.provider}/${model.id}`,
         thinking,
       });
-    session.openingSession = {
-      path: '',
-      title: session.snapshot.sessionFile ? session.sessionTitle : '新对话',
-    };
+    if (!session.historyCached)
+      session.openingSession = {
+        path: '',
+        title: session.snapshot.sessionFile ? session.sessionTitle : '新对话',
+      };
     try {
       await session.connectLocal(project);
       if (session.connection !== 'ready')
         throw new Error(session.error || '会话连接失败');
       await this.applyPendingModel(session);
     } finally {
-      session.draft = text;
-      session.images = images;
       session.openingSession = null;
     }
   }
@@ -584,21 +596,16 @@ export class Workspace {
           session.runtimeId &&
           session.run === 'idle' &&
           !session.submitting &&
+          !session.waitingToSend &&
+          !session.restoring &&
+          !session.loadingHistory &&
           !session.openingSession &&
           !session.extensions.length &&
           !['queued', 'running'].includes(session.task?.state ?? '') &&
           !this.releasing.has(session),
       );
-      const activeIdle =
-        !!this.active.runtimeId &&
-        this.active.run === 'idle' &&
-        !this.active.extensions.length &&
-        !['queued', 'running'].includes(this.active.task?.state ?? '');
-      for (const session of idle.slice(
-        0,
-        Math.max(0, idle.length + Number(activeIdle) - 2),
-      )) {
-        this.retained = this.retained.filter((item) => item !== session);
+      // 仅当前会话保留空闲进程；后台内容与视图不随进程回收。
+      for (const session of idle) {
         const release = session.releaseIdle(() => session !== this.active);
         this.releasing.set(session, release);
         try {
@@ -607,6 +614,26 @@ export class Workspace {
           this.releasing.delete(session);
           if (session === this.active) this.retain(session);
         }
+      }
+      let cached = this.sessions.filter(
+        (session) => session.historyCached,
+      ).length;
+      for (const session of this.sessions) {
+        if (cached <= SESSION_CONTENT_LIMIT) break;
+        if (
+          !session.historyCached ||
+          session === this.active ||
+          this.retained.includes(session) ||
+          this.isExecuting(session) ||
+          session.submitting ||
+          session.waitingToSend ||
+          session.restoring ||
+          session.loadingHistory ||
+          this.releasing.has(session)
+        )
+          continue;
+        session.evictContent();
+        cached--;
       }
       // 全量正文预算检查降为每五秒一次，避免后台每次状态轮询重复扫描长对话。
       this.cacheTick = (this.cacheTick + 1) % 10;

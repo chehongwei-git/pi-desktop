@@ -20,6 +20,7 @@
   // 本地新对话尚未创建 Pi 会话，不能把后台旧会话的用量当成新对话读数。
   const usage = $derived(
     desktop.connection === 'ready' &&
+      !desktop.restoring &&
       desktop.newChatProject === null &&
       !desktop.openingSession
       ? desktop.stats?.contextUsage

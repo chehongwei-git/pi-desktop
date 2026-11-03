@@ -20,6 +20,25 @@ function fixture() {
   return { desktop, action };
 }
 describe('inline command menus', () => {
+  it('keeps cached-session drafts editable while reconnecting and allows sending to wait for recovery', async () => {
+    const { desktop, action } = fixture();
+    desktop.historyCached = true;
+    desktop.restoring = true;
+    desktop.connection = 'starting';
+    desktop.draft = '原草稿';
+    const send = vi.fn();
+    const view = render(CommandComposer, { desktop, onsend: send });
+    const input = view.getByRole('textbox');
+    expect(input).not.toBeDisabled();
+    await fireEvent.input(input, { target: { value: '恢复期间编辑' } });
+    expect(desktop.draft).toBe('恢复期间编辑');
+    await fireEvent.keyDown(input, { key: 'Enter' });
+    expect(send).toHaveBeenCalledTimes(1);
+    await fireEvent.input(input, { target: { value: '/settings' } });
+    await fireEvent.keyDown(input, { key: 'Enter' });
+    expect(action).not.toHaveBeenCalled();
+    expect(desktop.notice).toContain('正在恢复连接');
+  });
   it('opens settings and a child menu, executes RPC and returns without sending a prompt', async () => {
     const { desktop, action } = fixture();
     const send = vi.fn();

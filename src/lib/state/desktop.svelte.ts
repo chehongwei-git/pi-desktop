@@ -3,6 +3,7 @@ import { bridge, errorMessage, type Bridge } from '../client';
 import { parseBuiltin } from '../commands';
 import type { ModelSettings, ProviderConfig } from '../model-config';
 import { terminalText } from '../terminal-text';
+import { SessionContent } from './session-content';
 import { reduceEvents } from './reducer';
 import {
   defaultSettings,
@@ -47,6 +48,55 @@ export class Desktop {
     follow: true,
   };
   private loadedHistoryCount = 0;
+  /** 内容与进程生命周期分离；空历史也属于已加载的缓存。 */
+  historyCached = $state(false);
+  restoring = $state(false);
+  waitingToSend = $state(false);
+  private content = new SessionContent();
+  private suppressTranscript = false;
+  private contentWaiters = new Set<{
+    resolve(): void;
+    reject(error: Error): void;
+  }>();
+  /** 视图在历史原子替换前保存当下锚点，返回提交后的恢复回调。 */
+  beforeHistoryCommit?: () => () => void;
+
+  /** 连接与历史引用均就绪后才唤醒读取；失败一次性通知等待者，避免悬挂请求。 */
+  finishRestore(): void {
+    this.restoring = false;
+    for (const waiter of this.contentWaiters) {
+      if (this.connection === 'ready') waiter.resolve();
+      else waiter.reject(new Error(this.error || '连接恢复失败，请重试'));
+    }
+    this.contentWaiters.clear();
+    if (this.connection === 'ready') void this.drain();
+  }
+
+  private async contentReady(): Promise<void> {
+    if (!this.restoring && this.connection === 'ready') return;
+    if (!this.restoring && this.connection === 'failed')
+      throw new Error(this.error || '连接恢复失败，请重试');
+    // 隐藏视图只等待激活，不因图片或详情挂载自行启动进程。
+    await new Promise<void>((resolve, reject) =>
+      this.contentWaiters.add({ resolve, reject }),
+    );
+  }
+
+  /** 只用于工作区确认未挂载且不在执行的会话；保留草稿与阅读恢复信息。 */
+  evictContent(): void {
+    this.loadedHistoryCount = Math.max(
+      this.loadedHistoryCount,
+      this.messages.length,
+    );
+    this.historyCached = false;
+    this.messages = [];
+    this.content.clear();
+    this.visible.clear();
+    this.accessed.clear();
+    for (const waiter of this.contentWaiters)
+      waiter.reject(new Error('会话缓存已释放'));
+    this.contentWaiters.clear();
+  }
   /** 只标记尚未查看的执行结果，不因后台输出抢焦点。 */
   unread = $state(false);
   settings = $state<Settings>({
@@ -652,6 +702,9 @@ export class Desktop {
   private async connectProject(project: string): Promise<void> {
     this.drafts.set(this.draftKey(), this.draft);
     this.saveImageDraft();
+    const preserve = this.historyCached;
+    const draft = this.draft;
+    const images = this.images;
     const generation = ++this.generation;
     const modelRevision = this.modelConfigRevision;
     this.connection = 'starting';
@@ -683,13 +736,17 @@ export class Desktop {
         this.modelConfigPending = false;
         this.modelConfigStatus = '已从共享配置启动 Pi';
       }
-      this.messages = [];
-      this.toolViews = {};
-      this.accessed.clear();
-      this.visible.clear();
+      if (!preserve) {
+        this.messages = [];
+        this.accessed.clear();
+        this.visible.clear();
+      }
       this.run = connected.snapshot.isStreaming ? 'running' : 'idle';
-      this.draft = this.drafts.get(this.draftKey()) ?? '';
-      this.restoreImageDraft();
+      // 重连期间输入仍可编辑，不用连接开始时的副本覆盖新输入。
+      if (!preserve && this.draft === draft && this.images === images) {
+        this.draft = this.drafts.get(this.draftKey()) ?? '';
+        this.restoreImageDraft();
+      }
       this.settings.recentProjects = [
         this.project,
         ...this.settings.recentProjects.filter(
@@ -698,22 +755,24 @@ export class Desktop {
       ].slice(0, 20);
       if (!connected.verified)
         this.notice = `Pi ${connected.version} 未经本版验证，将按 RPC 能力连接。`;
+      // 启动 reset 必须先消费，但不能清空正在阅读的旧视图；随后历史给出权威正文。
+      this.suppressTranscript = preserve;
+      try {
+        await this.drain(generation);
+      } finally {
+        this.suppressTranscript = false;
+      }
       // 设置落盘与页面数据读取互不依赖，避免跨项目新建时逐步等待。
       await Promise.all([
         this.api.save($state.snapshot(this.settings)),
         this.refreshMetadata(),
-        this.refreshHistory(),
+        preserve || this.loadedHistoryCount
+          ? this.restoreHistory(generation)
+          : this.refreshHistory(undefined, undefined, true),
         this.refreshSessions(),
         this.refreshStats(),
       ]);
-      // 空闲进程淘汰后恢复原先已读窗口，避免同一个 scrollTop 落到另一段历史。
-      while (
-        generation === this.generation &&
-        this.hasMore &&
-        this.messages.length < this.loadedHistoryCount
-      ) {
-        await this.refreshHistory(this.before, undefined, true);
-      }
+      // restoreHistory 在暂存区补齐已读窗口，完成后一次提交。
       if (
         generation === this.generation &&
         (!this.navigation || !this.snapshot.sessionFile)
@@ -739,7 +798,7 @@ export class Desktop {
       this.newChatProject = null;
       void this.refreshMetadata();
       // 启动后立刻拉取已有事件；后续唤醒仍通过 drain 合并处理。
-      void this.drain(generation);
+      if (!this.restoring) void this.drain(generation);
       return;
     }
     if (event.type === 'failed') {
@@ -750,6 +809,10 @@ export class Desktop {
       this.connection = 'failed';
       this.run = 'idle';
       this.error = errorMessage(event.error);
+      return;
+    }
+    if (this.restoring) {
+      this.wakePending = true;
       return;
     }
     void this.drain(generation);
@@ -781,7 +844,19 @@ export class Desktop {
           break;
         if (!batch.events.length) break;
         const previous = this.run;
-        reduceEvents(this, batch.events);
+        for (const event of batch.events) {
+          if (event.type === 'message')
+            event.message = this.content.bind(event.message, this.runtimeId);
+        }
+        if (this.suppressTranscript) {
+          const projection = { messages: [] as Message[], run: this.run };
+          reduceEvents(projection, batch.events);
+          this.run = projection.run;
+        } else {
+          reduceEvents(this, batch.events);
+          if (batch.events.some((event) => event.type === 'message'))
+            this.historyCached = true;
+        }
         if (this.initialPending && this.messages.some((m) => m.role === 'user'))
           this.initialPending = null;
         for (const event of batch.events) {
@@ -1064,12 +1139,76 @@ export class Desktop {
       this.openingSession = null;
     }
   }
+  /** 重连时在暂存区补齐已读窗口，避免逐页替换导致正文闪空或滚动跳动。 */
+  async restoreHistory(generation = this.generation): Promise<void> {
+    const runtime = this.runtimeId;
+    const previous = new Map(
+      this.messages.map((message) => [message.id, message]),
+    );
+    const target = Math.max(this.loadedHistoryCount, this.messages.length);
+    const messages: Message[] = [];
+    const ids = new Set<string>();
+    let before: number | undefined;
+    let hasMore = false;
+    this.loadingHistory = true;
+    try {
+      do {
+        const page = await this.action<HistoryPage>({
+          type: 'history',
+          before,
+        });
+        if (generation !== this.generation || runtime !== this.runtimeId)
+          return;
+        if (before !== undefined && page.hasMore && page.before >= before)
+          throw new Error('历史游标未前进，请重试');
+        const incoming = page.messages.filter(
+          (message) => !ids.has(message.id),
+        );
+        if (before !== undefined && page.hasMore && !incoming.length)
+          throw new Error('历史加载未返回更早消息，请重试');
+        for (const message of incoming) {
+          ids.add(message.id);
+          if (
+            !message.text &&
+            message.contentRef &&
+            message.role !== 'toolResult'
+          ) {
+            const content = await this.api.content(
+              runtime,
+              message.contentRef,
+              0,
+            );
+            message.text = content.text;
+            message.truncated = !content.done;
+          }
+        }
+        messages.unshift(...incoming);
+        before = page.before;
+        hasMore = page.hasMore;
+      } while (hasMore && messages.length < target);
+      if (generation !== this.generation || runtime !== this.runtimeId) return;
+      const merged = messages.map((message) =>
+        this.content.bind(message, runtime, previous.get(message.id)),
+      );
+      const afterCommit = this.beforeHistoryCommit?.();
+      this.messages = merged;
+      this.historyCached = true;
+      this.before = before ?? 0;
+      this.hasMore = hasMore;
+      this.content.retain(merged);
+      afterCommit?.();
+    } finally {
+      if (generation === this.generation) this.loadingHistory = false;
+    }
+  }
+
   /** 历史恢复由宿主投影与分页；首次只接收最后 50 条。 */
   async refreshHistory(
     before?: number,
     beforeInsert?: () => void,
     restoring = false,
   ): Promise<void> {
+    if (this.navigation && !restoring) await this.contentReady();
     if (
       before !== undefined &&
       (this.loadingHistory || (this.openingSession && !restoring))
@@ -1089,6 +1228,11 @@ export class Desktop {
       if (before !== undefined && page.hasMore && page.before >= before)
         throw new Error('历史游标未前进，请重试');
       // 空预览在插入前读取，避免先插入占位再异步撑高已读区域。
+      for (let index = 0; index < page.messages.length; index++)
+        page.messages[index] = this.content.bind(
+          page.messages[index],
+          this.runtimeId,
+        );
       await Promise.all(
         page.messages.map(async (message) => {
           if (
@@ -1096,7 +1240,13 @@ export class Desktop {
             message.contentRef &&
             message.role !== 'toolResult'
           ) {
-            const content = await this.readContent(message.contentRef, 0);
+            const content = restoring
+              ? await this.api.content(
+                  this.runtimeId,
+                  this.content.resolve(message.contentRef, this.runtimeId),
+                  0,
+                )
+              : await this.readContent(message.contentRef, 0);
             message.text = content.text;
             message.truncated = !content.done;
           }
@@ -1116,6 +1266,7 @@ export class Desktop {
       beforeInsert?.();
       this.messages =
         before === undefined ? incoming : [...incoming, ...this.messages];
+      this.historyCached = true;
       this.before = page.before;
       this.hasMore = page.hasMore;
     } catch (cause) {
@@ -1129,6 +1280,7 @@ export class Desktop {
   async promptHistory(before?: number): Promise<HistoryPage> {
     if (this.newChatProject !== null || this.openingSession)
       return { messages: [], before: 0, hasMore: false };
+    if (before !== undefined && this.navigation) await this.contentReady();
     const runtime = this.runtimeId;
     const session = this.snapshot.sessionFile;
     const page =
@@ -1143,6 +1295,10 @@ export class Desktop {
       throw new Error('会话已切换，历史读取已取消');
     if (before !== undefined && page.hasMore && page.before >= before)
       throw new Error('历史游标未前进，请重试');
+    if (before !== undefined)
+      page.messages = page.messages.map((message) =>
+        this.content.bind(message, runtime),
+      );
     return {
       ...page,
       messages: page.messages.filter(
@@ -1282,8 +1438,13 @@ export class Desktop {
       this.newChatProject === null &&
       (this.draft.trim() || this.images.length)
     ) {
-      if (this.submitting || this.openingSession) return;
-      await this.navigation.ensure();
+      if (this.submitting || this.openingSession || this.waitingToSend) return;
+      this.waitingToSend = true;
+      try {
+        await this.navigation.ensure();
+      } finally {
+        this.waitingToSend = false;
+      }
     }
     if (this.task?.state === 'queued')
       throw new Error('此会话正在排队，请等待开始或取消排队。');
@@ -1634,25 +1795,36 @@ export class Desktop {
     }
     return true;
   }
-  /** 空闲淘汰前确认事件已消费；临时引用随进程关闭失效，随后从历史重载。 */
+  /** 进程回收只释放运行资源；消息和已挂载详情继续用于离线阅读。 */
   async releaseIdle(canRelease = () => true): Promise<void> {
-    if (this.run !== 'idle' || this.extensions.length || this.submitting)
-      return;
+    const eligible = () =>
+      this.run === 'idle' &&
+      !this.extensions.length &&
+      !this.submitting &&
+      !this.waitingToSend &&
+      !this.restoring &&
+      !this.loadingHistory &&
+      !['queued', 'running'].includes(this.task?.state ?? '');
+    if (!eligible() || !canRelease()) return;
     await this.drain();
-    if (!canRelease() || this.run !== 'idle' || this.extensions.length) return;
+    if (!canRelease() || !eligible()) return;
     this.loadedHistoryCount = this.messages.length;
     await this.disconnect();
-    this.messages = [];
-    this.visible.clear();
-    this.accessed.clear();
   }
   /** 强制断开不是重试，不重发任何提示词。 */
   async disconnect(force = false): Promise<void> {
     this.connection = 'stopping';
     for (const timer of this.extensionTimers.values()) clearTimeout(timer);
     this.extensionTimers.clear();
+    try {
+      await this.api.disconnect(force, this.runtimeId);
+    } catch (error) {
+      // 宿主关闭失败时仍保留原身份与事件代次，重试可先确认旧进程是否存活。
+      this.connection = 'failed';
+      this.error = errorMessage(error);
+      throw error;
+    }
     ++this.generation;
-    await this.api.disconnect(force, this.runtimeId);
     this.connection = 'disconnected';
     this.runtimeId = '';
     this.run = 'idle';
@@ -1887,25 +2059,51 @@ export class Desktop {
   /** 读取前 64KiB 用于虚拟列表重新挂载，全文由分块对话框浏览。 */
   async loadPreview(message: Message): Promise<void> {
     if (!message.contentRef || message.text) return;
-    const page = await this.api.content(this.runtimeId, message.contentRef, 0);
+    let page;
+    try {
+      page = await this.readContent(message.contentRef, 0);
+    } catch (error) {
+      // 视图卸载并淘汰后取消的读取不应把正常回收显示为会话失败。
+      if (!this.messages.includes(message)) return;
+      throw error;
+    }
+    if (!this.messages.includes(message)) return;
     message.text = page.text;
     message.truncated = !page.done;
     this.accessed.set(message.id, ++this.accessSerial);
     this.trimCache();
   }
-  /** 分块正文查询保留明确的 runtime 所有权。 */
+  /** 分块正文查询保留明确的 runtime 所有权；回收期间的只读请求等待新绑定。 */
   async readContent(id: string, offset: number) {
-    const generation = this.generation;
     const session = this.snapshot.sessionFile;
-    const runtime = this.runtimeId;
-    const page = await this.api.content(runtime, id, offset);
-    if (
-      generation !== this.generation ||
-      runtime !== this.runtimeId ||
-      session !== this.snapshot.sessionFile
-    )
-      throw new Error('会话已切换，正文读取已取消');
-    return page;
+    for (;;) {
+      await this.contentReady();
+      if (session !== this.snapshot.sessionFile)
+        throw new Error('会话已切换，正文读取已取消');
+      const generation = this.generation;
+      const runtime = this.runtimeId;
+      const current = () =>
+        generation === this.generation &&
+        runtime === this.runtimeId &&
+        session === this.snapshot.sessionFile;
+      try {
+        const page = await this.api.content(
+          runtime,
+          this.content.resolve(id, runtime),
+          offset,
+        );
+        if (current()) return page;
+      } catch (error) {
+        if (current()) throw error;
+      }
+      if (
+        !this.navigation ||
+        !this.historyCached ||
+        session !== this.snapshot.sessionFile
+      )
+        throw new Error('会话已切换，正文读取已取消');
+      // 仅重复无副作用的读取，且必须经过 contentReady 和新运行时句柄校验。
+    }
   }
   /** 共享配置 IO 与会话独立；不把凭据放入通用 Settings。 */
   loadModelConfig() {
