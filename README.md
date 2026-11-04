@@ -1,5 +1,8 @@
 # Pi Desktop
 
+<img width="3840" height="2088" alt="image" src="https://github.com/user-attachments/assets/d07ef884-ad63-45f7-aa6e-199276cb7437" />
+
+
 **为本机 Pi 提供轻量的桌面工作区。**
 
 Pi Desktop 使用 Tauri 2、Svelte 5、TypeScript 与 Rust 构建，通过 RPC 子进程连接已安装的 Pi，将项目、会话、模型配置和工具执行整合到默认中文的桌面界面中。复用系统 WebView，不捆绑 Pi、Node.js 或 Chromium。
