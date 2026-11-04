@@ -24,7 +24,7 @@ Pi Desktop 使用 Tauri 2、Svelte 5、TypeScript 与 Rust 构建，通过 RPC �
 
 ### 1. 准备环境
 
-Pi Desktop 是桌面客户端，**不能替代 Pi 本身**。请先安装 Pi，确认它能在终端独立启动，并准备可用的模型配置或认证。
+Pi Desktop 是桌面客户端，**不能替代 Pi 本身**。请先安装 Pi，确认它能在终端独立启动。
 
 源码运行还需要以下环境：
 
