@@ -7,9 +7,10 @@
   import type { ConversationActivity as Activity } from '../conversation-activity';
   import { isPlanComplete, processRows } from '../process-groups';
   import PlanMessage from './PlanMessage.svelte';
+  import TextPanel from './TextPanel.svelte';
   import ChangePanel from './ChangePanel.svelte';
   import Icon from './Icon.svelte';
-  import type { ContentPage, Message } from '../types';
+  import type { ContentPage, Message, MessageTextPart } from '../types';
   let {
     messages,
     active = true,
@@ -31,7 +32,12 @@
     messages: Message[];
     active?: boolean;
     /** 被缓存视图卸载后仍能恢复阅读位置。 */
-    scrollState?: { top: number; follow: boolean; changeId?: string };
+    scrollState?: {
+      top: number;
+      follow: boolean;
+      changeId?: string;
+      textTarget?: { messageId: string; partId: string; top: number };
+    };
     /** 活动提示属于列表内容，复用底部跟随且不干扰上翻阅读。 */
     activity?: Activity | null;
     /** 消息提交成功或确认扩展操作时恢复跟随；普通进度更新不能打断阅读。 */
@@ -73,6 +79,50 @@
   let lastClientHeight = 0;
   let touchY = 0;
   let change = $state<Message>();
+  let textTarget = $state<{ messageId: string; partId: string; top: number }>();
+  let textPart = $derived(
+    messages
+      .find((message) => message.id === textTarget?.messageId)
+      ?.textParts?.find((part) => part.id === textTarget?.partId),
+  );
+  let panelOpen = $derived(!!change || !!textPart);
+  /** 普通正文展开只补偿本次布局；底部收起回到入口，避免落在下一条消息。 */
+  async function layout(
+    update: () => void,
+    trigger?: HTMLElement,
+  ): Promise<void> {
+    pauseFollow();
+    const saved = anchor();
+    update();
+    await tick();
+    if (!alive || !viewport) return;
+    if (trigger?.isConnected) {
+      trigger.focus({ preventScroll: true });
+      trigger.scrollIntoView({ block: 'nearest' });
+    } else if (saved?.node.isConnected)
+      viewport.scrollTop += saved.node.getBoundingClientRect().top - saved.top;
+    lastScrollTop = viewport.scrollTop;
+  }
+  async function showText(
+    message: Message,
+    part: MessageTextPart,
+    trigger: HTMLButtonElement,
+  ): Promise<void> {
+    if (textTarget?.messageId === message.id && textTarget.partId === part.id) {
+      trigger
+        .closest('.transcript-workspace')
+        ?.querySelector<HTMLElement>('.text-detail-panel button:last-child')
+        ?.focus();
+      return;
+    }
+    changeTrigger = trigger;
+    await layout(() => {
+      change = undefined;
+      scrollState.changeId = undefined;
+      textTarget = { messageId: message.id, partId: part.id, top: 0 };
+      scrollState.textTarget = textTarget;
+    });
+  }
   let changeTrigger: HTMLButtonElement | undefined;
   /** 只在侧栏开关引发布局变化时恢复一次锚点，不干预后续阅读。 */
   async function showChange(
@@ -82,6 +132,8 @@
     pauseFollow();
     const saved = anchor();
     change = message;
+    textTarget = undefined;
+    scrollState.textTarget = undefined;
     scrollState.changeId = message?.id;
     if (trigger) changeTrigger = trigger;
     await tick();
@@ -89,8 +141,10 @@
     if (saved?.node.isConnected)
       viewport.scrollTop += saved.node.getBoundingClientRect().top - saved.top;
     lastScrollTop = viewport.scrollTop;
-    if (!message && changeTrigger?.isConnected)
-      changeTrigger.focus({ preventScroll: true });
+    if (!message) {
+      const trigger = changeTrigger?.isConnected ? changeTrigger : viewport;
+      trigger.focus({ preventScroll: true });
+    }
   }
 
   function update(): void {
@@ -207,6 +261,7 @@
         });
       };
     });
+    textTarget = scrollState.textTarget;
     if (scrollState.changeId)
       change = messages.find((message) => message.id === scrollState.changeId);
     const observer = new IntersectionObserver(checkOlder, {
@@ -258,7 +313,7 @@
   });
 </script>
 
-<div class="transcript-workspace" class:has-change={!!change}>
+<div class="transcript-workspace" class:has-change={panelOpen}>
   <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions (独立滚动区域支持键盘阅读。) -->
   <div
     class="transcript"
@@ -318,6 +373,12 @@
           {:else}
             <MessageView
               {message}
+              selectedPart={textTarget?.messageId === message.id
+                ? textTarget.partId
+                : undefined}
+              ontext={(message, part, trigger) =>
+                void showText(message, part, trigger)}
+              onlayout={(update, trigger) => void layout(update, trigger)}
               onchange={(message, trigger) => {
                 void showChange(message, trigger);
               }}
@@ -359,7 +420,16 @@
       <ConversationActivity {activity} />
     </div>
   </div>
-  {#if change}
+  {#if textPart && textTarget}
+    {#key `${textTarget.messageId}:${textPart.id}:${textPart.contentRef}`}
+      <TextPanel
+        part={textPart}
+        {read}
+        bind:position={textTarget.top}
+        onclose={() => void showChange()}
+      />
+    {/key}
+  {:else if change}
     {#key `${change.id}:${change.tool?.diffRef ?? change.tool?.writeRef}`}
       <ChangePanel message={change} {read} onclose={() => void showChange()} />
     {/key}

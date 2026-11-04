@@ -1329,6 +1329,118 @@ button svg {
   padding: 3px 6px;
 }
 /* 普通文档流不回收已读节点；历史前插由列表统一恢复锚点。 */
+/* 用户原文采用连续阅读布局；卡片与输入器共用视觉尺度，正文不嵌套滚动框。 */
+.user-message-parts {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.user-text-part {
+  display: contents;
+}
+.user-plain-text {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: 16px;
+  line-height: 1.7;
+}
+.text-preview {
+  display: -webkit-box;
+  -webkit-line-clamp: 6;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.text-expand {
+  display: block;
+  border: 0;
+  background: transparent;
+  color: var(--accent);
+  padding: 6px 0;
+  font-size: 13px;
+  cursor: pointer;
+}
+.text-expand:hover {
+  text-decoration: underline;
+}
+.message-text-card {
+  display: inline-flex;
+  align-items: center;
+  vertical-align: middle;
+  gap: 10px;
+  width: 280px;
+  max-width: calc(100% - 4px);
+  min-height: 56px;
+  margin: 3px 2px;
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--bg);
+  color: var(--muted);
+  text-align: left;
+  white-space: normal;
+  cursor: pointer;
+  transition:
+    background-color 100ms,
+    border-color 100ms;
+}
+.message-text-card:hover {
+  background: var(--surface);
+}
+.message-text-card.selected {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+}
+.message-text-card:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.message-card-content {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+.message-card-title {
+  color: var(--text);
+  font-size: 14px;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.message-card-meta,
+.text-read-status {
+  color: var(--muted);
+  font-size: 12px;
+}
+.text-read-error {
+  color: var(--error);
+  font-size: 13px;
+}
+.text-panel-header {
+  flex-wrap: wrap;
+}
+.text-panel-title {
+  display: flex;
+  flex: 1;
+  gap: 8px;
+  align-items: baseline;
+  min-width: 100px;
+}
+.text-panel-title strong {
+  flex: none;
+}
+.text-panel-title span {
+  font-size: 12px;
+  color: var(--muted);
+}
+.text-panel-body {
+  padding: 16px;
+}
+@media (prefers-reduced-motion: reduce) {
+  .message-text-card {
+    transition: none;
+  }
+}
 /* 右侧独立审阅区域；列表实例保留，宽度变化只在开关时恢复一次锚点。 */
 .transcript-workspace {
   display: flex;

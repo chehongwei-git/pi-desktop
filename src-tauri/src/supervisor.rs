@@ -1135,6 +1135,7 @@ mod tests {
             message: "hold:work".into(),
             images: vec![],
             mode: None,
+            text_parts: None,
         };
         for (index, handle) in handles.iter().enumerate() {
             owner
@@ -1216,6 +1217,7 @@ mod tests {
             message: "hold:task".into(),
             images: vec![],
             mode: None,
+            text_parts: None,
         };
         owner
             .submit(handle.id.clone(), "first".into(), prompt())

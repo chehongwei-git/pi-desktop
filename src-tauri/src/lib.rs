@@ -12,6 +12,7 @@ mod runtime;
 mod settings;
 mod storage;
 mod supervisor;
+mod text_presentation;
 mod tool;
 mod types;
 

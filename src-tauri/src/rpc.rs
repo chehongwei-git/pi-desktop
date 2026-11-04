@@ -71,6 +71,7 @@ pub struct Projection {
     tools: BTreeMap<String, ToolPresentation>,
     process: Option<ProcessInfo>,
     timing_dir: Option<std::path::PathBuf>,
+    pub text_presentations: crate::text_presentation::Presentations,
     message_started: Option<i64>,
     timing_keys: Vec<String>,
     waiting_extensions: BTreeSet<String>,
@@ -103,6 +104,7 @@ impl Projection {
     /// 独立元数据文件不改写 Pi 历史；每条已结束消息只写一次，临时文件原子替换。
     pub fn with_timing_dir(path: std::path::PathBuf) -> Self {
         Self {
+            text_presentations: crate::text_presentation::Presentations::new(path.join("text")),
             timing_dir: Some(path),
             ..Self::default()
         }
@@ -297,6 +299,7 @@ impl Projection {
             role,
             text: preview(&text, 64 * 1024),
             thinking: preview(&thinking, 64 * 1024),
+            text_parts: self.text_presentations.project(value, false, store)?,
             content_ref,
             truncated: text.len() > 64 * 1024,
             status: if value["isError"] == true || value["stopReason"] == "error" {
@@ -349,6 +352,7 @@ impl Projection {
                         images: vec![],
                         text: String::new(),
                         thinking: String::new(),
+                        text_parts: None,
                         presentation: Some("process".into()),
                         process: self.process.clone(),
                         content_ref: None,
@@ -443,6 +447,7 @@ impl Projection {
                     self.save_timing(value);
                 } else if role == "user" {
                     message.process = None;
+                    message.text_parts = self.text_presentations.project(value, true, store)?;
                 } else if role == "toolResult" {
                     // 工具结果保存独立映射，重启后仍可恢复该组计时。
                     if let Some(key) = timing_key(value) {
@@ -501,6 +506,7 @@ impl Projection {
                         images: vec![],
                         text: preview(&text, 64 * 1024),
                         thinking: String::new(),
+                        text_parts: None,
                         presentation: Some("process".into()),
                         process: self.process.clone(),
                         content_ref,

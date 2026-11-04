@@ -1,5 +1,52 @@
 import { test, expect } from '@playwright/test';
 
+/** 文本与代码复用同一审阅区域；旧的异步正文不能覆盖新面板。 */
+test('switches between text cards and code changes without losing the transcript instance', async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    (window as any).textCards = true;
+    (window as any).slowText = true;
+  });
+  await page.route(/\/change-fixture$/, (route) =>
+    route.fulfill({
+      contentType: 'text/html',
+      body: '<!doctype html><html><body><main style="height:100vh;display:flex;flex-direction:column"></main><script type="module" src="/tests/browser/change-panel-fixture.ts"></script></body></html>',
+    }),
+  );
+  await page.goto('/change-fixture');
+  const card = page.getByRole('button', { name: /查看粘贴文本/ });
+  await expect(card).toBeVisible();
+  await page.locator('.transcript').evaluate((node) => {
+    (window as any).originalTranscript = node;
+  });
+  await card.click();
+  const text = page.getByRole('complementary', { name: '粘贴文本全文' });
+  await expect(text).toContainText('正在读取全文');
+  await page
+    .locator('[data-message-id="b"]')
+    .getByRole('button', { name: '查看变更' })
+    .click();
+  await expect(text).toHaveCount(0);
+  const code = page.getByRole('complementary', { name: '代码变更' });
+  await expect(code).toContainText('tail-b-399');
+  await page.evaluate(() => {
+    (window as any).slowText = false;
+    (window as any).releaseText();
+  });
+  await expect(code).not.toContainText('卡片全文');
+  await card.click();
+  await expect(code).toHaveCount(0);
+  await expect(text).toContainText('卡片全文');
+  await text.getByRole('button', { name: '关闭全文' }).press('Escape');
+  await expect(card).toBeFocused();
+  expect(
+    await page
+      .locator('.transcript')
+      .evaluate((node) => node === (window as any).originalTranscript),
+  ).toBe(true);
+});
+
 for (const width of [1200, 600])
   test(`change panel preserves context and isolates reads at ${width}px`, async ({
     page,

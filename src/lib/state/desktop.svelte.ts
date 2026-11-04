@@ -1,5 +1,7 @@
 /** 应用门面：组件只调用用户意图；集中连接状态、草稿、事件确认与切换事务。 */
 import { bridge, errorMessage, type Bridge } from '../client';
+import { draftText, type DraftPart } from '../draft-parts';
+import { textRanges, localTextParts } from '../text-presentation';
 import { parseBuiltin } from '../commands';
 import type { ModelSettings, ProviderConfig } from '../model-config';
 import { terminalText } from '../terminal-text';
@@ -43,7 +45,12 @@ export class Desktop {
   navigation?: SessionNavigation;
   task = $state<import('../types').TaskActivity | null>(null);
   taskInput: { text: string; images: MessageImage[] } | null = null;
-  scrollState: { top: number; follow: boolean; changeId?: string } = {
+  scrollState: {
+    top: number;
+    follow: boolean;
+    changeId?: string;
+    textTarget?: { messageId: string; partId: string; top: number };
+  } = {
     top: 0,
     follow: true,
   };
@@ -432,7 +439,41 @@ export class Desktop {
   levels = $state<string[]>([]);
   commands = $state<Command[]>([]);
   builtinRequest = $state<{ name: string; args: string } | null>(null);
-  draft = $state('');
+  private draftValue = $state('');
+  private draftRevision = 0;
+  get draft(): string {
+    return this.draftValue;
+  }
+  set draft(value: string) {
+    if (value !== this.draftValue) ++this.draftRevision;
+    this.draftValue = value;
+  }
+  private structuredDrafts = $state<Record<string, DraftPart[]>>({});
+  /** 片段与项目/会话草稿同域；外部文字替换不猜测旧卡片的位置。 */
+  get draftParts(): DraftPart[] {
+    const parts = this.structuredDrafts[this.draftKey()];
+    return parts && draftText(parts) === this.draft ? parts : [];
+  }
+  set draftParts(parts: DraftPart[]) {
+    const previous = this.structuredDrafts[this.draftKey()];
+    // 编辑器重挂载会复制片段；只有内容或折叠边界改变才算用户的新版本。
+    const changed = previous
+      ? previous.length !== parts.length ||
+        previous.some((part, index) => {
+          const next = parts[index];
+          return (
+            !next ||
+            part.kind !== next.kind ||
+            part.text !== next.text ||
+            (part.kind === 'paste' &&
+              next.kind === 'paste' &&
+              part.id !== next.id)
+          );
+        })
+      : parts.some((part) => part.kind === 'paste');
+    if (changed) ++this.draftRevision;
+    this.structuredDrafts[this.draftKey()] = parts;
+  }
   images = $state<MessageImage[]>([]);
   recoveredImages = $state<{ text: string; images: MessageImage[] }[]>([]);
   /** 恢复时交换当前草稿，避免覆盖用户尚未发送的工作。 */
@@ -504,6 +545,7 @@ export class Desktop {
     if (this.openingSession || this.submitting) return;
     this.drafts.set(this.draftKey(), this.draft);
     const text = this.draft;
+    const parts = this.draftParts;
     const images = this.images;
     this.saveImageDraft();
     // Windows 大小写与分隔符别名视为同一项目，不因路径写法差异重置草稿选择。
@@ -515,8 +557,10 @@ export class Desktop {
     this.draft = preserveDraft
       ? text
       : (this.drafts.get(this.draftKey()) ?? '');
-    if (preserveDraft) this.images = images;
-    else this.restoreImageDraft();
+    if (preserveDraft) {
+      this.images = images;
+      this.draftParts = parts;
+    } else this.restoreImageDraft();
   }
   notice = $state('');
   modelConfigPending = $state(false);
@@ -852,11 +896,13 @@ export class Desktop {
       return;
     }
     if (event.type === 'initialized') {
+      const parts = this.draftParts;
       this.setConnectionPhase('');
       this.snapshot = event.snapshot;
       this.project = event.project;
       this.connection = 'ready';
       this.newChatProject = null;
+      this.structuredDrafts[this.draftKey()] = parts;
       void this.refreshMetadata();
       // 启动后立刻拉取已有事件；后续唤醒仍通过 drain 合并处理。
       if (!this.restoring) void this.drain(generation);
@@ -979,7 +1025,13 @@ export class Desktop {
   /** 正文预算 8MiB，挂载窗口与流式块除外；仅淘汰可由引用重载的文本。 */
   trimCache(budget = 8 * 1024 * 1024): void {
     let bytes = this.messages.reduce(
-      (sum, m) => sum + (m.text.length + m.thinking.length) * 2,
+      (sum, m) =>
+        sum +
+        (m.text.length +
+          m.thinking.length +
+          (m.textParts?.reduce((total, part) => total + part.text.length, 0) ??
+            0)) *
+          2,
       0,
     );
     const candidates = this.messages.filter(
@@ -995,6 +1047,14 @@ export class Desktop {
       if (bytes <= budget) break;
       bytes -= message.text.length * 2;
       message.text = '';
+      // 普通片段的完整预览也计入缓存预算，淘汰时保留卡片标题和可重读引用。
+      for (const part of message.textParts ?? []) {
+        if (!part.contentRef || part.text.length <= 360) continue;
+        const preview = Array.from(part.text).slice(0, 360).join('');
+        bytes -= (part.text.length - preview.length) * 2;
+        part.text = preview;
+        part.truncated = true;
+      }
     }
   }
   /** 流式阶段通知与对话框分离，fire-and-forget 不发送多余响应。 */
@@ -1404,7 +1464,10 @@ export class Desktop {
     ]);
     if (this.initialSubmission?.fingerprint !== fingerprint)
       this.initialSubmission = { id: crypto.randomUUID(), fingerprint };
+    const submittedParts = this.draftParts.map((part) => ({ ...part }));
+    const ranges = textRanges(submittedParts, text);
     const submissionId = this.initialSubmission.id;
+    const submittedRevision = this.draftRevision;
     this.submitting = true;
     this.project = project;
     this.connection = 'starting';
@@ -1421,6 +1484,7 @@ export class Desktop {
           {
             type: 'prompt',
             message: text,
+            ...(ranges ? { textParts: ranges } : {}),
             ...(images.length
               ? {
                   images: images.map((image) => ({
@@ -1452,6 +1516,7 @@ export class Desktop {
         ? null
         : {
             id: `accepted-${submissionId}`,
+            textParts: localTextParts(submittedParts, text),
             role: 'user',
             text,
             thinking: '',
@@ -1460,7 +1525,11 @@ export class Desktop {
             status: 'done',
             name: null,
           };
+      const remainingParts = this.draftParts;
+      const clearSubmitted =
+        this.draftRevision === submittedRevision && this.draft === text;
       this.newChatProject = null;
+      this.draftParts = remainingParts;
       this.connection = 'ready';
       this.task = {
         taskId: result.desktopTask,
@@ -1472,7 +1541,7 @@ export class Desktop {
       this.sidebarPreview ||= text.replace(/\s+/g, ' ').trim().slice(0, 80);
       this.lastSentAt = new Date().toISOString();
       this.restored = false;
-      if (this.draft === text) this.draft = '';
+      if (clearSubmitted) this.draft = '';
       const sent = new Set(images.map((image) => image.id));
       this.images = this.images.filter((image) => !sent.has(image.id));
       this.sentMessageRevision++;
@@ -1613,6 +1682,8 @@ export class Desktop {
       !this.snapshot.model.input.includes('image')
     )
       throw new Error('当前模型不支持图片输入，请切换到支持图片的模型。');
+    const submittedParts = this.draftParts.map((part) => ({ ...part }));
+    const ranges = textRanges(submittedParts, text);
     const sessionFile = this.snapshot.sessionFile;
     const generation = this.generation;
     const sentAt = new Date().toISOString();
@@ -1626,6 +1697,7 @@ export class Desktop {
         ...this.messages,
         {
           id: pendingId,
+          textParts: localTextParts(submittedParts, text),
           role: 'user',
           text,
           thinking: '',
@@ -1639,11 +1711,14 @@ export class Desktop {
     }
     // 普通反馈在下一次有效提交时结束；停止和压缩状态不能随发送清除。
     if (this.run !== 'aborting' && this.run !== 'compacting') this.notice = '';
+    // 即使用户把文字改回原样，旧请求也不能清除发送期间的新编辑。
+    const submittedDraftRevision = this.draftRevision;
     this.submitting = true;
     try {
       const result = await this.action<{ desktopTask?: string }>({
         type: 'prompt',
         message: text,
+        ...(ranges ? { textParts: ranges } : {}),
         mode: delivery,
         ...(images.length
           ? {
@@ -1679,7 +1754,8 @@ export class Desktop {
       if (sessionFile) this.sentAt[this.sessionKey(sessionFile)] = sentAt;
       const pending = this.messages.find((message) => message.id === pendingId);
       if (pending?.delivery) pending.delivery.state = 'queued';
-      if (this.draft === text) this.draft = '';
+      if (this.draftRevision === submittedDraftRevision && this.draft === text)
+        this.draft = '';
       const sent = new Set(images.map((image) => image.id));
       this.images = this.images.filter((image) => !sent.has(image.id));
       if (delivery && this.run !== 'aborting' && this.run !== 'compacting')

@@ -15,6 +15,9 @@ for (const kind of ['text', 'mixed', 'expanded']) {
     test(`continuous upward scrolling preserves text anchors after switching to ${kind} history (${driver})`, async ({
       page,
     }) => {
+      // 展开历史逐帧测量 240 条消息并发送 90 次原生滚轮；慢速桌面需足够时间完成全部采样。
+      // 这不是耗时基准，仍保留全部步数、锚点误差和事件送达断言。
+      if (kind === 'expanded') test.setTimeout(60000);
       const errors: string[] = [];
       page.on('pageerror', (error) => errors.push(error.message));
       await page.route('**/transcript-scroll-fixture', (route) =>

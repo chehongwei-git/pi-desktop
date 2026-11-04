@@ -32,6 +32,26 @@ for (const id of ['a', 'b'])
       removedLines: 1,
     },
   });
+if (host.textCards)
+  messages.push({
+    id: 'pasted-message',
+    role: 'user',
+    name: null,
+    status: 'done',
+    thinking: '',
+    contentRef: null,
+    text: '查看文本',
+    textParts: [
+      {
+        kind: 'paste',
+        id: 'p',
+        text: '粘贴文本预览',
+        chars: 1000,
+        contentRef: 'pasted',
+        truncated: true,
+      },
+    ],
+  });
 host.fail = true;
 host.slow = false;
 mount(Transcript, {
@@ -46,6 +66,13 @@ mount(Transcript, {
     toolViews: { 'process-a': { process: true } },
     ontoggletool: () => {},
     read: async (id, offset) => {
+      if (id === 'pasted') {
+        if (host.slowText)
+          await new Promise<void>((resolve) => {
+            host.releaseText = resolve;
+          });
+        return { text: '卡片全文', next: 12, done: true };
+      }
       if (host.slow && id === 'a')
         await new Promise<void>((resolve) => {
           host.release = resolve;

@@ -86,6 +86,12 @@ export class SessionContent {
               : message.tool.diffRef,
           }
         : message.tool,
+      textParts: message.textParts?.map((part) => ({
+        ...part,
+        contentRef: part.contentRef
+          ? transform(part.contentRef)
+          : part.contentRef,
+      })),
       images: message.images?.map((image) => ({
         ...image,
         contentRef: image.contentRef

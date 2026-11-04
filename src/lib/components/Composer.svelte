@@ -3,6 +3,8 @@
   import { tick, type Snippet } from 'svelte';
   import { isTauri, invoke } from '@tauri-apps/api/core';
   import Icon from './Icon.svelte';
+  import DraftEditor from './DraftEditor.svelte';
+  import type { DraftPart } from '../draft-parts';
   import ImageAttachments from './ImageAttachments.svelte';
   import { shouldSend } from '../state/reducer';
   import {
@@ -18,6 +20,7 @@
   /** 运行中 Enter/发送直接引导当前任务，后续消息与停止使用独立按钮。 */
   let {
     value = $bindable(''),
+    parts = $bindable<DraftPart[]>([]),
     images = $bindable<MessageImage[]>([]),
     disabled = false,
     running = false,
@@ -39,6 +42,7 @@
     onhistory?: (before?: number) => Promise<HistoryPage>;
     onhistorytext?: (message: Message) => Promise<string>;
     value?: string;
+    parts?: DraftPart[];
     images?: MessageImage[];
     disabled?: boolean;
     running?: boolean;
@@ -59,7 +63,7 @@
     onsend: (mode?: 'steer' | 'followUp') => void;
     onstop: () => void;
   } = $props();
-  let textarea: HTMLTextAreaElement;
+  let textarea: DraftEditor;
   let picker: HTMLInputElement;
   let imageBusy = $state(false);
   let dragging = $state(false);
@@ -291,13 +295,6 @@
     dismissed = '';
     textarea.focus();
   }
-  $effect(() => {
-    value;
-    if (textarea) {
-      textarea.style.height = 'auto';
-      textarea.style.height = `${Math.min(textarea.scrollHeight, 200)}px`;
-    }
-  });
   async function back(): Promise<void> {
     if (menu?.canBack === false) return;
     onback?.();
@@ -369,10 +366,10 @@
       !event.ctrlKey &&
       !event.metaKey &&
       !event.altKey &&
-      textarea.selectionStart === textarea.selectionEnd &&
+      textarea.selection().start === textarea.selection().end &&
       (value === '' || (historyInitialized && value === recalled))
     ) {
-      const position = textarea.selectionStart;
+      const position = textarea.selection().start;
       // 只在首行/末行接管方向键，多行文本内部仍使用原生光标移动。
       const up =
         event.key === 'ArrowUp' && !value.slice(0, position).includes('\n');
@@ -517,24 +514,28 @@
           }}>更多选项（共 {matches.length} 项）</button
         >{/if}
     </div>{/if}
-  <textarea
+  <DraftEditor
     bind:this={textarea}
-    value={menu ? query : value}
-    rows="1"
+    bind:value={
+      () => (menu ? query : value),
+      (text) => {
+        if (menu) query = text;
+        else value = text;
+      }
+    }
+    bind:parts
+    allowFold={!menu}
+    context={`${historyKey}:${menu?.title ?? ''}`}
     placeholder={disabled
       ? '先选择项目文件夹，再开始对话'
       : running
         ? '补充要求或调整方向，引导当前任务'
         : '向 Pi 发送消息'}
-    aria-label={menu ? '搜索菜单' : '消息输入'}
-    aria-controls={matches.length ? menuId : undefined}
-    aria-activedescendant={matches.length ? `${menuId}-${selected}` : undefined}
-    oninput={(event) => {
-      if (menu) query = event.currentTarget.value;
-      else {
-        resetHistory();
-        value = event.currentTarget.value;
-      }
+    label={menu ? '搜索菜单' : '消息输入'}
+    controls={matches.length ? menuId : undefined}
+    activeDescendant={matches.length ? `${menuId}-${selected}` : undefined}
+    oninput={() => {
+      if (!menu) resetHistory();
       dismissed = '';
     }}
     {disabled}
@@ -545,7 +546,8 @@
     }}
     oncompositionend={() => {
       composing = false;
-    }}></textarea>
+    }}
+  />
   {#if historyError}<p role="alert">
       历史提示词读取失败：{historyError}，可再次按方向键重试。
     </p>{/if}

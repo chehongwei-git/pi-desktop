@@ -188,6 +188,9 @@ for await (const line of readline.createInterface({
       }
       break;
     case 'prompt':
+      // 桌面展示字段不能透传给 Pi；真实 Actor 集成测试在这里验证协议边界。
+      if ('textParts' in request || '_textParts' in request)
+        throw new Error('desktop presentation leaked into Pi RPC');
       if (request.message.startsWith('/pi-desktop-')) {
         if (name === 'bridge-error')
           emit({

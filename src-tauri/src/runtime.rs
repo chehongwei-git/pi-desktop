@@ -97,6 +97,7 @@ struct Pending {
     kind: Kind,
     bridge_command: Option<String>,
     bridge_error: Option<String>,
+    clears_text_queue: bool,
 }
 
 impl Request {
@@ -206,8 +207,14 @@ impl Handle {
                 message,
                 images,
                 mode,
+                text_parts,
             } => {
                 crate::images::validate(&images)?;
+                if let Some(parts) = &text_parts {
+                    crate::text_presentation::slices(&message, parts)?;
+                    // 查询会话身份仅用于宿主展示绑定，展示数据不会进入 Pi 协议。
+                    self.rpc(json!({"type":"get_state"}), Kind::Query).await?;
+                }
                 if message.trim().is_empty() && images.is_empty() {
                     return Err(AppError::new("EMPTY", "消息不能为空"));
                 }
@@ -225,6 +232,10 @@ impl Handle {
                     }
                 }
                 let mut cmd = json!({"type":"prompt","message":message});
+                if let Some(parts) = text_parts {
+                    cmd["_textParts"] = serde_json::to_value(parts)
+                        .map_err(|_| AppError::new("TEXT_PARTS", "卡片编码失败"))?;
+                }
                 if !images.is_empty() {
                     cmd["images"] = images.into();
                 }
@@ -624,6 +635,11 @@ async fn actor(
                     serial += 1; let request_id = format!("req-{serial}");
                     // 扩展交互以 Pi 分配的 ID 关联等待者，且不产生普通 RPC 响应。
                     if !matches!(kind, Kind::Extension) { command["id"] = request_id.clone().into(); }
+                    let parts = command.as_object_mut().and_then(|object| object.remove("_textParts"));
+                    if let Some(parts) = parts {
+                        let prepared = serde_json::from_value(parts).map_err(|_| AppError::new("TEXT_PARTS", "卡片数据无效")).and_then(|parts| projection.text_presentations.prepare(request_id.clone(), &command, parts));
+                        if let Err(error) = prepared { let _ = reply.send(Err(error)); continue; }
+                    }
                     if let Some(object) = command.as_object_mut() { object.remove("_before"); }
                     let mut bytes = match serde_json::to_vec(&command) { Ok(b) => b, Err(_) => { let _ = reply.send(Err(AppError::new("SERIALIZE", "请求编码失败"))); continue; } }; bytes.push(b'\n');
                     // 写管道也设上限，防止子进程不读 stdin 时 actor 永久卡死。
@@ -638,7 +654,7 @@ async fn actor(
                     else {
                         let seconds = if matches!(kind, Kind::Bridge | Kind::BridgeRefresh) { 120 } else if matches!(kind, Kind::LongRefresh) { 600 } else if matches!(kind, Kind::Reset | Kind::Restore | Kind::Refresh) { 30 } else if matches!(kind, Kind::Mutate) { 15 } else { 10 };
                         let bridge_command = if matches!(kind, Kind::Bridge | Kind::BridgeRefresh) { command["message"].as_str().and_then(|message| message.split_whitespace().next()).map(|message| format!("command:{}", message.trim_start_matches('/'))) } else { None };
-                        pending.insert(request_id, Pending { reply, kind, bridge_command, bridge_error: None, deadline: Instant::now()+Duration::from_secs(seconds) });
+                        pending.insert(request_id, Pending { reply, kind, bridge_command, bridge_error: None, clears_text_queue: command["type"] == "clear_queue", deadline: Instant::now()+Duration::from_secs(seconds) });
                     }
                 }
                 Some(Request::Events { ack, reply }) => { let result = store.batch(&id, ack).and_then(|batch| serde_json::to_value(batch).map_err(|_| AppError::new("SERIALIZE", "批次编码失败"))); let _ = reply.send(result); }
@@ -656,12 +672,15 @@ async fn actor(
                 Some(Ok(Some(event))) if event["type"] == "response" => {
                     if let Some(request_id) = event["id"].as_str() {
                         if let Some(request) = pending.remove(request_id) {
+                            if event["success"] != true { projection.text_presentations.reject(request_id); }
+                            else if request.clears_text_queue { projection.text_presentations.clear(); }
+                            if let Some(path) = event["data"]["sessionFile"].as_str() { projection.text_presentations.context(path); }
                             let result = if event["success"] != true { Err(AppError::new("PI_COMMAND", event["error"].as_str().unwrap_or("Pi 拒绝了请求"))) }
                             else if let Some(error) = request.bridge_error { Err(AppError::new("BRIDGE_FAILED", error)) }
                             else if matches!(request.kind, Kind::Bridge | Kind::BridgeRefresh) && event["data"]["disposition"] != "handled" { Err(AppError::new("BRIDGE_PROTOCOL", "桥接命令未被扩展处理，请检查 Pi 版本")) }
                             else if matches!(request.kind, Kind::Restore) {
                                 projection.restore(&event["data"], &mut store).map(|()| { restored=true; projection.page(None) })
-                            } else { if matches!(request.kind, Kind::Reset | Kind::Refresh | Kind::LongRefresh | Kind::BridgeRefresh) && event["data"]["cancelled"] != true { if matches!(request.kind, Kind::Reset) { projection.reset(); previous_store = None; let _ = store.push(json!({"type":"reset"})); } restored=false; } Ok(event["data"].clone()) };
+                            } else { if matches!(request.kind, Kind::Reset | Kind::Refresh | Kind::LongRefresh | Kind::BridgeRefresh) && event["data"]["cancelled"] != true { if matches!(request.kind, Kind::Reset) { projection.reset(); projection.text_presentations.clear(); previous_store = None; let _ = store.push(json!({"type":"reset"})); } restored=false; } Ok(event["data"].clone()) };
                             let _ = request.reply.send(result);
                         }
                     }
@@ -692,7 +711,7 @@ async fn actor(
             },
             _ = tick.tick() => {
                 let expired: Vec<_> = pending.iter().filter(|(_, p)| p.deadline<=Instant::now()).map(|(id, _)| id.clone()).collect();
-                for request_id in expired { uncertain = true; if let Some(p) = pending.remove(&request_id) { let _ = p.reply.send(Err(AppError::new("TIMEOUT", "请求超时，可能已执行；请检查状态，不要自动重发"))); } }
+                for request_id in expired { projection.text_presentations.reject(&request_id); uncertain = true; if let Some(p) = pending.remove(&request_id) { let _ = p.reply.send(Err(AppError::new("TIMEOUT", "请求超时，可能已执行；请检查状态，不要自动重发"))); } }
                 if store.has_pending() { let _ = channel.send(json!({"type":"available","runtimeId":id})); }
             }
         }
@@ -900,6 +919,12 @@ mod tests {
                     ],
                     message: "hello".into(),
                     mode: None,
+                    text_parts: Some(vec![crate::text_presentation::TextRange {
+                        kind: "paste".into(),
+                        id: "pasted".into(),
+                        start: 0,
+                        end: 5,
+                    }]),
                 })
                 .await
                 .unwrap();
@@ -930,6 +955,21 @@ mod tests {
                 .iter()
                 .any(|m| m["text"] == "你好\u{2028}RPC final"));
             assert_eq!(messages.iter().filter(|m| m["id"] == "tool-t1").count(), 1);
+            let user = messages
+                .iter()
+                .find(|m| m["role"] == "user" && m["text"] == "hello")
+                .unwrap();
+            assert_eq!(user["textParts"][0]["kind"], "paste");
+            assert_eq!(
+                handle
+                    .content(
+                        user["textParts"][0]["contentRef"].as_str().unwrap().into(),
+                        0
+                    )
+                    .await
+                    .unwrap()["text"],
+                "hello"
+            );
             let image = &messages
                 .iter()
                 .find(|m| m["role"] == "user" && m["text"] == "hello")

@@ -17,13 +17,11 @@ const message: Message = {
   tool: { callId: 'plan', name: 'plan_mode_complete', argsRef: 'args' },
 };
 function props(
-  read = vi
-    .fn()
-    .mockResolvedValue({
-      text: JSON.stringify({ plan: '# 实施方案\n\n- 保留草稿' }),
-      next: 0,
-      done: true,
-    }),
+  read = vi.fn().mockResolvedValue({
+    text: JSON.stringify({ plan: '# 实施方案\n\n- 保留草稿' }),
+    next: 0,
+    done: true,
+  }),
 ) {
   return {
     message,

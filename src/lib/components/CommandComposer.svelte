@@ -327,6 +327,7 @@
   </div>{/if}
 <Composer
   bind:value={desktop.draft}
+  bind:parts={desktop.draftParts}
   bind:images={desktop.images}
   historyKey={JSON.stringify([
     desktop.runtimeId,

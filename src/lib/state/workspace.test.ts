@@ -665,6 +665,32 @@ describe('cross-project workspace', () => {
     expect(tasks).toHaveLength(1);
     expect(workspace.active.draft).toBe('');
   });
+  it('moves edited cards from a local draft to the accepted session without clearing them', async () => {
+    const { workspace, api } = fixture();
+    await workspace.init();
+    workspace.newDraft('/b');
+    const session = workspace.active;
+    let finish!: (value: { desktopTask: string; runtimeId: string }) => void;
+    api.submitNew = vi.fn().mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+    );
+    session.draft = '提交文本';
+    session.draftParts = [{ kind: 'paste', id: 'first', text: '提交文本' }];
+    const pending = session.send();
+    await vi.waitFor(() => expect(api.submitNew).toHaveBeenCalledOnce());
+    session.draft = '新草稿';
+    session.draftParts = [{ kind: 'paste', id: 'next', text: '新草稿' }];
+    finish({ desktopTask: 'accepted', runtimeId: 'reserved' });
+    await pending;
+    expect(session.newChatProject).toBeNull();
+    expect(session.draft).toBe('新草稿');
+    expect(session.draftParts).toEqual([
+      { kind: 'paste', id: 'next', text: '新草稿' },
+    ]);
+  });
   it('keeps the unsent draft and interrupted input separately across restart without running either', async () => {
     const first = fixture();
     await first.workspace.init();

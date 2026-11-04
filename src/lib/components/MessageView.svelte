@@ -5,7 +5,10 @@
   import { markdown, highlight, safeExternal } from '../markdown';
   import ToolMessage from './ToolMessage.svelte';
   import MessageImage from './MessageImage.svelte';
-  import type { ContentPage, Message } from '../types';
+  import UserText from './UserText.svelte';
+  import { foldable } from '../draft-parts';
+  import { fullText } from '../text-presentation';
+  import type { ContentPage, Message, MessageTextPart } from '../types';
   import Icon from './Icon.svelte';
   /** onfull 打开分块正文，onload 只读取有界预览；不向组件暴露本地路径。 */
   let {
@@ -17,8 +20,18 @@
     ontoggletool,
     read,
     onchange,
+    ontext,
+    selectedPart,
+    onlayout = (change) => change(),
   }: {
     message: Message;
+    ontext?: (
+      message: Message,
+      part: MessageTextPart,
+      trigger: HTMLButtonElement,
+    ) => void;
+    selectedPart?: string;
+    onlayout?: (change: () => void, trigger?: HTMLElement) => void;
     onchange?: (message: Message, trigger: HTMLButtonElement) => void;
     onfull: (message: Message) => void;
     onload: (message: Message) => Promise<void>;
@@ -30,8 +43,15 @@
   let body = $state<HTMLDivElement>();
   let copied = $state(false);
   let copyTimer: ReturnType<typeof setTimeout>;
+  let copying = $state(false);
+  let longUser = $derived(
+    message.role === 'user' &&
+      (!!message.textParts?.length ||
+        !!message.truncated ||
+        foldable(message.text)),
+  );
   let html = $derived(
-    message.role === 'toolResult' || message.status === 'streaming'
+    longUser || message.role === 'toolResult' || message.status === 'streaming'
       ? ''
       : markdown(message.text),
   );
@@ -60,6 +80,17 @@
       }, 1500);
     } catch {
       onerror('无法访问剪贴板');
+    }
+  }
+  async function copyMessage(): Promise<void> {
+    if (copying) return;
+    copying = true;
+    try {
+      await copy(await fullText(message, read));
+    } catch (cause) {
+      onerror(String(cause));
+    } finally {
+      copying = false;
     }
   }
   /** Markdown 链接通过受限 opener；代码块点击复制按钮由事件代理统一处理。 */
@@ -125,7 +156,60 @@
     {#if message.role === 'compactionSummary'}<div class="summary-label">
         上下文已压缩
       </div>{/if}
-    {#if message.status === 'streaming'}<div class="streaming-text">
+    {#if longUser}
+      <div class="user-message-parts">
+        {#if message.textParts?.length}
+          {#each message.textParts as part (part.id)}
+            {#if part.kind === 'paste'}
+              <button
+                type="button"
+                class="message-text-card"
+                class:selected={selectedPart === part.id}
+                aria-label={`查看粘贴文本：${
+                  part.text
+                    .trim()
+                    .split(/\r\n|\r|\n/)[0]
+                    ?.slice(0, 100) || '空文本'
+                }，${part.chars.toLocaleString()} 字`}
+                aria-expanded={selectedPart === part.id}
+                onclick={(event) =>
+                  ontext?.(message, part, event.currentTarget)}
+              >
+                <Icon name="copy" size={16} />
+                <span class="message-card-content"
+                  ><span class="message-card-title"
+                    >{Array.from(
+                      part.text.trim().split(/\r\n|\r|\n/)[0] || '空文本',
+                    )
+                      .slice(0, 100)
+                      .join('')}</span
+                  ><span class="message-card-meta"
+                    >粘贴文本 · {part.chars.toLocaleString()} 字</span
+                  ></span
+                >
+                <span aria-hidden="true">›</span>
+              </button>
+            {:else if part.text || part.truncated}
+              <UserText
+                source={part}
+                {read}
+                {onlayout}
+                expanded={toolViews[message.id]?.[`text:${part.id}`] ?? false}
+                ontoggle={() => ontoggletool(message.id, `text:${part.id}`)}
+              />
+            {/if}
+          {/each}
+        {:else}
+          <UserText
+            source={message}
+            {read}
+            {onlayout}
+            expanded={toolViews[message.id]?.text ?? false}
+            ontoggle={() => ontoggletool(message.id, 'text')}
+          />
+        {/if}
+      </div>
+    {:else if message.status === 'streaming'}<div class="streaming-text">
         {message.text}<span class="cursor"></span>
       </div>
     {:else}<div
@@ -146,10 +230,11 @@
       >
         <button
           class="icon-button"
-          aria-label="复制消息"
-          onclick={() => copy(message.text)}
+          aria-label={copying ? '正在读取并复制消息' : '复制消息'}
+          disabled={copying}
+          onclick={() => void copyMessage()}
           ><Icon name={copied ? 'check' : 'copy'} size={15} /></button
-        >{#if message.contentRef && message.truncated}<button
+        >{#if !longUser && message.contentRef && message.truncated}<button
             class="text-button"
             onclick={() => onfull(message)}>查看完整正文</button
           >{/if}

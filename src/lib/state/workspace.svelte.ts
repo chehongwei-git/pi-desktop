@@ -5,6 +5,7 @@ import type {
   SidebarSessionEntry,
   TaskActivity,
 } from '../types';
+import { restoreParts, type DraftPart } from '../draft-parts';
 import { Desktop } from './desktop.svelte';
 
 // 内容缓存与 DOM、进程分开管理；增加内容额度不要求保留更多后台进程。
@@ -62,6 +63,7 @@ export class Workspace {
     lastSentAt?: string;
     preview?: string;
     text: string;
+    parts?: DraftPart[];
     pendingText?: string;
     interrupted?: boolean;
     images?: boolean;
@@ -168,6 +170,7 @@ export class Workspace {
         session.newChatProject = draft.path ? null : draft.project;
         session.snapshot = { sessionFile: draft.path };
         session.draft = draft.text;
+        session.draftParts = restoreParts(draft.parts, draft.text);
         if (typeof draft.pendingText === 'string' && draft.pendingText)
           session.recovered.push(draft.pendingText);
         session.notice = draft.interrupted
@@ -254,6 +257,7 @@ export class Workspace {
     session.commands = [...(commandSource?.commands ?? session.commands)];
     if (preserve && session !== previous) {
       session.draft = previous.draft;
+      session.draftParts = previous.draftParts;
       session.images = previous.images;
       previous.draft = '';
       previous.images = [];
@@ -667,7 +671,14 @@ export class Workspace {
       const size = (session: Desktop) =>
         session.messages.reduce(
           (total, message) =>
-            total + (message.text.length + message.thinking.length) * 2,
+            total +
+            (message.text.length +
+              message.thinking.length +
+              (message.textParts?.reduce(
+                (sum, part) => sum + part.text.length,
+                0,
+              ) ?? 0)) *
+              2,
           0,
         );
       let bytes = this.sessions.reduce(
@@ -718,6 +729,7 @@ export class Workspace {
               lastSentAt: session.lastSentAt,
               preview: session.sidebarPreview,
               text,
+              parts: session.draftParts,
               pendingText,
               interrupted,
               images: !!(session.images.length || pending?.images.length),

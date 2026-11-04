@@ -107,11 +107,27 @@ export interface ProcessInfo {
   pausedMs?: number;
   state: 'running' | 'done' | 'stopped' | 'error';
 }
+/** 输入范围采用 UTF-16，宿主严格校验后生成各片段正文引用。 */
+export interface TextRange {
+  kind: 'text' | 'paste';
+  id: string;
+  start: number;
+  end: number;
+}
+export interface MessageTextPart {
+  kind: 'text' | 'paste';
+  id: string;
+  text: string;
+  chars: number;
+  contentRef: string | null;
+  truncated: boolean;
+}
 export interface Message {
   id: string;
   role: string;
   text: string;
   thinking: string;
+  textParts?: MessageTextPart[];
   /** 兼容旧版分类；展示按内容拆分，普通正文始终直接显示。 */
   presentation?: 'process' | 'answer';
   process?: ProcessInfo;
@@ -253,6 +269,7 @@ export type Action =
   | {
       type: 'prompt';
       message: string;
+      textParts?: TextRange[];
       images?: { type: 'image'; data: string; mimeType: string }[];
       mode?: 'steer' | 'followUp';
     }

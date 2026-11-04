@@ -579,6 +579,31 @@ describe('desktop business behavior', () => {
       mode: 'followUp',
     });
   });
+  it('preserves a newly edited card draft even when its text matches an in-flight prompt', async () => {
+    let finish!: (value: unknown) => void;
+    const action = vi.fn().mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+    );
+    const desktop = fixture(action);
+    desktop.connection = 'ready';
+    desktop.run = 'running';
+    desktop.draft = '原文';
+    desktop.draftParts = [{ kind: 'paste', id: 'original', text: '原文' }];
+    const pending = desktop.send();
+    desktop.draft = '修改';
+    desktop.draft = '原文';
+    desktop.draftParts = [{ kind: 'paste', id: 'new', text: '原文' }];
+    finish({});
+    await pending;
+    expect(desktop.draft).toBe('原文');
+    expect(desktop.draftParts[0]).toMatchObject({ id: 'new' });
+    desktop.snapshot = { sessionFile: 'other' };
+    desktop.draft = '其他';
+    expect(desktop.draftParts).toEqual([]);
+  });
   it('isolates tool expansion and rejects content responses from an earlier session or runtime', async () => {
     let finish!: (page: { text: string; next: number; done: boolean }) => void;
     const content = vi.fn().mockImplementation(

@@ -82,20 +82,18 @@ describe('project model preferences', () => {
     let thinkingLevel = 'off';
     const desktop = new Desktop({
       ...bridge,
-      connect: vi
-        .fn()
-        .mockResolvedValue({
-          runtimeId: 'new',
-          project: 'alpha',
-          version: 'test',
-          verified: true,
-          snapshot: {
-            cwd: 'alpha',
-            sessionFile: 'restored',
-            model,
-            thinkingLevel,
-          },
-        }),
+      connect: vi.fn().mockResolvedValue({
+        runtimeId: 'new',
+        project: 'alpha',
+        version: 'test',
+        verified: true,
+        snapshot: {
+          cwd: 'alpha',
+          sessionFile: 'restored',
+          model,
+          thinkingLevel,
+        },
+      }),
       save: vi.fn().mockResolvedValue(undefined),
       sessions: vi.fn().mockResolvedValue([]),
       action: vi.fn().mockImplementation(async (_runtime, command) => {

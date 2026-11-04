@@ -70,9 +70,7 @@
       >关闭变更</button
     >
   </header>
-  {#if !message.tool?.diffRef}<p class="tool-load-status">
-      新增内容
-    </p>{/if}
+  {#if !message.tool?.diffRef}<p class="tool-load-status">新增内容</p>{/if}
   <div class="change-panel-body">
     {#if text}<ToolCode
         {text}

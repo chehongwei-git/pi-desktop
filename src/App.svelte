@@ -141,7 +141,7 @@
       settingsTrigger?.isConnected &&
       (sidebar || !settingsTrigger.closest('.sidebar'))
         ? settingsTrigger
-        : document.querySelector<HTMLElement>('.composer textarea');
+        : document.querySelector<HTMLElement>('[data-composer-input]');
     target?.focus({ preventScroll: true });
   }
   let search = $state('');

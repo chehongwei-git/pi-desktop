@@ -157,6 +157,8 @@ pub struct Message {
     pub text: String,
     pub thinking: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text_parts: Option<Vec<crate::text_presentation::TextPart>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub presentation: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub process: Option<ProcessInfo>,
@@ -180,6 +182,8 @@ pub enum Action {
         #[serde(default)]
         images: Vec<Value>,
         mode: Option<String>,
+        #[serde(default, rename = "textParts")]
+        text_parts: Option<Vec<crate::text_presentation::TextRange>>,
     },
     Stop,
     Reload,
