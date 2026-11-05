@@ -228,6 +228,13 @@ TAURI_BUNDLER_TOOLS_GITHUB_MIRROR=https://v4.gh-proxy.org/https://github.com npm
 - `node C:/Users/Administrator/AppData/Local/Temp/pi-switch-real.mjs` 的 6 项断言通过：缺少 `input` 时目录与会话保持 Pi 解析出的仅文字、操作前后 `models.json` 内容完全一致、显式仅文字不变，以及模型和强度配置在主动追加消息时正确使用。服务仅监听本机回环地址，未访问线上生成模型。
 - 日志为本机临时目录的 `pi-model-final-status.json` 和 `pi-model-final-*.log`。本轮未执行 macOS/Linux 实机、三平台远端 CI 或原生打包，仍待对应平台验证。
 
+## Windows CI trace 排查与采样开销修复
+
+- 用户提供的 Windows trace 确认：侧栏用例的 Vite 模块请求失败为 `net::ERR_NO_BUFFER_SPACE`，不是菜单定位器错误。具体资源耗尽来源尚未确认；CI 改为一个 worker，隔离长历史采样和其他页面加载，降低并发压力，仍需 Windows runner 验证效果。
+- 展开历史原生滚动 trace 中，历史切换约 5.9 秒，多个滚轮调用约 300–520ms。原采样器每帧遍历全部文字节点；现改为先验证旧锚点，再仅在与视口相交的消息内寻找首个文字，避免全量代码行扫描。保留 240 条消息、90 次滚轮输入、有效样本数量和漂移阈值，未增加重试或延长测试时限。
+- 最终版本在 macOS：`CI=true npm run test:browser` 82 项通过；`npm test` 297 项通过；启动脚本 3 项通过；类型检查、生产构建、Rust fmt/Clippy 通过，Rust 测试 54 项通过、1 项原有环境依赖测试忽略。修改文件 Prettier 与 diff 检查通过。
+- 状态：待 Windows/Linux CI 和原生打包验证，不宣称远端问题全部解决。
+
 ## 尚待验收与已知限制
 
 - Pi 1.4.0 的真实模型发送、真实 CLI 历史恢复、工具和扩展交互仍需使用者实机验收；模拟协议不等同于完整用户环境。
