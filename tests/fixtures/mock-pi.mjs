@@ -12,6 +12,8 @@ let newCount = 0;
 let switchCount = 0;
 let streaming = false;
 let pendingAbort;
+let thinkingLevel = 'off';
+let model = { provider: 'mock', id: 'model' };
 const emit = (value) => process.stdout.write(JSON.stringify(value) + '\n');
 const reply = (request, data) =>
   emit({
@@ -57,8 +59,8 @@ for await (const line of readline.createInterface({
         switchCount,
         sessionName: name,
         isStreaming: streaming,
-        thinkingLevel: 'off',
-        model: { provider: 'mock', id: 'model' },
+        thinkingLevel,
+        model,
       });
       break;
     case 'get_entries':
@@ -127,6 +129,8 @@ for await (const line of readline.createInterface({
         commands: [
           { name: 'pi-desktop-reload-v1', source: 'extension' },
           { name: 'pi-desktop-models-v1', source: 'extension' },
+          { name: 'pi-desktop-model-v1', source: 'extension' },
+          { name: 'pi-desktop-thinking-v1', source: 'extension' },
         ],
       });
       break;
@@ -192,6 +196,17 @@ for await (const line of readline.createInterface({
       if ('textParts' in request || '_textParts' in request)
         throw new Error('desktop presentation leaked into Pi RPC');
       if (request.message.startsWith('/pi-desktop-')) {
+        if (request.message.startsWith('/pi-desktop-model-v1 ')) {
+          const selection = JSON.parse(
+            request.message.slice(request.message.indexOf(' ') + 1),
+          );
+          model = { provider: selection.provider, id: selection.model };
+          thinkingLevel = selection.thinking ?? thinkingLevel;
+        }
+        if (request.message.startsWith('/pi-desktop-thinking-v1 '))
+          thinkingLevel = JSON.parse(
+            request.message.slice(request.message.indexOf(' ') + 1),
+          ).level;
         if (name === 'bridge-error')
           emit({
             type: 'extension_error',

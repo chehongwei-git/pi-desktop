@@ -13,9 +13,12 @@ type Context = {
     api?: string;
     compat?: { forceAdaptiveThinking?: boolean; supportsTemperature?: boolean };
     reasoning?: boolean;
+    input?: string[];
     thinkingLevelMap?: Record<string, string | null>;
   };
   modelRegistry: {
+    getAll?: () => Context['model'][];
+    getAvailable?: () => Context['model'][];
     refresh: ReturnType<typeof vi.fn>;
     getError: () => string | undefined;
     find: ReturnType<typeof vi.fn>;
@@ -285,6 +288,59 @@ describe('Pi desktop bridge', () => {
     ).rejects.toThrow('应用失败');
     expect(getLevel()).toBe('off');
     expect(ctx.model!.reasoning).toBe(false);
+  });
+  it.each([
+    { input: undefined },
+    { input: ['text'] },
+    { input: ['text', 'image'] },
+  ])(
+    'preserves Pi image capability $input without inferring a default',
+    ({ input }) => {
+      const { ctx, events } = fixture();
+      ctx.model!.input = input;
+      const available = { provider: 'test', id: 'same-id', input };
+      ctx.modelRegistry.getAvailable = () => [available];
+      for (const event of [
+        'session_start',
+        'model_select',
+        'before_agent_start',
+      ])
+        events.get(event)!({}, ctx);
+      expect(ctx.model!.input).toEqual(input);
+      expect(available.input).toEqual(input);
+    },
+  );
+  it('applies thinking while running without aborting or submitting another prompt', async () => {
+    const { handlers, ctx, getLevel } = fixture();
+    ctx.isIdle = () => false;
+    await handlers.get('pi-desktop-thinking-v1')!('{"level":"high"}', ctx);
+    expect(getLevel()).toBe('high');
+    expect(ctx.model!.reasoning).toBe(true);
+    await expect(
+      handlers.get('pi-desktop-reload-v1')!('', ctx),
+    ).rejects.toThrow('等待');
+  });
+  it('restores thinking in the model-select event before the next request can run', async () => {
+    const { handlers, ctx, events, setModel, setThinkingLevel, getLevel } =
+      fixture();
+    ctx.isIdle = () => false;
+    setModel.mockImplementation(async (model) => {
+      setThinkingLevel('off');
+      ctx.model = model;
+      events.get('model_select')!({}, ctx);
+      expect(getLevel()).toBe('high');
+      return true;
+    });
+    await handlers.get('pi-desktop-model-v1')!(
+      JSON.stringify({
+        provider: 'test',
+        model: 'same-id',
+        thinking: 'high',
+      }),
+      ctx,
+    );
+    expect(getLevel()).toBe('high');
+    expect(setModel).toHaveBeenCalledOnce();
   });
   it('never uses the stale context after reload', async () => {
     const { handlers, ctx } = fixture();

@@ -59,6 +59,46 @@ function fixture() {
   return { desktop, discoverModels, config };
 }
 describe('model settings', () => {
+  it.each([
+    { input: ['text'] as ('text' | 'image')[] },
+    { input: ['text', 'image'] as ('text' | 'image')[] },
+  ])(
+    'shows actual Pi capability $input without filling legacy input',
+    async ({ input }) => {
+      const { desktop, config } = fixture();
+      config.providers[0].models.push({
+        id: 'legacy',
+        overrideOnly: false,
+        values: {},
+        defaultThinking: null,
+      });
+      desktop.models = [
+        { provider: 'proxy', id: 'legacy', name: 'Legacy', input },
+      ];
+      const save = vi
+        .spyOn(desktop, 'saveModelConfig')
+        .mockImplementation(async (value) => value);
+      const view = render(ModelSettings, { desktop });
+      await waitFor(() =>
+        expect(
+          view.getByRole('combobox', { name: '图片输入' }),
+        ).toHaveTextContent(
+          input.includes('image')
+            ? '未配置（当前文字与图片）'
+            : '未配置（当前仅文字）',
+        ),
+      );
+      expect(config.providers[0].models[0].values).not.toHaveProperty('input');
+      expect(save).not.toHaveBeenCalled();
+      await fireEvent.input(view.getAllByLabelText('显示名称').at(-1)!, {
+        target: { value: 'renamed' },
+      });
+      await view.component.save();
+      expect(
+        save.mock.calls[0][0].providers[0].models[0].values,
+      ).not.toHaveProperty('input');
+    },
+  );
   it('lists only explicit endpoints and preserves hidden CLI providers when saving', async () => {
     const { desktop, config } = fixture();
     config.providers.push(newProvider('cli-only'));

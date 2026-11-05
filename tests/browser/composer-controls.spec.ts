@@ -12,9 +12,18 @@ test('switches models and thinking beside the input and preserves drafts', async
     ];
     let model = models[0];
     let thinkingLevel = 'off';
+    const callbacks = new Map();
+    let callbackId = 0;
+    let index = 0;
+    const events: any[] = [];
     host.__TAURI_INTERNALS__ = {
-      transformCallback: () => 1,
-      unregisterCallback: () => {},
+      transformCallback: (callback: any) => {
+        callbacks.set(++callbackId, callback);
+        return callbackId;
+      },
+      unregisterCallback: (id: number) => {
+        callbacks.delete(id);
+      },
       async invoke(command: string, args: any = {}) {
         if (command === 'get_settings')
           return {
@@ -27,9 +36,17 @@ test('switches models and thinking beside the input and preserves drafts', async
             extraPath: [],
           };
         if (command === 'save_settings') return;
-        if (command === 'list_sessions') return [];
+        if (command === 'list_sessions' || command === 'list_activity')
+          return [];
         if (command === 'sync_process_pool') return;
-        if (command === 'connect_pi')
+        if (command === 'connect_pi') {
+          host.emitRun = (state: string) => {
+            events.push({ type: 'run', state });
+            callbacks.get(args.channel.id)?.({
+              index: index++,
+              message: { type: 'available', runtimeId: 'r' },
+            });
+          };
           return {
             runtimeId: 'r',
             project: '/test',
@@ -37,8 +54,9 @@ test('switches models and thinking beside the input and preserves drafts', async
             verified: true,
             snapshot: { model, thinkingLevel, sessionFile: 'test.jsonl' },
           };
+        }
         if (command === 'next_events')
-          return { runtimeId: 'r', sequence: 0, events: [] };
+          return { runtimeId: 'r', sequence: index, events: events.splice(0) };
         if (command === 'perform') {
           switch (args.action.type) {
             case 'models':
@@ -72,6 +90,7 @@ test('switches models and thinking beside the input and preserves drafts', async
               return { model, thinkingLevel, sessionFile: 'test.jsonl' };
             case 'set_model':
               if (host.failModel) throw new Error('模型切换失败');
+              host.modelChanges = (host.modelChanges ?? 0) + 1;
               model = models.find((m) => m.id === args.action.model)!;
               thinkingLevel = 'off';
               return {};
@@ -213,4 +232,38 @@ test('switches models and thinking beside the input and preserves drafts', async
     // 主题切换后完成颜色过渡，避免截图混合明暗两套表面颜色。
     animations: 'disabled',
   });
+  await page.keyboard.press('Escape');
+  const before = await page.evaluate(() => {
+    const host = window as any;
+    host.failModel = false;
+    host.emitRun('running');
+    return host.modelChanges;
+  });
+  await expect(
+    page.getByRole('button', { name: '停止任务', exact: true }),
+  ).toBeVisible();
+  await model.click();
+  await composer.getByRole('button', { name: 'GPT b', exact: true }).click();
+  await expect(composer.getByRole('status')).toHaveText('下次发送时应用');
+  expect(await page.evaluate(() => (window as any).modelChanges)).toBe(before);
+  await page.evaluate(() => (window as any).emitRun('idle'));
+  await expect(
+    page.getByRole('button', { name: '发送消息', exact: true }),
+  ).toBeVisible();
+  expect(await page.evaluate(() => (window as any).modelChanges)).toBe(before);
+  await input.press('Enter');
+  await expect(input).toHaveValue('');
+  expect(await page.evaluate(() => (window as any).modelChanges)).toBe(
+    before + 1,
+  );
+  // 首次发送前保持纯本地草稿，验证强度选择无需 RPC 刷新便立即显示。
+  await page.keyboard.press('Control+n');
+  await expect(page.locator('.session-title')).toHaveText('新对话');
+  await thinking.click();
+  await composer.getByRole('menuitemradio', { name: /低 low/ }).click();
+  await expect(thinking).toHaveText(/思考\s*低/);
+  await thinking.click();
+  await expect(
+    composer.getByRole('menuitemradio', { name: /低 low/ }),
+  ).toHaveAttribute('aria-checked', 'true');
 });

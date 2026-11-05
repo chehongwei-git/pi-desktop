@@ -30,6 +30,53 @@ describe('model thinking preservation', () => {
     desktop.draft = '保留草稿';
     return { desktop, action };
   }
+  it('stages changes during a task and applies them only on the next explicit send', async () => {
+    const { desktop, action } = fixture();
+    desktop.connection = 'ready';
+    desktop.run = 'running';
+    await desktop.setModel('test/b');
+    await desktop.setThinking('low');
+    expect(desktop.selectedModel?.id).toBe('b');
+    expect(desktop.selectedThinking).toBe('low');
+    expect(desktop.snapshot.model?.id).toBe('a');
+    expect(desktop.snapshot.thinkingLevel).toBe('high');
+    expect(action).not.toHaveBeenCalled();
+    desktop.run = 'idle';
+    await Promise.resolve();
+    expect(action).not.toHaveBeenCalled();
+    expect(desktop.hasPendingModel).toBe(true);
+    await desktop.send();
+    expect(action).toHaveBeenCalledWith('runtime', {
+      type: 'set_model',
+      provider: 'test',
+      model: 'b',
+      thinking: 'low',
+    });
+    const calls = action.mock.calls.map(([, command]) => command.type);
+    expect(calls.indexOf('set_model')).toBeLessThan(calls.indexOf('prompt'));
+    expect(desktop.snapshot.model?.id).toBe('b');
+    expect(desktop.snapshot.thinkingLevel).toBe('low');
+    expect(desktop.hasPendingModel).toBe(false);
+  });
+  it('retains a staged model and draft when applying before send fails', async () => {
+    const { desktop, action } = fixture();
+    desktop.connection = 'ready';
+    desktop.run = 'running';
+    await desktop.setModel('test/b');
+    const original = action.getMockImplementation()!;
+    action.mockImplementation(async (...args) => {
+      if (args[1].type === 'set_model') throw new Error('模型切换失败');
+      return original(...args);
+    });
+    await expect(desktop.send()).rejects.toThrow('模型切换失败');
+    expect(desktop.hasPendingModel).toBe(true);
+    expect(desktop.selectedModel?.id).toBe('b');
+    expect(desktop.draft).toBe('保留草稿');
+    expect(
+      action.mock.calls.some(([, command]) => command.type === 'prompt'),
+    ).toBe(false);
+    expect(desktop.submitting).toBe(false);
+  });
   it('reapplies the current thinking level after switching models', async () => {
     const { desktop, action } = fixture();
     await desktop.setModel('test/b');

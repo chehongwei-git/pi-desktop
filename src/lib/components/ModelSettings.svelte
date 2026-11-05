@@ -540,6 +540,14 @@
                 <ModelEditor
                   bind:model={provider.models[provider.models.indexOf(model)]}
                   globalThinking={config.defaultThinkingLevel}
+                  effectiveInput={desktop.models.find(
+                    (item) =>
+                      item.provider === provider.id && item.id === model.id,
+                  )?.input ??
+                    (desktop.snapshot.model?.provider === provider.id &&
+                    desktop.snapshot.model?.id === model.id
+                      ? desktop.snapshot.model.input
+                      : undefined)}
                   onremove={() => {
                     if (provider)
                       provider.models = provider.models.filter(

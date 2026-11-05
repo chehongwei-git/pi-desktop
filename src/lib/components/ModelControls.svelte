@@ -5,6 +5,7 @@
   import type { Desktop } from '../state/desktop.svelte';
   import { errorMessage } from '../client';
   import Icon from './Icon.svelte';
+  import { thinkingLevels } from '../model-config';
 
   let {
     desktop,
@@ -39,9 +40,16 @@
   }
   // 下拉不提供极低等级，已有会话的 minimal 值仍按实际状态展示。
   const levels = $derived(
-    (desktop.levels.length ? desktop.levels : ['off']).filter(
-      (level) => level !== 'minimal',
-    ),
+    (desktop.newChatProject !== null || desktop.hasPendingModel
+      ? thinkingLevels.filter(
+          (level) =>
+            level === 'off' ||
+            desktop.selectedModel?.thinkingLevelMap?.[level] !== null,
+        )
+      : desktop.levels.length
+        ? desktop.levels
+        : ['off']
+    ).filter((level) => level !== 'minimal'),
   );
   const unavailable = $derived(
     disabled ||
@@ -50,7 +58,7 @@
       !!desktop.openingSession ||
       (desktop.connection !== 'ready' && desktop.newChatProject === null) ||
       desktop.task?.state === 'queued' ||
-      desktop.run !== 'idle',
+      desktop.run === 'aborting',
   );
 
   // 菜单使用原生按钮承接焦点，Tab 移出或点击外部时关闭且不抢焦点。
@@ -235,7 +243,10 @@
         </div>
       {/if}
     </div>
-    {#if busy}<span class="saving" role="status">应用到项目中…</span>{/if}
+    {#if busy}<span class="saving" role="status">正在应用…</span
+      >{:else if desktop.hasPendingModel}<span class="saving" role="status"
+        >下次发送时应用</span
+      >{/if}
   </div>
   {#if error}<p class="control-error" role="alert">{error}</p>{/if}
 </div>

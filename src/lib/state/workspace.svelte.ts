@@ -100,8 +100,7 @@ export class Workspace {
         const result = await this.api.saveModelConfig(config);
         for (const target of this.sessions) {
           if (target === session) continue;
-          target.modelConfigPending = true;
-          target.modelConfigStatus = '已保存，等待会话空闲后应用';
+          target.modelConfigSaved(result);
           if (target.run === 'idle') void target.applyModelConfig();
         }
         return result;

@@ -41,6 +41,7 @@ describe('builtin command execution', () => {
         type: 'set_model',
         provider: 'mock',
         model: 'model',
+        thinking: 'off',
       }),
     );
     expect(

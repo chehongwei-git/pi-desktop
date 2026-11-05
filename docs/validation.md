@@ -181,6 +181,53 @@ TAURI_BUNDLER_TOOLS_GITHUB_MIRROR=https://v4.gh-proxy.org/https://github.com npm
 - 修正当前 `model_config.rs` 的 rustfmt 差异；Rust 格式检查、Clippy `--locked --all-targets -- -D warnings` 通过，Rust 测试 54 项通过、1 项原有环境依赖测试忽略。
 - 本次未在 Windows/Linux runner 重跑，未制作原生安装包。浏览器使用模拟 IPC，不能替代三平台原生验收；远端发布应等待新提交的三平台 CI 全部通过。
 
+## 图片能力与运行中暂存模型选择验证（Windows x64）
+
+本段保留上轮验证历史，其中缺省 input 自动支持图片的规则已由后续“保留旧配置实际图片能力”调整替代。上轮以当时的最终代码和测试版本完整执行以下检查；环境为 Node 24.13.0、Rust 1.93.1、系统 Edge。运行中修改模型或强度只暂存，任务结束不自动应用，下一次主动发送有效消息前才应用。
+
+| 实际命令 | 结果 |
+| --- | --- |
+| `npx prettier --check src tests *.ts *.js *.json src-tauri/*.json src-tauri/capabilities/*.json src-tauri/bridge/desktop.mjs` | 通过 |
+| `npm run check` | 0 错误、0 警告 |
+| `npm test` | 43 个文件、326 项通过，0 失败、0 忽略 |
+| `node --test scripts/desktop.test.mjs` | 3 项通过，0 失败、0 忽略 |
+| `npm run test:browser` | 88 项通过，0 失败、0 忽略；使用完整默认并行配置 |
+| `npm run build` | 通过 |
+| `cargo fmt --manifest-path src-tauri/Cargo.toml --check` | 通过 |
+| `cargo clippy --manifest-path src-tauri/Cargo.toml --locked --all-targets -- -D warnings` | 通过 |
+| `cargo test --manifest-path src-tauri/Cargo.toml --locked` | 58 项通过，0 失败；1 项既有环境依赖测试忽略 |
+| `cargo test --manifest-path src-tauri/Cargo.toml --locked platform::tests::installed_pi_starts_with_gui_path -- --ignored --exact` | 上述忽略项单独执行：1 项通过，0 失败、0 忽略 |
+
+- 新增覆盖新草稿即时显示、运行中暂存且不发 RPC、任务结束不自动应用、主动发送先切换后提交、失败保留选择与草稿、配置刷新期间再次保存、独立可用目录的图片能力，以及空批次结束附近七种微任务唤醒时序。Rust 使用真实 Node 夹具验证运行中可执行配置命令且不中止任务，重载仍受空闲限制。
+- 早期全量浏览器有 87 项通过、1 项长文本读取失败。排查并修复空批次结束到清理之间的丢失唤醒；补齐长文本夹具的活动查询，将夹具的正文偏移与分页改为宿主实际使用的 UTF-8 字节及 64KiB，并保留跨字符边界、多页读取、失败重试及全文一致断言。最终重新执行了上表全部检查，没有通过跳过、删除用例或仅局部重跑替代全量验证。
+- `node scripts/verify-model-config.mjs <Pi CLI JS 入口>` 与增加 `--thinking-off` 的命令均通过，使用临时 agent 目录和假密钥，不访问线上模型。
+- 额外使用临时驱动 `node C:/Users/Administrator/AppData/Local/Temp/pi-switch-real.mjs` 启动真实 Pi 与本机 HTTP 模拟服务，5 项断言通过：旧配置的目录和会话图片能力一致、显式仅文字保留、流式请求中可应用配置且不中止请求、随后主动追加消息使用模型 B、强度从 high 改为 low。前端浏览器用例另外确认，用户选择时尚不调用此配置命令，直到主动发送才提交。
+- 完整命令状态与输出保存在本机临时目录的 `pi-model-final-status.json` 和 `pi-model-final-*.log`。本次没有制作原生安装包，没有执行 macOS/Linux 实机或三平台远端 CI；这些范围仍待验证，不能据此宣称三平台发布验收完成。
+
+## 保留旧配置实际图片能力验证（Windows x64）
+
+本轮替代上节的图片缺省策略：旧自定义模型缺少 `input` 时保持缺省，设置页显示 Pi 实际返回的能力；没有运行时能力数据时显示“未配置（由 Pi 决定）”。桥接不再读取配置文件或推断、覆盖图片能力。读取和展示不写文件，保存其他字段不补写 `input`；只有用户明确修改图片选项并保存才更改该字段。新建模型的显式能力声明不变。
+
+最终代码、测试和脚本版本上重新执行完整验证，Node 24.13.0、Rust 1.93.1、系统 Edge：
+
+| 实际命令 | 最终结果 |
+| --- | --- |
+| `npx prettier --check src tests *.ts *.js *.json src-tauri/*.json src-tauri/capabilities/*.json src-tauri/bridge/desktop.mjs` | 通过 |
+| `npm run check` | 0 错误、0 警告 |
+| `npm test` | 43 个文件、330 项通过，0 失败、0 忽略 |
+| `node --test scripts/desktop.test.mjs` | 3 项通过，0 失败、0 忽略 |
+| `npm run test:browser` | 88 项通过，0 失败、0 忽略 |
+| `npm run build` | 通过 |
+| `cargo fmt --manifest-path src-tauri/Cargo.toml --check` | 通过 |
+| `cargo clippy --manifest-path src-tauri/Cargo.toml --locked --all-targets -- -D warnings` | 通过 |
+| `cargo test --manifest-path src-tauri/Cargo.toml --locked` | 58 项通过，0 失败；1 项既有环境依赖测试忽略 |
+| `cargo test --manifest-path src-tauri/Cargo.toml --locked platform::tests::installed_pi_starts_with_gui_path -- --ignored --exact` | 上述忽略项单独执行：1 项通过，0 失败、0 忽略 |
+
+- 新增设置页实际能力展示及保存其他字段不补写 `input` 的覆盖；Rust 验证读取前后 `models.json` 字节一致、缺省字段在保存其他修改后仍缺省，以及明确选择图片后才保存声明。桥接验证缺省、仅文字和图片三种 Pi 返回值均不被覆盖。
+- `node scripts/verify-model-config.mjs <Pi CLI JS 入口>` 及带 `--thinking-off` 的命令均通过，使用隔离配置和假密钥，不调用线上模型。
+- `node C:/Users/Administrator/AppData/Local/Temp/pi-switch-real.mjs` 的 6 项断言通过：缺少 `input` 时目录与会话保持 Pi 解析出的仅文字、操作前后 `models.json` 内容完全一致、显式仅文字不变，以及模型和强度配置在主动追加消息时正确使用。服务仅监听本机回环地址，未访问线上生成模型。
+- 日志为本机临时目录的 `pi-model-final-status.json` 和 `pi-model-final-*.log`。本轮未执行 macOS/Linux 实机、三平台远端 CI 或原生打包，仍待对应平台验证。
+
 ## 尚待验收与已知限制
 
 - Pi 1.4.0 的真实模型发送、真实 CLI 历史恢复、工具和扩展交互仍需使用者实机验收；模拟协议不等同于完整用户环境。

@@ -146,6 +146,7 @@ export interface Model {
   provider: string;
   name: string;
   input?: ('text' | 'image')[];
+  thinkingLevelMap?: Record<string, string | null>;
 }
 export interface Snapshot {
   cwd?: string;
@@ -287,7 +288,7 @@ export type Action =
   | { type: 'new_project_session'; project: string }
   | { type: 'switch_session'; path: string }
   | { type: 'rename'; name: string }
-  | { type: 'set_model'; provider: string; model: string }
+  | { type: 'set_model'; provider: string; model: string; thinking?: string }
   | { type: 'set_thinking'; level: string }
   | { type: 'set_auto_compaction' | 'set_auto_retry'; enabled: boolean }
   | {

@@ -4,6 +4,7 @@ export const bridgeCommands = {
   models: 'pi-desktop-models-v1',
   navigate: 'pi-desktop-navigate-v1',
   thinking: 'pi-desktop-thinking-v1',
+  model: 'pi-desktop-model-v1',
 };
 
 // 请求格式由能力元数据或上游明确反馈决定，不依赖具体型号与版本。
@@ -15,6 +16,24 @@ function usesAdaptiveThinking(model) {
 }
 
 export default function desktopBridge(pi) {
+  let pendingModel;
+  // model_select 在 Pi 更新模型后同步恢复强度，下一次请求不会读取半套配置。
+  function applyPendingThinking(model) {
+    if (
+      !pendingModel ||
+      model.provider !== pendingModel.provider ||
+      model.id !== pendingModel.model
+    )
+      return;
+    const level = pendingModel.thinking;
+    if (
+      level &&
+      (level === 'off' || model.thinkingLevelMap?.[level] !== null)
+    ) {
+      model.reasoning = level !== 'off';
+      pi.setThinkingLevel(level);
+    }
+  }
   // 仅在当前扩展生命周期缓存；按端点隔离，模型刷新后仍可复用，重载后重新识别。
   const learnedFormats = new Map();
   const automaticModels = new WeakSet();
@@ -59,6 +78,7 @@ export default function desktopBridge(pi) {
   const syncReasoning = (_event, ctx) => {
     if (ctx.model) {
       defaultMappings(ctx.model, ctx.modelRegistry);
+      applyPendingThinking(ctx.model);
       ctx.model.reasoning = pi.getThinkingLevel() !== 'off';
     }
   };
@@ -115,10 +135,40 @@ export default function desktopBridge(pi) {
       return payload;
     }
   });
+  pi.registerCommand(bridgeCommands.model, {
+    description: 'Desktop bridge v1: apply model and thinking together',
+    handler: async (args, ctx) => {
+      const selection = JSON.parse(args);
+      if (
+        selection.thinking != null &&
+        !['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'].includes(
+          selection.thinking,
+        )
+      )
+        throw new Error('无效思考强度。');
+      const model = ctx.modelRegistry.find(selection.provider, selection.model);
+      if (!model) throw new Error('所选模型已不可用，请重新选择模型。');
+      if (pendingModel) throw new Error('模型切换正在进行，请稍后再试。');
+      pendingModel = {
+        ...selection,
+        thinking: selection.thinking ?? pi.getThinkingLevel(),
+      };
+      try {
+        defaultMappings(model, ctx.modelRegistry);
+        if (!(await pi.setModel(model)))
+          throw new Error('当前模型认证不可用，请重新配置或选择模型。');
+        // 支持未派发 model_select 的兼容实现，仍以 Pi 实际等级为准。
+        applyPendingThinking(model);
+        model.reasoning = pi.getThinkingLevel() !== 'off';
+      } finally {
+        pendingModel = undefined;
+      }
+    },
+  });
   pi.registerCommand(bridgeCommands.thinking, {
     description: 'Desktop bridge v1: apply thinking capability and level',
     handler: async (args, ctx) => {
-      if (!ctx.isIdle()) throw new Error('请等待当前任务完成后切换思考强度。');
+      // 已发出的请求保留原参数，后续模型请求读取新的会话强度。
       const { level } = JSON.parse(args);
       const model = ctx.model;
       if (model) defaultMappings(model, ctx.modelRegistry);
@@ -180,6 +230,7 @@ export default function desktopBridge(pi) {
     handler: async (_args, ctx) => {
       if (!ctx.isIdle()) throw new Error('请等待当前任务完成后刷新模型。');
       const current = ctx.model;
+      const thinking = pi.getThinkingLevel();
       const result = await ctx.modelRegistry.refresh({ allowNetwork: false });
       const configError = ctx.modelRegistry.getError();
       if (configError) throw new Error(`模型配置加载失败：${configError}`);
@@ -193,10 +244,17 @@ export default function desktopBridge(pi) {
         const model = ctx.modelRegistry.find(current.provider, current.id);
         if (!model)
           throw new Error('模型列表已刷新，当前模型已被删除，请重新选择模型。');
-        if (!(await pi.setModel(model))) {
-          throw new Error(
-            '模型列表已刷新，但当前模型认证不可用，请重新配置或选择模型。',
-          );
+        defaultMappings(model, ctx.modelRegistry);
+        pendingModel = { provider: model.provider, model: model.id, thinking };
+        try {
+          if (!(await pi.setModel(model))) {
+            throw new Error(
+              '模型列表已刷新，但当前模型认证不可用，请重新配置或选择模型。',
+            );
+          }
+          applyPendingThinking(model);
+        } finally {
+          pendingModel = undefined;
         }
       }
     },

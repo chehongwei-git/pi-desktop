@@ -215,6 +215,7 @@ pub enum Action {
     SetModel {
         provider: String,
         model: String,
+        thinking: Option<String>,
     },
     SetThinking {
         level: String,

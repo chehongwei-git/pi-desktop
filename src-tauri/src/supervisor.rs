@@ -654,7 +654,13 @@ impl Supervisor {
         }
         let init = tokio::time::timeout(std::time::Duration::from_secs(30), async {
             if let Some((provider, model)) = launch.model {
-                handle.action(Action::SetModel { provider, model }).await?;
+                handle
+                    .action(Action::SetModel {
+                        provider,
+                        model,
+                        thinking: launch.thinking.clone(),
+                    })
+                    .await?;
             }
             if let Some(level) = launch.thinking {
                 handle.action(Action::SetThinking { level }).await?;

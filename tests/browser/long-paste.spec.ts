@@ -52,7 +52,8 @@ test.beforeEach(async ({ page }) => {
           };
         if (command === 'save_settings' || command === 'sync_process_pool')
           return;
-        if (command === 'list_sessions') return [];
+        if (command === 'list_sessions' || command === 'list_activity')
+          return [];
         if (command === 'connect_pi') {
           channel = args.channel;
           return {
@@ -76,11 +77,16 @@ test.beforeEach(async ({ page }) => {
           }
           const text = bodies[args.id];
           if (text === undefined) throw new Error('无效正文引用');
-          const next = Math.min(text.length, args.offset + 4096);
+          // 与宿主 storage.read 一致：偏移和页长按 UTF-8 字节计算，页尾保留完整字符。
+          const bytes = new TextEncoder().encode(text);
+          let next = Math.min(bytes.length, args.offset + 64 * 1024);
+          while (next < bytes.length && (bytes[next] & 0xc0) === 0x80) next--;
           return {
-            text: text.slice(args.offset, next),
+            text: new TextDecoder('utf-8', { fatal: true }).decode(
+              bytes.subarray(args.offset, next),
+            ),
             next,
-            done: next === text.length,
+            done: next === bytes.length,
           };
         }
         if (command === 'perform') {
@@ -246,6 +252,10 @@ test('direct card send stays folded, opens on the right, retries reads and survi
   await panel.getByRole('button', { name: '重试读取全文' }).click();
   await expect(panel.getByRole('button', { name: '复制原文' })).toBeEnabled();
   await expect(panel.locator('.user-plain-text')).toHaveText(original);
+  // 保留失败恢复和多页 Unicode 读取覆盖，不能退化成单页夹具。
+  expect(
+    await page.evaluate(() => (window as any).reads.length),
+  ).toBeGreaterThan(2);
   await cards.last().click();
   await expect(panel.locator('.user-plain-text')).toHaveText(second);
   await page.evaluate(() => {

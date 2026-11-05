@@ -174,7 +174,10 @@ impl Handle {
     /// 内部命令必须先确认注册，避免缺失时被当作提示词发给模型。
     async fn bridge(&self, name: &str, args: Value, kind: Kind) -> Result<Value> {
         let state = self.rpc(json!({"type":"get_state"}), Kind::Query).await?;
-        if state["isStreaming"] == true || state["isCompacting"] == true {
+        // 仅模型与强度切换允许在运行中执行；重载和导航仍须空闲。
+        if !matches!(name, "pi-desktop-thinking-v1" | "pi-desktop-model-v1")
+            && (state["isStreaming"] == true || state["isCompacting"] == true)
+        {
             return Err(AppError::new("BUSY", "请等待 Pi 空闲后执行命令"));
         }
         let data = self
@@ -328,10 +331,16 @@ impl Handle {
                     .collect();
                 Ok(json!({"levels": levels}))
             }
-            Action::SetModel { provider, model } => {
-                self.rpc(
-                    json!({"type":"set_model","provider":provider,"modelId":model}),
-                    Kind::Mutate,
+            Action::SetModel {
+                provider,
+                model,
+                thinking,
+            } => {
+                // 单条桥接命令应用模型与强度，避免续答读到中间配置。
+                self.bridge(
+                    "pi-desktop-model-v1",
+                    json!({"provider":provider,"model":model,"thinking":thinking}),
+                    Kind::Bridge,
                 )
                 .await
             }
@@ -798,6 +807,65 @@ mod tests {
         );
         handle.shutdown().await.unwrap();
     }
+    /// 真实 Actor 在流式任务中只放行模型配置，不停止任务，也不放开重载。
+    #[tokio::test]
+    async fn model_selection_during_streaming_preserves_task() {
+        let project = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap();
+        let settings = Settings {
+            pi_path: project
+                .join("tests/fixtures/mock-pi.mjs")
+                .to_string_lossy()
+                .into(),
+            ..Settings::default()
+        };
+        let handle = start(
+            &settings,
+            project.to_string_lossy().into(),
+            Channel::new(|_| Ok(())),
+        )
+        .await
+        .unwrap();
+        handle
+            .action(Action::Prompt {
+                message: "hold:selection".into(),
+                images: vec![],
+                mode: None,
+                text_parts: None,
+            })
+            .await
+            .unwrap();
+        handle
+            .action(Action::SetModel {
+                provider: "mock".into(),
+                model: "other".into(),
+                thinking: Some("high".into()),
+            })
+            .await
+            .unwrap();
+        let state = handle.action(Action::State).await.unwrap();
+        assert_eq!(state["model"]["id"], "other");
+        assert_eq!(state["thinkingLevel"], "high");
+        assert_eq!(state["isStreaming"], true);
+        handle
+            .action(Action::SetThinking {
+                level: "low".into(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            handle.action(Action::State).await.unwrap()["thinkingLevel"],
+            "low"
+        );
+        assert_eq!(
+            handle.action(Action::Reload).await.unwrap_err().code,
+            "BUSY"
+        );
+        handle.action(Action::Stop).await.unwrap();
+        handle.shutdown().await.unwrap();
+    }
+
     /// 真实 Node 子进程经过平台启动器与 Job guard，重复 20 轮验证资源回收和协议投影。
     #[tokio::test]
     async fn mock_rpc_twenty_lifecycles() {

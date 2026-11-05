@@ -13,10 +13,12 @@
     model = $bindable(),
     onremove,
     globalThinking = 'off',
+    effectiveInput,
   }: {
     model: ModelConfig;
     onremove: () => void;
     globalThinking?: string | null;
+    effectiveInput?: readonly string[];
   } = $props();
   const reasoning = $derived(
     (model.defaultThinking ?? globalThinking ?? 'off') !== 'off',
@@ -111,7 +113,12 @@
           ? 'true'
           : 'false'}
       options={[
-        { value: '', label: '默认（文字与图片）' },
+        {
+          value: '',
+          label: effectiveInput
+            ? `未配置（当前${effectiveInput.includes('image') ? '文字与图片' : '仅文字'}）`
+            : '未配置（由 Pi 决定）',
+        },
         { value: 'false', label: '仅文字' },
         { value: 'true', label: '文字与图片' },
       ]}
@@ -126,8 +133,8 @@
       上下文长度和最大输出须为正整数，且最大输出不得超过上下文长度。
     </p>{/if}
   <p>
-    图片输入默认支持文字与图片，其他字段留空继承 Pi 默认值。
-    上下文包含输入与输出；能力声明须与服务端一致，不会为模型增加能力。
+    图片输入未配置时显示 Pi 实际能力，不自动补写配置。其他字段留空继承 Pi
+    默认值。 上下文包含输入与输出；能力声明须与服务端一致，不会为模型增加能力。
   </p>
   <SettingsSelect
     label="此模型的默认思考等级"

@@ -171,13 +171,56 @@ describe('composer model controls', () => {
     expect(desktop.draft).toBe('保留草稿');
   });
 
-  it('keeps the off control visible and disables switching during a task', async () => {
+  it('updates draft model and thinking controls before the first message', async () => {
+    const { desktop, action } = fixture();
+    // 工作区草稿尚未建立运行实例，只修改本地选择。
+    desktop.navigation = {} as NonNullable<Desktop['navigation']>;
+    desktop.newChatProject = 'project';
+    desktop.initializeDraftModel(desktop.models[0], 'off');
+    const view = render(ModelControls, { desktop });
+    await fireEvent.click(view.getByLabelText('思考级别'));
+    await fireEvent.click(
+      view.getByRole('menuitemradio', { name: /^高\s+high\s/ }),
+    );
+    await waitFor(() =>
+      expect(view.getByLabelText('思考级别')).toHaveTextContent('高'),
+    );
+    await fireEvent.click(view.getByLabelText('模型', { exact: true }));
+    await fireEvent.click(view.getByTitle('test/b'));
+    await waitFor(() =>
+      expect(view.getByLabelText('模型', { exact: true })).toHaveAttribute(
+        'title',
+        'test/b',
+      ),
+    );
+    expect(desktop.selectedThinking).toBe('high');
+    expect(action).not.toHaveBeenCalled();
+  });
+
+  it('shows the staged model without changing the running session', async () => {
+    const { desktop, action } = fixture();
+    desktop.run = 'running';
+    const view = render(ModelControls, { desktop });
+    await fireEvent.click(view.getByLabelText('模型', { exact: true }));
+    await fireEvent.click(view.getByTitle('test/b'));
+    await waitFor(() =>
+      expect(view.getByLabelText('模型', { exact: true })).toHaveAttribute(
+        'title',
+        'test/b',
+      ),
+    );
+    expect(view.getByRole('status')).toHaveTextContent('下次发送时应用');
+    expect(desktop.snapshot.model?.id).toBe('a');
+    expect(action).not.toHaveBeenCalled();
+  });
+
+  it('keeps model switching available during a task while off is the only level', async () => {
     const { desktop } = fixture();
     desktop.levels = ['off'];
     desktop.run = 'running';
     const view = render(ModelControls, { desktop });
     expect(view.getByLabelText('思考级别')).toHaveTextContent('关闭');
     expect(view.getByLabelText('思考级别')).toBeDisabled();
-    expect(view.getByLabelText('模型', { exact: true })).toBeDisabled();
+    expect(view.getByLabelText('模型', { exact: true })).toBeEnabled();
   });
 });
