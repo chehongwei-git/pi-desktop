@@ -1,0 +1,2 @@
+# 保持跨平台检出的文本换行一致，避免格式检查受 core.autocrlf 影响。
+* text=auto eol=lf
