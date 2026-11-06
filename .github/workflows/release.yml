@@ -75,7 +75,19 @@ jobs:
               release = (await github.rest.repos.createRelease({
                 owner, repo, tag_name: tag, name: `Pi Desktop ${tag}`,
                 draft: true, prerelease: false,
-                body: '未签名构建：Windows NSIS 安装器、macOS .app 压缩包、Linux Debian 包。macOS 使用 Actions runner 原生架构，详见附件名称。\n\n应用不捆绑 Pi 或 Node.js，请先安装运行环境。Windows SmartScreen / macOS Gatekeeper 可能提示或阻止运行；本版本未进行代码签名或 macOS 公证。Linux 包并非适用于所有发行版。',
+                body: `## 更新内容
+
+            - 支持粘贴长文本，以输入框气泡和消息卡片呈现，方便查看和编辑。
+            - 支持拖入文件引用，并在消息中以卡片展示文件。
+            - 修复新会话模型和思考强度选择的同步；运行中的选择在下次发送时应用，失败时保留草稿。
+            - 兼容旧模型配置的图片输入能力，避免无意修改原有配置；修复事件批次唤醒竞态。
+            - 升级 GitHub Actions 至 Node.js 24 运行时，统一跨平台文本换行，并完善测试和文档。
+
+            ## 安装说明
+
+            未签名构建：Windows NSIS 安装器、macOS .app 压缩包、Linux Debian 包。macOS 使用 Actions runner 原生架构，详见附件名称。
+
+            应用不捆绑 Pi 或 Node.js，请先安装运行环境。Windows SmartScreen / macOS Gatekeeper 可能提示或阻止运行；本版本未进行代码签名或 macOS 公证。Linux 包并非适用于所有发行版。`,
               })).data;
             }
             const existing = await github.paginate(github.rest.repos.listReleaseAssets, {

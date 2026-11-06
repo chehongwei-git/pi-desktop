@@ -7,7 +7,7 @@
 
 Pi Desktop 使用 Tauri 2、Svelte 5、TypeScript 与 Rust 构建，通过 RPC 子进程连接已安装的 Pi，将项目、会话、模型配置和工具执行整合到默认中文的桌面界面中。复用系统 WebView，不捆绑 Pi、Node.js 或 Chromium。
 
-> 当前版本：**0.1.0**，仍在持续开发。目标平台为 Windows、macOS 和 Linux，但各平台的验证范围不同；构建配置齐全不代表已完成三平台原生验收。详见[兼容说明](docs/compatibility.md)与[验证记录](docs/validation.md)。
+> 当前版本：**2026.11.6**，仍在持续开发。目标平台为 Windows、macOS 和 Linux，但各平台的验证范围不同；构建配置齐全不代表已完成三平台原生验收。详见[兼容说明](docs/compatibility.md)与[验证记录](docs/validation.md)。
 
 [快速开始](#快速开始) · [主要功能](#主要功能) · [开发与测试](#开发与测试) · [构建安装包](#构建安装包) · [文档](#文档)
 
@@ -155,12 +155,12 @@ Tauri 会自动合并对应平台的配置并构建前端：
    git push -u github HEAD
    ```
 
-3. 提交所有待发布改动后，确认 `package.json`、`package-lock.json`（包括根包记录）、`src-tauri/tauri.conf.json`、`src-tauri/Cargo.toml` 的版本一致，并更新 `src-tauri/Cargo.lock` 中本项目的版本。当前版本为 `0.1.0`。未来升级版本后应重新运行测试并提交锁文件。
+3. 提交所有待发布改动后，确认 `package.json`、`package-lock.json`（包括根包记录）、`src-tauri/tauri.conf.json`、`src-tauri/Cargo.toml` 的版本一致，并更新 `src-tauri/Cargo.lock` 中本项目的版本。当前版本为 `2026.11.6`，采用年.月.日的日期版本格式。未来升级版本后应重新运行测试并提交锁文件。
 4. 推送版本标签，即授权自动公开该版本：
 
    ```sh
-   git tag -a v0.1.0 -m "Release v0.1.0"
-   git push github v0.1.0
+   git tag -a v2026.11.6 -m "发布 2026.11.6"
+   git push github v2026.11.6
    ```
 
 5. 在 GitHub → Actions 查看 `desktop-release`，全部成功后在 Releases 下载附件。只推送分支不会创建 Release。当前仅支持 `v主版本.次版本.修订版本` 正式版本，不支持预发布标签。
