@@ -8,9 +8,13 @@
 
   let {
     desktop,
+    active = true,
     onsend,
-  }: { desktop: Desktop; onsend: (mode?: 'steer' | 'followUp') => void } =
-    $props();
+  }: {
+    desktop: Desktop;
+    active?: boolean;
+    onsend: (mode?: 'steer' | 'followUp') => void;
+  } = $props();
   type Page =
     | 'settings'
     | 'auto_compaction'
@@ -300,7 +304,7 @@
     const match = /^\/(settings|model|thinking|resume|fork|tree)\s*$/.exec(
       desktop.draft.trim(),
     );
-    if (match && !desktop.images.length && open(match[1])) return;
+    if (match && !desktop.attachments.length && open(match[1])) return;
     onsend(mode);
   }
   // 连接或会话变化时关闭菜单，旧页面不能作用于新会话。
@@ -313,22 +317,23 @@
   });
 </script>
 
-{#if desktop.recoveredImages.length}<div
+{#if desktop.recoveredDrafts.length}<div
     role="group"
     aria-label="可恢复的未发送消息"
   >
-    {#each desktop.recoveredImages as draft, index}<button
+    {#each desktop.recoveredDrafts as draft, index}<button
         type="button"
-        onclick={() => desktop.restoreImages(index)}
-        >恢复{draft.images.length
-          ? `图片消息（${draft.images.length} 张）`
+        onclick={() => desktop.restoreDraft(index)}
+        >恢复{draft.attachments.length
+          ? `附件消息（${draft.attachments.length} 项）`
           : '未发送消息'}{draft.text.slice(0, 60)}</button
       >{/each}
   </div>{/if}
 <Composer
   bind:value={desktop.draft}
   bind:parts={desktop.draftParts}
-  bind:images={desktop.images}
+  bind:attachments={desktop.attachments}
+  {active}
   historyKey={JSON.stringify([
     desktop.runtimeId,
     desktop.project,

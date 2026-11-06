@@ -10,6 +10,7 @@
   import type { Message, SidebarSessionEntry } from './lib/types';
   import ProjectPicker from './lib/components/ProjectPicker.svelte';
   import CommandComposer from './lib/components/CommandComposer.svelte';
+  import { pointerReorder } from './lib/pointer-reorder';
   import Icon from './lib/components/Icon.svelte';
   import Transcript from './lib/components/Transcript.svelte';
   import { conversationActivity } from './lib/conversation-activity';
@@ -278,8 +279,7 @@
     dropProject = '';
     dropAfter = false;
   }
-  function projectDrop(event: DragEvent, target: string): void {
-    event.preventDefault();
+  function projectDrop(target: string): void {
     const source = draggingProject;
     const after = dropAfter;
     clearProjectDrag();
@@ -768,31 +768,21 @@
                         !dropAfter}
                       class:drop-after={dropProject === project.path &&
                         dropAfter}
-                      draggable={!desktop.projectOrderSaving}
                       title={project.path + '（拖拽排序，或 Alt+↑/↓）'}
-                      ondragstart={(event) => {
-                        draggingProject = project.path;
-                        event.dataTransfer?.setData('text/plain', project.path);
-                        if (event.dataTransfer)
-                          event.dataTransfer.effectAllowed = 'move';
+                      use:pointerReorder={{
+                        disabled: desktop.projectOrderSaving,
+                        selector: '[data-sidebar-kind="project"]',
+                        start: () => {
+                          draggingProject = project.path;
+                        },
+                        move: (target, after) => {
+                          dropProject = target?.dataset.sidebarPath ?? '';
+                          dropAfter = after;
+                        },
+                        finish: (target) =>
+                          projectDrop(target.dataset.sidebarPath!),
+                        cancel: clearProjectDrag,
                       }}
-                      ondragend={clearProjectDrag}
-                      ondragover={(event) => {
-                        if (!draggingProject || desktop.projectOrderSaving)
-                          return;
-                        event.preventDefault();
-                        if (event.dataTransfer)
-                          event.dataTransfer.dropEffect = 'move';
-                        const bounds =
-                          event.currentTarget.getBoundingClientRect();
-                        dropProject = project.path;
-                        dropAfter =
-                          event.clientY > bounds.top + bounds.height / 2;
-                      }}
-                      ondragleave={() => {
-                        if (dropProject === project.path) dropProject = '';
-                      }}
-                      ondrop={(event) => projectDrop(event, project.path)}
                       onkeydown={(event) =>
                         projectReorderKey(event, project.path)}
                       aria-expanded={expanded}
@@ -1412,6 +1402,7 @@
           {/if}
           {#key desktop}<CommandComposer
               {desktop}
+              active={!settingsVisible && sidebarCollection === null}
               onsend={(mode) => {
                 void desktop.guard(async () => {
                   await desktop.send(mode);

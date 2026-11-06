@@ -638,7 +638,7 @@ describe('cross-project workspace', () => {
     await workspace['poll']();
     expect(session.error).toBe('重试后响应仍失败');
     expect(session.run).toBe('idle');
-    expect(session.recoveredImages).toEqual([]);
+    expect(session.recoveredDrafts).toEqual([]);
     expect(session.taskInput).toBeNull();
     expect(session.draft).toBe('正在编辑的下一条');
   });
@@ -651,7 +651,7 @@ describe('cross-project workspace', () => {
     session.draft = 'next';
     await workspace.cancel(session);
     expect(session.draft).toBe('next');
-    expect(session.recoveredImages[0].text).toBe('first');
+    expect(session.recoveredDrafts[0].text).toBe('first');
     workspace.persist();
     expect(localStorage.getItem('pi-desktop-workspace-v1')).toContain('next');
   });
@@ -704,8 +704,59 @@ describe('cross-project workspace', () => {
     const restored = second.workspace.sessions.find(
       (session) => session.draft === 'next draft',
     );
-    expect(restored?.recovered).toContain('executing');
+    expect(restored?.recoveredDrafts).toEqual([
+      {
+        text: 'executing',
+        parts: [{ kind: 'text', text: 'executing' }],
+        attachments: [],
+      },
+    ]);
     expect(second.tasks).toHaveLength(0);
+  });
+  it('persists reference-only drafts and mixed interrupted input without image bytes', async () => {
+    const first = fixture();
+    await first.workspace.init();
+    first.workspace.newDraft('/files');
+    const path = {
+      id: 'reference',
+      kind: 'path' as const,
+      path: '/files/需求.pdf',
+      name: '需求.pdf',
+      directory: false,
+    };
+    first.workspace.active.attachments = [path];
+    await first.workspace.active.send();
+    const queued = first.workspace.active.taskInput!;
+    expect(queued.attachments).toEqual([path]);
+    first.workspace.active.attachments = [
+      { ...path, id: 'next', path: '/files/下一条.pdf', name: '下一条.pdf' },
+      {
+        id: 'image-instance',
+        kind: 'image',
+        image: {
+          id: 'hash',
+          mimeType: 'image/png',
+          data: 'private-image-bytes',
+        },
+      },
+    ];
+    first.workspace.persist();
+    const stored = localStorage.getItem('pi-desktop-workspace-v1')!;
+    expect(JSON.parse(stored).version).toBe(2);
+    expect(stored).not.toContain('private-image-bytes');
+    first.workspace.dispose();
+    const second = fixture();
+    await second.workspace.init();
+    const restored = second.workspace.sessions.find((session) =>
+      session.attachments.some((item) => item.id === 'next'),
+    )!;
+    expect(restored.attachments).toHaveLength(1);
+    expect(restored.recoveredDrafts[0].attachments).toEqual([path]);
+    expect(restored.notice).toContain('图片未持久保存');
+    expect(second.tasks).toHaveLength(0);
+    restored.restoreDraft(0);
+    expect(restored.attachments).toEqual([path]);
+    expect(restored.recoveredDrafts[0].attachments[0].id).toBe('next');
   });
   it('replays a wakeup received while the new-session event pump is reading an empty batch', async () => {
     const { workspace, api, states } = fixture();

@@ -39,6 +39,8 @@ jobs:
       - run: npm ci
       - run: npm run check
       - run: npm test
+      - run: node --test scripts/desktop.test.mjs
+      - run: npx prettier --check src tests "*.ts" "*.js" "*.json" "src-tauri/*.json" "src-tauri/capabilities/*.json" src-tauri/bridge/desktop.mjs
       - run: npm run build
       - run: cargo fmt --manifest-path src-tauri/Cargo.toml --check
       - run: cargo clippy --manifest-path src-tauri/Cargo.toml --locked --all-targets -- -D warnings

@@ -1,7 +1,7 @@
 //! 应用服务入口：Tauri 命令只表达业务意图；平台与协议实现不泄漏到 UI。
 mod diagnostics;
+mod file_import;
 mod history;
-mod image_picker;
 mod images;
 mod model_config;
 mod model_discovery;
@@ -34,6 +34,8 @@ struct AppState {
     runtimes: Arc<supervisor::Supervisor>,
     sessions: Mutex<HashMap<String, String>>,
     lifecycle: AsyncMutex<()>,
+    drops: Mutex<file_import::Drops>,
+    file_reads: AsyncMutex<()>,
 }
 impl AppState {
     /// 克隆句柄后立即释放锁，让响应和停止可并发进入 actor。
@@ -502,12 +504,36 @@ async fn discover_models(
     model_discovery::discover(&model_config::directory(&home), provider).await
 }
 
-/// 原生选择和读取合并为专用命令，不接受前端提供的文件路径。
+/// 选择器与拖放共用分类；预算包含前端已有图片，宿主仍执行自身的硬上限。
 #[tauri::command]
-async fn pick_images(app: tauri::AppHandle) -> Result<Vec<Value>> {
-    tokio::task::spawn_blocking(move || image_picker::pick(app))
+async fn pick_files(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    budget: file_import::Budget,
+) -> Result<Vec<Value>> {
+    let _gate = state.file_reads.lock().await;
+    tokio::task::spawn_blocking(move || file_import::pick(app, budget))
         .await
-        .map_err(|_| AppError::new("IMAGE", "图片选择任务失败，请重试。"))?
+        .map_err(|_| AppError::new("FILE", "文件选择任务失败，请重试。"))?
+}
+/// 路径只来自当前窗口的原生 Drop，票据消费后无法再次读取。
+#[tauri::command]
+async fn read_dropped_files(
+    window: tauri::Window,
+    state: State<'_, AppState>,
+    drop_id: String,
+    budget: file_import::Budget,
+) -> Result<Vec<Value>> {
+    let paths = state
+        .drops
+        .lock()
+        .map_err(|_| AppError::new("LOCK", "拖放状态不可用"))?
+        .take(window.label(), &drop_id)?;
+    // 先消费票据再排队，连续拖入不会让尚未读取的上一批次被替换。
+    let _gate = state.file_reads.lock().await;
+    tokio::task::spawn_blocking(move || file_import::read(paths, budget))
+        .await
+        .map_err(|_| AppError::new("FILE", "文件读取任务失败，请重试。"))
 }
 
 /// 统一安装受限插件和命令；关闭窗口必须先 await 自有进程回收。
@@ -527,6 +553,8 @@ pub fn run() {
                 runtimes: Arc::new(supervisor::Supervisor::default()),
                 sessions: Mutex::new(HashMap::new()),
                 lifecycle: AsyncMutex::new(()),
+                drops: Mutex::new(file_import::Drops::default()),
+                file_reads: AsyncMutex::new(()),
             });
             let state = app.state::<AppState>();
             state
@@ -536,7 +564,8 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             get_settings,
-            pick_images,
+            pick_files,
+            read_dropped_files,
             save_settings,
             get_model_config,
             save_model_config,
@@ -557,10 +586,24 @@ pub fn run() {
             list_sessions
         ])
         .on_window_event(|window, event| {
+            use tauri::Emitter;
+            match event {
+                tauri::WindowEvent::DragDrop(tauri::DragDropEvent::Drop { paths, position }) => {
+                    if let Ok(mut drops) = window.state::<AppState>().drops.lock() {
+                        let event = drops.insert(window.label(), paths.clone(), *position);
+                        let _ = window.emit("desktop-file-drop", event);
+                    }
+                }
+                tauri::WindowEvent::Destroyed => {
+                    if let Ok(mut drops) = window.state::<AppState>().drops.lock() {
+                        drops.remove(window.label());
+                    }
+                }
+                _ => {}
+            }
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();
                 // 关闭请求交给页内确认条；确认后由 exit_app 回收各自进程树。
-                use tauri::Emitter;
                 let _ = window.emit("desktop-close-requested", ());
             }
         })

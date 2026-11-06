@@ -107,15 +107,23 @@ export interface ProcessInfo {
   pausedMs?: number;
   state: 'running' | 'done' | 'stopped' | 'error';
 }
+/** 文件引用只描述已发送的路径，不授权读取或打开本机文件。 */
+export interface MessageFileReference {
+  id: string;
+  path: string;
+  directory?: boolean;
+}
 /** 输入范围采用 UTF-16，宿主严格校验后生成各片段正文引用。 */
 export interface TextRange {
-  kind: 'text' | 'paste';
+  kind: 'text' | 'paste' | 'files';
+  files?: MessageFileReference[];
   id: string;
   start: number;
   end: number;
 }
 export interface MessageTextPart {
-  kind: 'text' | 'paste';
+  kind: 'text' | 'paste' | 'files';
+  files?: MessageFileReference[];
   id: string;
   text: string;
   chars: number;

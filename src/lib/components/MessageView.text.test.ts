@@ -107,6 +107,49 @@ it('copies complete paged text and reports failures without copying a preview', 
   );
   expect(writeText).toHaveBeenCalledTimes(1);
 });
+it('renders sent references as read-only cards while retaining raw message copying', async () => {
+  const text = '检查\n\n文件引用：\n"/project/a.pdf"';
+  const p = props({
+    text,
+    textParts: [
+      {
+        kind: 'text',
+        id: 'text',
+        text: '检查',
+        chars: 2,
+        contentRef: null,
+        truncated: false,
+      },
+      {
+        kind: 'files',
+        id: 'files',
+        text: '\n\n文件引用：\n"/project/a.pdf"',
+        chars: 25,
+        contentRef: null,
+        truncated: false,
+        files: [{ id: 'f', path: '/project/a.pdf', directory: false }],
+      },
+    ],
+  });
+  const view = render(MessageView, p);
+  expect(
+    view.getByRole('button', { name: '查看文件引用：a.pdf' }),
+  ).toBeVisible();
+  expect(view.queryByText('文件引用：')).toBeNull();
+  await fireEvent.click(
+    view.getByRole('button', { name: '查看文件引用：a.pdf' }),
+  );
+  expect(p.ontoggletool).toHaveBeenCalledWith('user', 'file:f');
+  await view.rerender({ toolViews: { user: { 'file:f': true } } });
+  expect(view.getByRole('region', { name: '文件引用详情' })).toHaveTextContent(
+    '/project/a.pdf',
+  );
+  await fireEvent.click(view.getByRole('button', { name: '查看原文' }));
+  await view.rerender({ toolViews: { user: { 'files:raw': true } } });
+  expect(view.container.querySelector('.user-plain-text')?.textContent).toBe(
+    text,
+  );
+});
 it('keeps assistant Markdown outside user folding rules', () => {
   const view = render(
     MessageView,

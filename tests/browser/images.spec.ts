@@ -90,7 +90,7 @@ test('sends multiple images without text, renders history and preserves failed d
     };
   });
   await page.goto('/');
-  await expect(page.getByRole('button', { name: '添加图片' })).toBeEnabled();
+  await expect(page.getByRole('button', { name: '添加文件' })).toBeEnabled();
   await expect(page.getByAltText('用户发送的图片')).toBeVisible();
   await page.getByRole('button', { name: '展开图片' }).click();
   await expect(page.getByRole('button', { name: '收起图片' })).toBeVisible();
@@ -103,9 +103,9 @@ test('sends multiple images without text, renders history and preserves failed d
     ),
   };
   await page
-    .getByLabel('选择图片文件')
+    .getByLabel('选择文件')
     .setInputFiles([file, { ...file, name: '第二张.png' }]);
-  await expect(page.locator('.image-attachment')).toHaveCount(2);
+  await expect(page.locator('.attachment-item')).toHaveCount(2);
   const firstThumbnail = page.getByRole('button', {
     name: '放大截图.png（1）',
   });
@@ -140,19 +140,19 @@ test('sends multiple images without text, renders history and preserves failed d
   });
   await page.getByRole('button', { name: '收起预览' }).click();
   await page.getByRole('textbox', { name: '消息输入' }).press('Enter');
-  await expect(page.locator('.image-attachment')).toHaveCount(0);
+  await expect(page.locator('.attachment-item')).toHaveCount(0);
   expect(await page.evaluate(() => (window as any).sent[0].images.length)).toBe(
     2,
   );
   await page.evaluate(() => {
     (window as any).failSend = true;
   });
-  await page.getByLabel('选择图片文件').setInputFiles(file);
-  await expect(page.locator('.image-attachment')).toHaveCount(1);
+  await page.getByLabel('选择文件').setInputFiles(file);
+  await expect(page.locator('.attachment-item')).toHaveCount(1);
   await page.getByRole('textbox', { name: '消息输入' }).fill('分析截图');
   await page.getByRole('button', { name: '发送消息', exact: true }).click();
   await expect(page.getByRole('textbox', { name: '消息输入' })).toHaveValue(
     '分析截图',
   );
-  await expect(page.locator('.image-attachment')).toHaveCount(1);
+  await expect(page.locator('.attachment-item')).toHaveCount(1);
 });

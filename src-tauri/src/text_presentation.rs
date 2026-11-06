@@ -12,6 +12,16 @@ pub struct TextRange {
     pub id: String,
     pub start: usize,
     pub end: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub files: Option<Vec<FileReference>>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct FileReference {
+    pub id: String,
+    pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub directory: Option<bool>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -22,6 +32,8 @@ pub struct TextPart {
     pub chars: usize,
     pub content_ref: Option<String>,
     pub truncated: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub files: Option<Vec<FileReference>>,
 }
 #[derive(Serialize, Deserialize)]
 struct Saved {
@@ -52,10 +64,68 @@ fn images(value: &Value) -> Value {
         .map(|v| json!({"type":"image", "mimeType":v["mimeType"], "data":v["data"]}))
         .collect::<Vec<_>>())
 }
+fn absolute(path: &str) -> bool {
+    let bytes = path.as_bytes();
+    !path.contains('\0')
+        && (path.starts_with('/')
+            || (bytes.len() >= 3
+                && bytes[0].is_ascii_alphabetic()
+                && bytes[1] == b':'
+                && matches!(bytes[2], b'/' | b'\\'))
+            || (path.starts_with("\\\\")
+                && path[2..]
+                    .split(['/', '\\'])
+                    .filter(|s| !s.is_empty())
+                    .count()
+                    >= 2))
+}
+/// 旧消息只接受严格末尾格式；不把 Markdown 围栏或引用里的示例当成附件。
+fn legacy(text: &str) -> Option<(usize, Vec<FileReference>)> {
+    let (start, body) = if let Some(rest) = text.strip_prefix("文件引用：\n") {
+        (0, rest)
+    } else {
+        let at = text.rfind("\n\n文件引用：\n")?;
+        let prefix = &text[..at];
+        let mut fence: Option<(char, usize)> = None;
+        for line in prefix.lines() {
+            let trimmed = line.trim_start();
+            let c = trimmed.chars().next().unwrap_or(' ');
+            let count = trimmed.chars().take_while(|ch| *ch == c).count();
+            if (c == '`' || c == '~') && count >= 3 {
+                match fence {
+                    None => fence = Some((c, count)),
+                    Some((open, len)) if open == c && count >= len => fence = None,
+                    _ => {}
+                }
+            }
+        }
+        if fence.is_some() {
+            return None;
+        }
+        (at, &text[at + "\n\n文件引用：\n".len()..])
+    };
+    let mut files = Vec::new();
+    for (index, line) in body.split('\n').enumerate() {
+        let path: String = serde_json::from_str(line).ok()?;
+        if !absolute(&path) || serde_json::to_string(&path).ok()? != line {
+            return None;
+        }
+        files.push(FileReference {
+            id: format!("legacy-{index}"),
+            path,
+            directory: None,
+        });
+    }
+    (!files.is_empty()).then_some((start, files))
+}
 /// UTF-16 偏移与 DOM 一致；先映射到 UTF-8 字节边界，拒绝截断 emoji 和乱序范围。
 pub fn slices<'a>(text: &'a str, ranges: &[TextRange]) -> Result<Vec<&'a str>> {
     let invalid = || AppError::new("TEXT_PARTS", "文本卡片范围无效，请还原文字后重试");
-    if ranges.is_empty() || !ranges.iter().any(|p| p.kind == "paste") {
+    if ranges.is_empty()
+        || !ranges
+            .iter()
+            .any(|p| p.kind == "paste" || p.kind == "files")
+    {
         return Err(invalid());
     }
     let mut boundaries = std::collections::HashMap::new();
@@ -69,7 +139,7 @@ pub fn slices<'a>(text: &'a str, ranges: &[TextRange]) -> Result<Vec<&'a str>> {
     let mut ids = HashSet::new();
     let mut result = Vec::new();
     for part in ranges {
-        if !["text", "paste"].contains(&part.kind.as_str())
+        if !["text", "paste", "files"].contains(&part.kind.as_str())
             || part.id.is_empty()
             || !ids.insert(&part.id)
             || part.start != end
@@ -79,7 +149,35 @@ pub fn slices<'a>(text: &'a str, ranges: &[TextRange]) -> Result<Vec<&'a str>> {
         }
         let from = *boundaries.get(&part.start).ok_or_else(invalid)?;
         let to = *boundaries.get(&part.end).ok_or_else(invalid)?;
-        result.push(&text[from..to]);
+        let slice = &text[from..to];
+        if part.kind == "files" {
+            let files = part
+                .files
+                .as_ref()
+                .filter(|files| !files.is_empty())
+                .ok_or_else(invalid)?;
+            let mut file_ids = HashSet::new();
+            let expected = format!(
+                "{}文件引用：\n{}",
+                if part.start == 0 { "" } else { "\n\n" },
+                files
+                    .iter()
+                    .map(|f| serde_json::to_string(&f.path).unwrap_or_default())
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            );
+            if part.end != units
+                || slice != expected
+                || files
+                    .iter()
+                    .any(|f| f.id.is_empty() || !file_ids.insert(&f.id) || !absolute(&f.path))
+            {
+                return Err(invalid());
+            }
+        } else if part.files.is_some() {
+            return Err(invalid());
+        }
+        result.push(slice);
         end = part.end;
     }
     if end != units {
@@ -153,7 +251,9 @@ impl Presentations {
             .as_ref()
             .and_then(|p| std::fs::read(p).ok())
             .and_then(|data| serde_json::from_slice::<Saved>(&data).ok())
-            .filter(|s| s.version == 1 && s.digest == hash && slices(&text, &s.ranges).is_ok());
+            .filter(|s| {
+                [1, 2].contains(&s.version) && s.digest == hash && slices(&text, &s.ranges).is_ok()
+            });
         if live && saved.is_some() && self.pending.iter().any(|p| p.digest == hash) {
             // 同一时间戳/正文的事件既可能是重放，也可能是新的重复提交，不能猜测绑定。
             self.pending.retain(|p| p.digest != hash);
@@ -174,7 +274,7 @@ impl Presentations {
                 let pending = self.pending.remove(matching[0]);
                 if let Some(path) = path {
                     let saved = Saved {
-                        version: 1,
+                        version: 2,
                         digest: hash,
                         ranges: pending.ranges.clone(),
                     };
@@ -202,9 +302,48 @@ impl Presentations {
         } else {
             None
         };
-        let Some(ranges) = ranges else {
+        let mut ranges = ranges.unwrap_or_default();
+        if !ranges.iter().any(|part| part.kind == "files") {
+            if let Some((at, files)) = legacy(&text) {
+                let start = text[..at].encode_utf16().count();
+                let end = text.encode_utf16().count();
+                if ranges.is_empty() {
+                    if start > 0 {
+                        ranges.push(TextRange {
+                            kind: "text".into(),
+                            id: "legacy-text".into(),
+                            start: 0,
+                            end: start,
+                            files: None,
+                        });
+                    }
+                    ranges.push(TextRange {
+                        kind: "files".into(),
+                        id: "legacy-files".into(),
+                        start,
+                        end,
+                        files: Some(files),
+                    });
+                } else if let Some(last) = ranges.last_mut() {
+                    if last.kind == "text" && last.start <= start && last.end == end {
+                        last.end = start;
+                        if last.start == last.end {
+                            ranges.pop();
+                        }
+                        ranges.push(TextRange {
+                            kind: "files".into(),
+                            id: "legacy-files".into(),
+                            start,
+                            end,
+                            files: Some(files),
+                        });
+                    }
+                }
+            }
+        }
+        if ranges.is_empty() {
             return Ok(None);
-        };
+        }
         let Ok(texts) = slices(&text, &ranges) else {
             return Ok(None);
         };
@@ -219,6 +358,7 @@ impl Presentations {
                 chars,
                 content_ref: Some(store.body(text)?),
                 truncated: chars > limit,
+                files: part.files.clone(),
             });
         }
         Ok(Some(parts))
@@ -235,12 +375,14 @@ mod tests {
                 id: "t".into(),
                 start: 0,
                 end: 1,
+                files: None,
             },
             TextRange {
                 kind: "paste".into(),
                 id: "p".into(),
                 start: 1,
                 end: 4,
+                files: None,
             },
         ]
     }
@@ -281,6 +423,61 @@ mod tests {
         p.reject("reject");
         let other = json!({"role":"user","timestamp":456,"content":"前😀后"});
         assert!(p.project(&other, true, &mut store).unwrap().is_none());
+    }
+    #[test]
+    fn legacy_file_references_are_strict_and_preserve_long_pastes() {
+        let root = tempfile::tempdir().unwrap();
+        let mut store = Store::new().unwrap();
+        let mut presentation = Presentations::new(root.path().into());
+        let text = "说明\n\n文件引用：\n\"/tmp/文档.pdf\"\n\"C:\\\\work\\\\a.txt\"";
+        let parts = presentation
+            .project(&json!({"role":"user","content":text}), false, &mut store)
+            .unwrap()
+            .unwrap();
+        assert_eq!(parts.last().unwrap().files.as_ref().unwrap().len(), 2);
+        for bad in [
+            "说明\n\n文件引用：\n\"relative\"",
+            "```\n\n文件引用：\n\"/tmp/a\"",
+            "文件引用：\n\"/tmp/a\"\nextra",
+            "> 文件引用：\n> \"/tmp/a\"",
+        ] {
+            assert!(legacy(bad).is_none(), "{bad}");
+        }
+        assert!(presentation
+            .project(
+                &json!({"role":"assistant","content":text}),
+                false,
+                &mut store
+            )
+            .unwrap()
+            .is_none());
+    }
+    #[test]
+    fn rejects_files_metadata_that_does_not_match_sent_text() {
+        let text = "说明\n\n文件引用：\n\"/tmp/a\"";
+        let mut ranges = vec![
+            TextRange {
+                kind: "text".into(),
+                id: "text".into(),
+                start: 0,
+                end: 2,
+                files: None,
+            },
+            TextRange {
+                kind: "files".into(),
+                id: "files".into(),
+                start: 2,
+                end: text.encode_utf16().count(),
+                files: Some(vec![FileReference {
+                    id: "a".into(),
+                    path: "/tmp/a".into(),
+                    directory: Some(false),
+                }]),
+            },
+        ];
+        assert!(slices(text, &ranges).is_ok());
+        ranges[1].files.as_mut().unwrap()[0].path = "/tmp/other".into();
+        assert!(slices(text, &ranges).is_err());
     }
     #[test]
     fn ambiguous_pending_and_corrupt_storage_fall_back() {

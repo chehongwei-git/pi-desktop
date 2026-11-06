@@ -1,6 +1,15 @@
 /** 应用门面：组件只调用用户意图；集中连接状态、草稿、事件确认与切换事务。 */
 import { bridge, errorMessage, type Bridge } from '../client';
 import { draftText, type DraftPart } from '../draft-parts';
+import {
+  attachmentImages,
+  composePrompt,
+  hasDraft,
+  imageAttachment,
+  snapshotDraft,
+  type DraftAttachment,
+  type DraftSnapshot,
+} from '../attachments';
 import { textRanges, localTextParts } from '../text-presentation';
 import { parseBuiltin } from '../commands';
 import {
@@ -48,7 +57,14 @@ export class Desktop {
   restored = $state(false);
   navigation?: SessionNavigation;
   task = $state<import('../types').TaskActivity | null>(null);
-  taskInput: { text: string; images: MessageImage[] } | null = null;
+  taskInput: DraftSnapshot | null = null;
+  /** 本地队列快照与 Pi 返回的正文对应；停止恢复不反向解析路径文本。 */
+  private queuedDrafts: {
+    id: string;
+    text: string;
+    mode: 'steer' | 'followUp';
+    draft: DraftSnapshot;
+  }[] = [];
   scrollState: {
     top: number;
     follow: boolean;
@@ -478,24 +494,45 @@ export class Desktop {
     if (changed) ++this.draftRevision;
     this.structuredDrafts[this.draftKey()] = parts;
   }
-  images = $state<MessageImage[]>([]);
-  recoveredImages = $state<{ text: string; images: MessageImage[] }[]>([]);
+  attachments = $state<DraftAttachment[]>([]);
+  /** 保留图片投影供模型能力与既有调用使用，附件只有一个可变数据源。 */
+  get images(): MessageImage[] {
+    return attachmentImages(this.attachments);
+  }
+  set images(images: MessageImage[]) {
+    const available = this.attachments.filter((item) => item.kind === 'image');
+    const next = images.map((image) => {
+      const index = available.findIndex((item) => item.image === image);
+      return index >= 0
+        ? available.splice(index, 1)[0]
+        : imageAttachment(image);
+    });
+    this.attachments = [
+      ...this.attachments.filter((item) => item.kind === 'path'),
+      ...next,
+    ];
+  }
+  recoveredDrafts = $state<DraftSnapshot[]>([]);
+  draftSnapshot(): DraftSnapshot {
+    return snapshotDraft(this.draft, this.draftParts, this.attachments);
+  }
   /** 恢复时交换当前草稿，避免覆盖用户尚未发送的工作。 */
-  restoreImages(index: number): void {
-    const [draft] = this.recoveredImages.splice(index, 1);
+  restoreDraft(index: number): void {
+    const [draft] = this.recoveredDrafts.splice(index, 1);
     if (!draft) return;
-    if (this.draft || this.images.length)
-      this.recoveredImages.push({ text: this.draft, images: this.images });
+    const current = this.draftSnapshot();
+    if (hasDraft(current)) this.recoveredDrafts.push(current);
     this.draft = draft.text;
-    this.images = draft.images;
+    this.draftParts = draft.parts;
+    this.attachments = draft.attachments;
   }
-  private imageDrafts = new Map<string, MessageImage[]>();
-  /** 图片草稿沿用文本的项目/会话键，退出应用后不持久保存。 */
-  private saveImageDraft(): void {
-    this.imageDrafts.set(this.draftKey(), this.images);
+  private attachmentDrafts = new Map<string, DraftAttachment[]>();
+  /** 全部附件沿用文本的项目/会话键；持久化层只保存路径引用。 */
+  private saveAttachmentDraft(): void {
+    this.attachmentDrafts.set(this.draftKey(), this.attachments);
   }
-  private restoreImageDraft(): void {
-    this.images = this.imageDrafts.get(this.draftKey()) ?? [];
+  private restoreAttachmentDraft(): void {
+    this.attachments = this.attachmentDrafts.get(this.draftKey()) ?? [];
   }
   newChatProject = $state<string | null>(null);
   // 首次发送创建真实会话会恢复 Pi 默认模型，显式选择需在创建后再次应用。
@@ -594,8 +631,8 @@ export class Desktop {
     this.drafts.set(this.draftKey(), this.draft);
     const text = this.draft;
     const parts = this.draftParts;
-    const images = this.images;
-    this.saveImageDraft();
+    const attachments = this.attachments;
+    this.saveAttachmentDraft();
     // Windows 大小写与分隔符别名视为同一项目，不因路径写法差异重置草稿选择。
     const changed =
       this.newChatProject === null ||
@@ -606,9 +643,9 @@ export class Desktop {
       ? text
       : (this.drafts.get(this.draftKey()) ?? '');
     if (preserveDraft) {
-      this.images = images;
+      this.attachments = attachments;
       this.draftParts = parts;
-    } else this.restoreImageDraft();
+    } else this.restoreAttachmentDraft();
   }
   notice = $state('');
   modelConfigPending = $state(false);
@@ -811,12 +848,12 @@ export class Desktop {
   }
   private async connectProject(project: string): Promise<void> {
     this.drafts.set(this.draftKey(), this.draft);
-    this.saveImageDraft();
+    this.saveAttachmentDraft();
     const preserve = this.historyCached;
     // 工作区将本地草稿绑定到真实会话时，输入仍属于同一对象，不按新文件键清空。
     const preserveDraft = !!this.navigation && this.newChatProject !== null;
     const draft = this.draft;
-    const images = this.images;
+    const attachments = this.attachments;
     const generation = ++this.generation;
     const modelRevision = this.modelConfigRevision;
     this.connectionRecovery = this.connection === 'failed';
@@ -868,10 +905,10 @@ export class Desktop {
         !preserve &&
         !preserveDraft &&
         this.draft === draft &&
-        this.images === images
+        this.attachments === attachments
       ) {
         this.draft = this.drafts.get(this.draftKey()) ?? '';
-        this.restoreImageDraft();
+        this.restoreAttachmentDraft();
       }
       this.settings.recentProjects = [
         this.project,
@@ -1019,8 +1056,27 @@ export class Desktop {
         if (this.initialPending && this.messages.some((m) => m.role === 'user'))
           this.initialPending = null;
         for (const event of batch.events) {
+          if (
+            event.type === 'message' &&
+            event.message.role === 'user' &&
+            !event.message.delivery
+          ) {
+            const message = event.message;
+            const index = this.queuedDrafts.findIndex(
+              (item) =>
+                (message.truncated
+                  ? item.text.startsWith(message.text)
+                  : item.text === message.text) &&
+                attachmentImages(item.draft.attachments)
+                  .map((image) => image.id)
+                  .join(',') ===
+                  (message.images ?? []).map((image) => image.id).join(','),
+            );
+            if (index >= 0) this.queuedDrafts.splice(index, 1);
+          }
           // reset 是会话边界，按事件顺序清理；不能在批次末尾保留旧会话 widget。
           if (event.type === 'reset') {
+            this.queuedDrafts = [];
             for (const timer of this.extensionTimers.values())
               clearTimeout(timer);
             this.extensionTimers.clear();
@@ -1273,11 +1329,11 @@ export class Desktop {
       this.sessionKey(path) === this.sessionKey(this.snapshot.sessionFile)
     ) {
       this.drafts.set(this.draftKey(), this.draft);
-      this.saveImageDraft();
+      this.saveAttachmentDraft();
       this.newChatProject = null;
       this.clearDraftModel();
       this.draft = this.drafts.get(this.draftKey()) ?? '';
-      this.restoreImageDraft();
+      this.restoreAttachmentDraft();
       await this.applyProjectModel();
       return;
     }
@@ -1501,10 +1557,16 @@ export class Desktop {
   /** 初始提示词先进入宿主队列，获得名额后才分配进程；附件只在内存保留。 */
   private async submitDraft(): Promise<void> {
     if (this.submitting || this.openingSession) return;
-    const text = this.draft;
-    const images = this.images;
-    if (images.length && text.trimStart().startsWith('/'))
-      throw new Error('图片不能与斜杠命令一起发送。');
+    const draft = this.draftSnapshot();
+    const {
+      text,
+      images,
+      parts: submittedParts,
+      files,
+      fileStart,
+    } = composePrompt(draft);
+    if (draft.attachments.length && draft.text.trimStart().startsWith('/'))
+      throw new Error('附件不能与斜杠命令一起发送。');
     const model = this.selectedModel;
     if (images.length && model?.input && !model.input.includes('image'))
       throw new Error('当前模型不支持图片输入。');
@@ -1519,8 +1581,7 @@ export class Desktop {
     ]);
     if (this.initialSubmission?.fingerprint !== fingerprint)
       this.initialSubmission = { id: crypto.randomUUID(), fingerprint };
-    const submittedParts = this.draftParts.map((part) => ({ ...part }));
-    const ranges = textRanges(submittedParts, text);
+    const ranges = textRanges(submittedParts, text, files, fileStart);
     const submissionId = this.initialSubmission.id;
     const submittedRevision = this.draftRevision;
     this.submitting = true;
@@ -1571,7 +1632,7 @@ export class Desktop {
         ? null
         : {
             id: `accepted-${submissionId}`,
-            textParts: localTextParts(submittedParts, text),
+            textParts: localTextParts(submittedParts, text, files, fileStart),
             role: 'user',
             text,
             thinking: '',
@@ -1582,7 +1643,7 @@ export class Desktop {
           };
       const remainingParts = this.draftParts;
       const clearSubmitted =
-        this.draftRevision === submittedRevision && this.draft === text;
+        this.draftRevision === submittedRevision && this.draft === draft.text;
       this.newChatProject = null;
       this.draftParts = remainingParts;
       this.connection = 'ready';
@@ -1592,13 +1653,13 @@ export class Desktop {
         state: 'queued',
         position: 0,
       };
-      this.taskInput = { text, images };
+      this.taskInput = draft;
       this.sidebarPreview ||= text.replace(/\s+/g, ' ').trim().slice(0, 80);
       this.lastSentAt = new Date().toISOString();
       this.restored = false;
       if (clearSubmitted) this.draft = '';
-      const sent = new Set(images.map((image) => image.id));
-      this.images = this.images.filter((image) => !sent.has(image.id));
+      const sent = new Set(draft.attachments.map((item) => item.id));
+      this.attachments = this.attachments.filter((item) => !sent.has(item.id));
       this.sentMessageRevision++;
       this.navigation?.changed();
     } catch (error) {
@@ -1613,7 +1674,7 @@ export class Desktop {
     if (
       this.navigation &&
       this.newChatProject !== null &&
-      (this.draft.trim() || this.images.length) &&
+      (this.draft.trim() || this.attachments.length) &&
       !parseBuiltin(this.draft)
     ) {
       await this.submitDraft();
@@ -1622,7 +1683,7 @@ export class Desktop {
     if (
       this.navigation &&
       this.newChatProject === null &&
-      (this.draft.trim() || this.images.length)
+      (this.draft.trim() || this.attachments.length)
     ) {
       if (this.submitting || this.openingSession || this.waitingToSend) return;
       this.waitingToSend = true;
@@ -1635,17 +1696,23 @@ export class Desktop {
     if (this.task?.state === 'queued')
       throw new Error('此会话正在排队，请等待开始或取消排队。');
     if (
-      (!this.draft.trim() && !this.images.length) ||
+      (!this.draft.trim() && !this.attachments.length) ||
       this.submitting ||
       this.openingSession ||
       (this.connection !== 'ready' && this.newChatProject === null)
     )
       return;
-    const text = this.draft;
-    const images = this.images;
-    if (images.length && text.trimStart().startsWith('/'))
-      throw new Error('图片不能与斜杠命令一起发送，请修改文字或移除图片。');
-    const builtin = parseBuiltin(text);
+    const draft = this.draftSnapshot();
+    const {
+      text,
+      images,
+      parts: submittedParts,
+      files,
+      fileStart,
+    } = composePrompt(draft);
+    if (draft.attachments.length && draft.text.trimStart().startsWith('/'))
+      throw new Error('附件不能与斜杠命令一起发送，请修改文字或移除附件。');
+    const builtin = parseBuiltin(draft.text);
     if (builtin) {
       if (this.run !== 'idle') {
         throw new Error('请等待当前任务完成或停止任务后再执行内置命令。');
@@ -1714,11 +1781,12 @@ export class Desktop {
         await this.newSession(project);
       } finally {
         // 创建失败或被扩展取消时保留项目选择与首条消息，不能发进原会话。
-        this.draft = text;
-        this.images = images;
+        this.draft = draft.text;
+        this.draftParts = draft.parts;
+        this.attachments = draft.attachments;
       }
       if (this.newChatProject !== null || this.connection !== 'ready') return;
-      this.draft = text;
+      this.draft = draft.text;
     }
     if (this.newChatModel) {
       // 项目偏好优先于草稿沿用的选择；应用失败时保留选择，重试不再创建会话。
@@ -1743,8 +1811,7 @@ export class Desktop {
       !this.snapshot.model.input.includes('image')
     )
       throw new Error('当前模型不支持图片输入，请切换到支持图片的模型。');
-    const submittedParts = this.draftParts.map((part) => ({ ...part }));
-    const ranges = textRanges(submittedParts, text);
+    const ranges = textRanges(submittedParts, text, files, fileStart);
     const sessionFile = this.snapshot.sessionFile;
     const generation = this.generation;
     const sentAt = new Date().toISOString();
@@ -1753,12 +1820,13 @@ export class Desktop {
       ? `pending-${++this.submissionSerial}`
       : undefined;
     if (pendingId && delivery) {
+      this.queuedDrafts.push({ id: pendingId, text, mode: delivery, draft });
       // 用新数组使 reducer 的 ID 索引同步包含本地占位。
       this.messages = [
         ...this.messages,
         {
           id: pendingId,
-          textParts: localTextParts(submittedParts, text),
+          textParts: localTextParts(submittedParts, text, files, fileStart),
           role: 'user',
           text,
           thinking: '',
@@ -1798,7 +1866,7 @@ export class Desktop {
           state: 'queued',
           position: 0,
         };
-        this.taskInput = { text, images };
+        this.taskInput = draft;
         this.navigation?.changed();
       }
       // 迟到的提交结果不能把新会话的阅读位置拉到底部。
@@ -1815,16 +1883,23 @@ export class Desktop {
       if (sessionFile) this.sentAt[this.sessionKey(sessionFile)] = sentAt;
       const pending = this.messages.find((message) => message.id === pendingId);
       if (pending?.delivery) pending.delivery.state = 'queued';
-      if (this.draftRevision === submittedDraftRevision && this.draft === text)
+      if (
+        this.draftRevision === submittedDraftRevision &&
+        this.draft === draft.text
+      )
         this.draft = '';
-      const sent = new Set(images.map((image) => image.id));
-      this.images = this.images.filter((image) => !sent.has(image.id));
+      const sent = new Set(draft.attachments.map((item) => item.id));
+      this.attachments = this.attachments.filter((item) => !sent.has(item.id));
       if (delivery && this.run !== 'aborting' && this.run !== 'compacting')
         this.notice =
           delivery === 'steer'
             ? '引导消息已提交'
             : '后续消息已提交，将在当前任务完成后处理';
     } catch (error) {
+      if (pendingId)
+        this.queuedDrafts = this.queuedDrafts.filter(
+          (item) => item.id !== pendingId,
+        );
       if (pendingId)
         this.messages = this.messages.filter(
           (message) => message.id !== pendingId,
@@ -1905,12 +1980,23 @@ export class Desktop {
           );
           const message =
             index >= 0 ? pendingMessages.splice(index, 1)[0] : undefined;
-          if (message?.images?.length)
-            this.recoveredImages.push({ text, images: message.images });
+          const savedIndex = this.queuedDrafts.findIndex(
+            (item) => item.text === text && item.mode === mode,
+          );
+          const saved =
+            savedIndex >= 0
+              ? this.queuedDrafts.splice(savedIndex, 1)[0]
+              : undefined;
+          if (saved) this.recoveredDrafts.push(saved.draft);
+          else if (message?.images?.length)
+            this.recoveredDrafts.push(
+              snapshotDraft(text, [], message.images.map(imageAttachment)),
+            );
           else this.recovered.push(text);
         }
       }
       this.messages = this.messages.filter((message) => !message.delivery);
+      this.queuedDrafts = [];
       this.queued = [];
     } finally {
       clearTimeout(this.stopTimer);
@@ -1943,7 +2029,7 @@ export class Desktop {
       ? this.sessionLabel(path) || this.openingSession?.title || ''
       : '';
     this.drafts.set(this.draftKey(), this.draft);
-    this.saveImageDraft();
+    this.saveAttachmentDraft();
     const result = await this.action<{ cancelled: boolean }>(
       path
         ? { type: 'switch_session', path }
@@ -1963,7 +2049,7 @@ export class Desktop {
     // 仅创建成功才消费本地草稿；打开历史、创建取消或失败均保留它。
     if (!path && this.newChatProject !== null) {
       this.drafts.delete(this.draftKey());
-      this.imageDrafts.delete(this.draftKey());
+      this.attachmentDrafts.delete(this.draftKey());
     }
     this.newChatProject = null;
     this.toolViews = {};
@@ -1981,7 +2067,7 @@ export class Desktop {
       this.refreshStats(),
     ]);
     this.draft = this.drafts.get(this.draftKey()) ?? '';
-    this.restoreImageDraft();
+    this.restoreAttachmentDraft();
     await this.applyProjectModel();
     if (this.projectKey(previousProject) !== this.projectKey(this.project)) {
       this.settings.recentProjects = [

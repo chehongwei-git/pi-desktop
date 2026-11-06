@@ -1,11 +1,18 @@
 <!-- 输入器只有草稿与提交意图，不知道 RPC；组合输入、自动高度和发送模式在此收敛。 -->
 <script lang="ts">
-  import { tick, type Snippet } from 'svelte';
+  import { onMount, tick, type Snippet } from 'svelte';
   import { isTauri, invoke } from '@tauri-apps/api/core';
   import Icon from './Icon.svelte';
   import DraftEditor from './DraftEditor.svelte';
   import type { DraftPart } from '../draft-parts';
-  import ImageAttachments from './ImageAttachments.svelte';
+  import DraftAttachments from './DraftAttachments.svelte';
+  import {
+    imageBudget,
+    importBrowserFiles,
+    type DraftAttachment,
+    type ImportedFile,
+  } from '../attachments';
+  import { registerFileDrop } from '../file-drop';
   import { shouldSend } from '../state/reducer';
   import {
     categorizedCommands,
@@ -14,14 +21,15 @@
     commandSupport,
     type CommandCategory,
   } from '../commands';
-  import type { Command, HistoryPage, Message, MessageImage } from '../types';
-  import { imageAccept, imagesLimit, readImages } from '../images';
+  import type { Command, HistoryPage, Message } from '../types';
+  import { imageLimit, imagesLimit } from '../images';
   import { errorMessage } from '../client';
   /** 运行中 Enter/发送直接引导当前任务，后续消息与停止使用独立按钮。 */
   let {
     value = $bindable(''),
     parts = $bindable<DraftPart[]>([]),
-    images = $bindable<MessageImage[]>([]),
+    attachments = $bindable<DraftAttachment[]>([]),
+    active = true,
     disabled = false,
     running = false,
     submitting = false,
@@ -43,7 +51,8 @@
     onhistorytext?: (message: Message) => Promise<string>;
     value?: string;
     parts?: DraftPart[];
-    images?: MessageImage[];
+    attachments?: DraftAttachment[];
+    active?: boolean;
     disabled?: boolean;
     running?: boolean;
     submitting?: boolean;
@@ -65,72 +74,132 @@
   } = $props();
   let textarea: DraftEditor;
   let picker: HTMLInputElement;
-  let imageBusy = $state(false);
+  let root: HTMLDivElement;
+  let pendingImports = $state(0);
+  let fileBusy = $derived(pendingImports > 0);
   let dragging = $state(false);
-  let imageError = $state('');
-  let imageRequest = 0;
+  let fileError = $state('');
+  let importGeneration = 0;
+  let importQueue = Promise.resolve();
   $effect(() => {
     historyKey;
-    ++imageRequest;
-    imageBusy = false;
+    active;
+    ++importGeneration;
+    pendingImports = 0;
     dragging = false;
-    imageError = '';
+    fileError = '';
+    importQueue = Promise.resolve();
+    return () => {
+      ++importGeneration;
+    };
   });
-  /** 切换会话后作废异步读取；附件失败不影响原有草稿。 */
-  async function addImages(files: File[]): Promise<void> {
-    if (disabled || submitting || menu || imageBusy || !files.length) return;
-    const request = ++imageRequest;
-    imageBusy = true;
-    imageError = '';
-    try {
-      const added = await readImages(files, images);
-      if (request === imageRequest) images = [...images, ...added];
-    } catch (cause) {
-      if (request === imageRequest) imageError = errorMessage(cause);
-    } finally {
-      if (request === imageRequest) imageBusy = false;
-    }
+  const canImport = () => active && !disabled && !submitting && !menu;
+  /** 票据立即交给宿主消费；提交结果按批次顺序归并，并重新核对累计预算。 */
+  function enqueueImport(
+    operation: Promise<ImportedFile[]> | (() => Promise<ImportedFile[]>),
+  ): void {
+    const request = importGeneration;
+    if (!pendingImports) fileError = '';
+    ++pendingImports;
+    // 即刻挂接 rejection，避免后面的批次先失败时产生未处理的 Promise。
+    const early =
+      typeof operation === 'function'
+        ? undefined
+        : operation.then(
+            (items) => ({ items }),
+            (cause) => ({ cause }),
+          );
+    importQueue = importQueue.then(async () => {
+      if (request !== importGeneration) return;
+      try {
+        const result = early
+          ? await early
+          : { items: await (operation as () => Promise<ImportedFile[]>)() };
+        if (request !== importGeneration) return;
+        if ('cause' in result) throw result.cause;
+        const accepted: DraftAttachment[] = [];
+        const errors: string[] = [];
+        const budget = imageBudget(attachments);
+        for (const item of result.items) {
+          if (item.kind === 'error') {
+            errors.push(item.name + '：' + item.message);
+            continue;
+          }
+          if (item.kind === 'image') {
+            const bytes = imageBudget([item]).bytes;
+            if (budget.count >= 8) {
+              errors.push(
+                (item.image.name ?? '图片') + '：每条消息最多添加 8 张图片。',
+              );
+              continue;
+            }
+            if (bytes > imageLimit || budget.bytes + bytes > imagesLimit) {
+              errors.push(
+                (item.image.name ?? '图片') +
+                  '：超出图片大小限制（单张 10 MiB，总计 24 MiB）。',
+              );
+              continue;
+            }
+            budget.count++;
+            budget.bytes += bytes;
+          }
+          accepted.push(item);
+        }
+        if (accepted.length) attachments = [...attachments, ...accepted];
+        if (errors.length)
+          fileError = [fileError, ...errors].filter(Boolean).join('\n');
+      } catch (cause) {
+        if (request === importGeneration)
+          fileError = [fileError, errorMessage(cause)]
+            .filter(Boolean)
+            .join('\n');
+      } finally {
+        if (request === importGeneration) --pendingImports;
+      }
+    });
   }
-  /** 桌面端使用原生扩展名过滤，避免 WebView 忽略 input 的 accept。 */
-  async function chooseImages(): Promise<void> {
-    if (disabled || submitting || menu || imageBusy) return;
+  function addFiles(files: File[]): void {
+    if (!canImport() || !files.length) return;
+    enqueueImport(() => importBrowserFiles(files, attachments));
+  }
+  function chooseFiles(): void {
+    if (!canImport() || fileBusy) return;
     if (!isTauri()) {
       picker.click();
       return;
     }
-    const request = ++imageRequest;
-    imageBusy = true;
-    imageError = '';
-    try {
-      const added = await invoke<MessageImage[]>('pick_images');
-      if (request !== imageRequest || !added.length) return;
-      if (images.length + added.length > 8)
-        throw new Error('每条消息最多添加 8 张图片。');
-      // 精确计算 Base64 原始字节数，已有附件也计入本条消息预算。
-      const total = [...images, ...added].reduce((sum, image) => {
-        const data = image.data ?? '';
-        return (
-          sum +
-          (data.length * 3) / 4 -
-          (data.endsWith('==') ? 2 : data.endsWith('=') ? 1 : 0)
-        );
-      }, 0);
-      if (total > imagesLimit)
-        throw new Error('每条消息的图片总大小不能超过 24 MiB。');
-      images = [...images, ...added];
-    } catch (cause) {
-      if (request === imageRequest) imageError = errorMessage(cause);
-    } finally {
-      if (request === imageRequest) imageBusy = false;
-    }
+    enqueueImport(
+      invoke<ImportedFile[]>('pick_files', {
+        budget: imageBudget(attachments),
+      }),
+    );
   }
   function paste(event: ClipboardEvent): void {
     const files = Array.from(event.clipboardData?.files ?? []);
     if (files.length) {
       event.preventDefault();
-      void addImages(files);
+      addFiles(files);
     }
   }
+  onMount(() =>
+    registerFileDrop({
+      element: root,
+      enabled: canImport,
+      hover: (value) => {
+        dragging = value;
+      },
+      drop: (dropId) =>
+        enqueueImport(
+          invoke<ImportedFile[]>('read_dropped_files', {
+            dropId,
+            budget: imageBudget(attachments),
+          }),
+        ),
+      error: (message) => {
+        fileError = message;
+      },
+    }),
+  );
   let composing = false;
   let historyMessages: Message[] = [];
   let historyIndex = -1;
@@ -281,13 +350,14 @@
         ?.scrollIntoView?.({ block: 'nearest' });
   });
   function complete(index: number, enter = false): void {
+    if (fileBusy || disabled || submitting || !active) return;
     const command = matches[index];
     if (!command || menu?.busy) return;
     if (menu) {
       onchoose?.(command.name);
       return;
     }
-    if (enter && !images.length && oncommand?.(command.name)) {
+    if (enter && !attachments.length && oncommand?.(command.name)) {
       textarea.focus();
       return;
     }
@@ -309,10 +379,11 @@
       return;
     }
     if (
-      (!value.trim() && !images.length) ||
+      (!value.trim() && !attachments.length) ||
+      !active ||
       disabled ||
       submitting ||
-      imageBusy
+      fileBusy
     )
       return;
     onsend(mode ?? (running ? 'steer' : undefined));
@@ -391,14 +462,16 @@
 </script>
 
 <div
+  bind:this={root}
   class="composer"
+  class:dragging
   class:disabled
   role="group"
   aria-label="消息编辑器"
   ondragover={(event) => {
     if (event.dataTransfer?.types.includes('Files')) {
       event.preventDefault();
-      if (!disabled && !submitting && !menu && !imageBusy) dragging = true;
+      if (canImport()) dragging = true;
     }
   }}
   ondragleave={(event) => {
@@ -409,30 +482,35 @@
     dragging = false;
     if (event.dataTransfer?.files.length) {
       event.preventDefault();
-      void addImages(Array.from(event.dataTransfer.files));
+      if (!isTauri()) addFiles(Array.from(event.dataTransfer.files));
     }
   }}
 >
-  {#if dragging}<p role="status">松开以添加图片</p>{/if}
+  {#if dragging}<div class="drop-hint" role="status">
+      <Icon name="attachment" size={24} /><span>松开以添加文件</span>
+    </div>{/if}
   <input
     bind:this={picker}
-    class="image-picker"
+    class="file-picker"
     type="file"
-    accept={imageAccept}
     multiple
-    aria-label="选择图片文件"
+    aria-label="选择文件"
     onchange={(event) => {
-      void addImages(Array.from(event.currentTarget.files ?? []));
+      addFiles(Array.from(event.currentTarget.files ?? []));
       event.currentTarget.value = '';
     }}
   />
-  {#if images.length}<ImageAttachments
-      bind:images
+  {#if attachments.length}<DraftAttachments
+      bind:attachments
       {historyKey}
       onempty={() => textarea.focus()}
     />{/if}
-  {#if imageBusy}<p role="status">正在读取图片…</p>{/if}
-  {#if imageError}<p role="alert">{imageError}</p>{/if}
+  {#if fileBusy}<p class="file-feedback" role="status">
+      正在添加文件{pendingImports > 1 ? `（${pendingImports} 批）` : ''}…
+    </p>{/if}
+  {#if fileError}<p class="file-feedback file-error" role="alert">
+      {fileError}
+    </p>{/if}
   {#if matches.length || menu}<div
       class="slash-menu"
       role="listbox"
@@ -558,12 +636,12 @@
         {#if controls}{@render controls()}{/if}
         <button
           type="button"
-          class="image-button"
-          aria-label="添加图片"
-          disabled={disabled || submitting || imageBusy || !!menu}
-          onclick={() => void chooseImages()}
-          title="添加图片（PNG、JPEG、WebP、GIF），也可粘贴截图或拖入图片"
-          ><Icon name="image" size={19} /></button
+          class="attachment-button"
+          aria-label="添加文件"
+          disabled={disabled || submitting || fileBusy || !!menu || !active}
+          onclick={chooseFiles}
+          title="添加文件：PNG、JPEG、WebP、GIF 作为图片发送，其他文件作为路径引用"
+          ><Icon name="attachment" size={19} /></button
         >
       </div>
       <span class="composer-hint"
@@ -583,8 +661,8 @@
           title="排在当前任务完成后处理"
           disabled={disabled ||
             submitting ||
-            imageBusy ||
-            (!value.trim() && !images.length)}
+            fileBusy ||
+            (!value.trim() && !attachments.length)}
           onclick={() => submit('followUp')}>完成后发送</button
         >
         <button
@@ -601,9 +679,9 @@
         aria-label={running ? '发送引导' : '发送消息'}
         title={running ? '发送引导，在下一个可处理节点生效' : '发送消息'}
         disabled={disabled ||
-          (!menu && !value.trim() && !images.length) ||
+          (!menu && !value.trim() && !attachments.length) ||
           submitting ||
-          imageBusy ||
+          fileBusy ||
           (!!menu && !matches.length)}
         onclick={() => submit()}
         >{#if running}<span>发送引导</span>{/if}<Icon
@@ -616,6 +694,37 @@
 </div>
 
 <style>
+  .composer {
+    position: relative;
+  }
+  .composer.dragging {
+    outline: 2px solid var(--accent);
+    outline-offset: -2px;
+  }
+  .drop-hint {
+    position: absolute;
+    inset: 4px;
+    z-index: 5;
+    display: flex;
+    gap: 10px;
+    align-items: center;
+    justify-content: center;
+    border-radius: 12px;
+    background: var(--input-surface);
+    color: var(--accent);
+    pointer-events: none;
+  }
+  .file-feedback {
+    margin: 0 0 8px;
+    font-size: 12px;
+    color: var(--muted);
+    white-space: pre-line;
+    max-height: 96px;
+    overflow-y: auto;
+  }
+  .file-error {
+    color: var(--error);
+  }
   /* 工具同行排列，提示另起一行；沿用模型控件的焦点顺序与主题配色。 */
   .composer-tools {
     display: flex;
@@ -624,7 +733,7 @@
     gap: 4px;
     min-width: 0;
   }
-  .image-button {
+  .attachment-button {
     display: inline-flex;
     align-items: center;
     justify-content: center;
@@ -637,19 +746,19 @@
     background: transparent;
     color: var(--muted);
   }
-  .image-button:hover:not(:disabled) {
+  .attachment-button:hover:not(:disabled) {
     color: var(--text);
     background: var(--surface);
     border-color: var(--border);
   }
-  .image-button:focus-visible {
+  .attachment-button:focus-visible {
     outline: 2px solid var(--accent);
     outline-offset: 2px;
   }
-  .image-button:disabled {
+  .attachment-button:disabled {
     opacity: 0.4;
   }
-  .image-picker {
+  .file-picker {
     display: none;
   }
   .command-categories {

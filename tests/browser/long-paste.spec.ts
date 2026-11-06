@@ -155,7 +155,7 @@ test.beforeEach(async ({ page }) => {
     };
   });
   await page.goto('/');
-  await expect(page.getByRole('button', { name: '添加图片' })).toBeEnabled();
+  await expect(page.getByRole('button', { name: '添加文件' })).toBeEnabled();
 });
 
 test('click replaces the input card with its original text, then sends an inline expandable message', async ({

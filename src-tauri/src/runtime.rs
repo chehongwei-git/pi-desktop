@@ -992,6 +992,7 @@ mod tests {
                         id: "pasted".into(),
                         start: 0,
                         end: 5,
+                        files: None,
                     }]),
                 })
                 .await

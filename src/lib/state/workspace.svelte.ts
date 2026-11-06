@@ -6,6 +6,13 @@ import type {
   TaskActivity,
 } from '../types';
 import { restoreParts, type DraftPart } from '../draft-parts';
+import {
+  hasDraft,
+  persistentDraft,
+  restoreDraft,
+  snapshotDraft,
+  type DraftSnapshot,
+} from '../attachments';
 import { Desktop } from './desktop.svelte';
 
 // 内容缓存与 DOM、进程分开管理；增加内容额度不要求保留更多后台进程。
@@ -67,6 +74,8 @@ export class Workspace {
     pendingText?: string;
     interrupted?: boolean;
     images?: boolean;
+    snapshot?: DraftSnapshot;
+    pendingDrafts?: DraftSnapshot[];
   }[] = [];
   private lastRecovery = '';
   constructor(private api: Bridge = bridge) {
@@ -141,9 +150,10 @@ export class Workspace {
       const stored = JSON.parse(
         localStorage.getItem('pi-desktop-workspace-v1') || 'null',
       );
-      if (stored?.version === 1 && Array.isArray(stored.drafts))
+      if ([1, 2].includes(stored?.version) && Array.isArray(stored.drafts))
         this.recovery = stored.drafts;
       for (const draft of this.recovery) {
+        if (!draft || typeof draft !== 'object') continue;
         if (typeof draft.text !== 'string' || typeof draft.project !== 'string')
           continue;
         if (draft.path !== undefined && typeof draft.path !== 'string')
@@ -168,13 +178,22 @@ export class Workspace {
         session.project = draft.project;
         session.newChatProject = draft.path ? null : draft.project;
         session.snapshot = { sessionFile: draft.path };
-        session.draft = draft.text;
-        session.draftParts = restoreParts(draft.parts, draft.text);
-        if (typeof draft.pendingText === 'string' && draft.pendingText)
+        const restored = restoreDraft(draft.snapshot);
+        session.draft = restored?.text ?? draft.text;
+        session.draftParts =
+          restored?.parts ?? restoreParts(draft.parts, draft.text);
+        session.attachments = restored?.attachments ?? [];
+        if (Array.isArray(draft.pendingDrafts)) {
+          for (const pending of draft.pendingDrafts) {
+            const recovered = restoreDraft(pending);
+            if (recovered && hasDraft(recovered))
+              session.recoveredDrafts.push(recovered);
+          }
+        } else if (typeof draft.pendingText === 'string' && draft.pendingText)
           session.recovered.push(draft.pendingText);
         session.notice = draft.interrupted
           ? '上次执行中断或未启动，请检查历史后手动重新提交。'
-          : '已恢复未发送的文字草稿。';
+          : '已恢复未发送的草稿。';
         if (draft.images) session.notice += ' 图片未持久保存，请重新添加附件。';
         session.unread = true;
       }
@@ -257,9 +276,9 @@ export class Workspace {
     if (preserve && session !== previous) {
       session.draft = previous.draft;
       session.draftParts = previous.draftParts;
-      session.images = previous.images;
+      session.attachments = previous.attachments;
       previous.draft = '';
-      previous.images = [];
+      previous.attachments = [];
     }
     this.select(session);
   }
@@ -392,7 +411,12 @@ export class Workspace {
         session?.taskInput?.text ||
         session?.draft ||
         session?.recovered.at(-1) ||
-        session?.recoveredImages.at(-1)?.text ||
+        session?.recoveredDrafts.at(-1)?.text ||
+        session?.attachments
+          .map((item) =>
+            item.kind === 'path' ? item.name : (item.image.name ?? '图片'),
+          )
+          .join('、') ||
         ''
       )
         .replace(/\s+/g, ' ')
@@ -400,8 +424,8 @@ export class Workspace {
         .slice(0, 80);
       const content = !!(
         summary ||
-        session?.images.length ||
-        session?.recoveredImages.length
+        session?.attachments.length ||
+        session?.recoveredDrafts.length
       );
       if (
         !history &&
@@ -530,9 +554,9 @@ export class Workspace {
     if (
       !session.snapshot.sessionFile &&
       (session.draft.trim() ||
-        session.images.length ||
+        session.attachments.length ||
         session.recovered.length ||
-        session.recoveredImages.length)
+        session.recoveredDrafts.length)
     )
       return '草稿';
     return '';
@@ -580,7 +604,7 @@ export class Workspace {
     session.task = { ...session.task, state: 'cancelled', position: 0 };
     session.initialPending = null;
     const input = session.taskInput;
-    if (input) session.recoveredImages.push(input);
+    if (input) session.recoveredDrafts.push(input);
     session.taskInput = null;
     if (
       !session.snapshot.sessionFile &&
@@ -615,7 +639,7 @@ export class Workspace {
             ) {
               // 启动前失败才需要找回未发送输入；响应失败（含重试耗尽）仅展示错误。
               if (session.taskInput)
-                session.recoveredImages.push(session.taskInput);
+                session.recoveredDrafts.push(session.taskInput);
               session.runtimeId = '';
               session.connection = 'disconnected';
               session.newChatProject = session.project;
@@ -629,7 +653,7 @@ export class Workspace {
               session.runtimeId.startsWith('reserved-')
             ) {
               if (session.taskInput)
-                session.recoveredImages.push(session.taskInput);
+                session.recoveredDrafts.push(session.taskInput);
               session.runtimeId = '';
               session.connection = 'disconnected';
               session.newChatProject = session.project;
@@ -698,51 +722,52 @@ export class Workspace {
       this.polling = false;
     }
   }
-  /** 单键替换使文字恢复记录原子更新；图片与正文缓存不写入持久存储。 */
+  /** 单键替换保存草稿和中断快照；图片正文始终不写入 localStorage。 */
   persist(): void {
     if (this.exiting) return;
     const drafts = this.sessions.flatMap((session) => {
-      const pending =
-        session.task && ['queued', 'running'].includes(session.task.state)
-          ? session.taskInput
-          : null;
-      const text = session.draft;
       const interrupted =
         !!session.task && ['queued', 'running'].includes(session.task.state);
+      const pending = interrupted ? session.taskInput : null;
+      const current = session.draftSnapshot();
       const recovered = [
-        ...session.recovered,
-        ...session.recoveredImages.map((item) => item.text),
-      ].join('\n\n');
-      const pendingText = pending?.text || recovered;
-      return text ||
-        pendingText ||
-        interrupted ||
-        session.images.length ||
-        pending?.images.length
-        ? [
-            {
-              project: session.newChatProject ?? session.project,
-              path: session.snapshot.sessionFile,
-              desktopId: session.desktopId,
-              createdAt: session.createdAt,
-              lastSentAt: session.lastSentAt,
-              preview: session.sidebarPreview,
-              text,
-              parts: session.draftParts,
-              pendingText,
-              interrupted,
-              images: !!(session.images.length || pending?.images.length),
-            },
-          ]
-        : [];
+        ...(pending ? [pending] : []),
+        ...session.recoveredDrafts,
+        ...session.recovered.map((text) => snapshotDraft(text, [], [])),
+      ];
+      const images = [current, ...recovered].some((draft) =>
+        draft.attachments.some((item) => item.kind === 'image'),
+      );
+      if (
+        !current.text &&
+        !current.attachments.length &&
+        !recovered.length &&
+        !interrupted
+      )
+        return [];
+      return [
+        {
+          project: session.newChatProject ?? session.project,
+          path: session.snapshot.sessionFile,
+          desktopId: session.desktopId,
+          createdAt: session.createdAt,
+          lastSentAt: session.lastSentAt,
+          preview: session.sidebarPreview,
+          text: current.text,
+          snapshot: persistentDraft(current),
+          pendingDrafts: recovered.map(persistentDraft),
+          interrupted,
+          images,
+        },
+      ];
     });
-    const value = JSON.stringify({ version: 1, drafts });
+    const value = JSON.stringify({ version: 2, drafts });
     if (value === this.lastRecovery) return;
     try {
       localStorage.setItem('pi-desktop-workspace-v1', value);
       this.lastRecovery = value;
     } catch {
-      this.error = '文字草稿未能保存到本机，请在退出前复制重要输入。';
+      this.error = '草稿未能保存到本机，请在退出前复制重要输入。';
     }
   }
   async requestExit(): Promise<void> {

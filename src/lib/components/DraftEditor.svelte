@@ -2,9 +2,11 @@
 <script lang="ts">
   import Icon from './Icon.svelte';
   import { tick, untrack } from 'svelte';
+  import { caretPoint, textareaPoint, textDrag } from '../text-drag';
   import {
     draftText,
     foldable,
+    moveParts,
     normalizeParts,
     replaceParts,
     restoreParts,
@@ -46,7 +48,7 @@
   let iconTemplate: HTMLSpanElement;
   let rich = $state(false);
   let notice = $state('');
-  let composing = false;
+  let composing = $state(false);
   let current: DraftPart[] = [];
   let initialized = false;
   let synced = '';
@@ -166,6 +168,38 @@
     range.setEnd(...point(end));
     window.getSelection()?.removeAllRanges();
     window.getSelection()?.addRange(range);
+  }
+  function dragPoint(x: number, y: number): number | undefined {
+    if (!rich) return textareaPoint(plain, x, y);
+    const point = caretPoint(x, y);
+    if (!point || !root?.contains(point.node)) return;
+    // 原子卡片只能落在前后边界，不能把标题 DOM 的位置当作全文偏移。
+    const element =
+      point.node instanceof HTMLElement ? point.node : point.node.parentElement;
+    const card = element?.closest<HTMLElement>('[data-paste-id]');
+    if (card) {
+      const rect = card.getBoundingClientRect();
+      const index = Array.from(root.childNodes).indexOf(card);
+      return offset(root, index + (x >= rect.left + rect.width / 2 ? 1 : 0));
+    }
+    return offset(point.node, point.offset);
+  }
+  function dragMove(
+    selected: { start: number; end: number },
+    target: number,
+    copy: boolean,
+  ): void {
+    if (!copy && target >= selected.start && target <= selected.end) return;
+    record();
+    const moved = moveParts(
+      current,
+      selected.start,
+      selected.end,
+      target,
+      copy,
+    );
+    void apply(moved.parts, moved.start, moved.end);
+    notice = copy ? '已复制选中文字' : '已移动选中文字';
   }
   function preview(text: string): string {
     return (
@@ -442,6 +476,15 @@
 {#if rich}
   <div
     bind:this={root}
+    use:textDrag={{
+      enabled: !disabled && !composing,
+      context,
+      value,
+      selection,
+      select: setSelectionRange,
+      point: dragPoint,
+      move: dragMove,
+    }}
     class="draft-editor"
     data-composer-input
     contenteditable={!disabled}
@@ -486,6 +529,15 @@
 {:else}
   <textarea
     bind:this={plain}
+    use:textDrag={{
+      enabled: !disabled && !composing,
+      context,
+      value,
+      selection,
+      select: setSelectionRange,
+      point: dragPoint,
+      move: dragMove,
+    }}
     data-composer-input
     {value}
     rows="1"

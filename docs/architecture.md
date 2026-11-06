@@ -12,6 +12,12 @@ App.svelte / components
 
 `history.rs` 只读 Pi 历史，`settings.rs` 原子保存应用偏好，`diagnostics.rs` 写结构化诊断。Rust DTO 与 `src/lib/types.ts` 成对维护。新增业务应扩展 `Action` 与明确的类型，不暴露任意 RPC、文件访问或 shell 接口。
 
+附件以有序 `DraftAttachment[]` 为唯一输入状态，图片实例 ID 与内容摘要分开；`DraftSnapshot` 保存正文、原有长文本片段及附件。`attachments.ts` 集中组装 prompt：路径引用追加为逐行 JSON 字符串，图片继续走原有 images 字段，textParts 保持对完整正文的范围覆盖。首条提交、steer/followUp 和恢复共用快照；恢复持久化 v2 兼容 v1，只保存路径项和图片遗漏标记，不保存 Base64。
+
+已发送文件引用通过 `files` 展示范围关联原始正文，宿主验证范围和路径列表一致，并以消息摘要绑定的展示侧录保存；不改变 Pi 协议或历史文件。无元数据的旧用户消息仅在完整正文末尾严格匹配引用格式时投影为卡片；不确定时保留原文。
+
+`file_import.rs` 统一原生选择及文件拖入分类。`pick_files` 从系统选择器获取路径；`read_dropped_files` 只消费当前窗口的原生 Drop 票据，不接收任意路径。每窗口一个待消费票据、60 秒有效、消费或窗口销毁后清理；先消费再进入串行读取锁，前端按接收顺序归并并再次校验累计图片预算。阻塞选择与磁盘工作在 blocking 池执行，图片限长读取并校验签名，普通引用只查询元数据。`file-drop.ts` 共享窗口监听、按可见输入框和物理坐标路由，取消与卸载清理迟到监听。Windows 原生文件拖放启用后，侧栏排序和编辑器内部选区拖动使用 Pointer Events，不依赖 HTML5 DragEvent。`text-drag.ts` 统一捕获、取消和清理，textarea 通过临时透明镜像映射光标；`moveParts` 按 UTF-16 偏移移动或复制片段，保留原子卡片和原有撤销事务。
+
 模型配置通过独立 get_model_config/save_model_config/discover_models 业务接口进入 model_config.rs/model_discovery.rs，不扩充普通 Settings 的凭据字段。共享仓库仅向前端投影白名单字段，未知模型参数及认证请求头在宿主合并保留。文件版本使用 SHA-256，保存前获取与 Pi proper-lockfile 相同的 .lock 目录并校验版本；不持锁执行网络请求。单文件用同目录 tempfile 原子替换，多文件失败尝试恢复，无法保证进程被强杀时的多文件事务性。auth.json 保留既有权限，新建凭据文件使用私有临时文件权限，Windows 继承目录 ACL，仍需 Windows 实机权限验收。配置文件目前要求标准 JSON（兼容 BOM），含注释的 models.json 会拒绝编辑且保留原文。
 
 模型发现使用 reqwest + rustls，不依赖系统 shell 或 WebView CORS。限定三种协议的 GET /models，禁止重定向，限制超时、响应大小、分页数和模型数量。错误不包含远端正文、URL 参数或密钥；UI 取消等待以请求代次隔离，网络 Future 在宿主超时后释放。配置应用通过 refresh_models Action 复用现有 pi-desktop-models-v1 桥接，前端集中管理 pending/applying/status；默认启动设置明确提示重新连接读取。

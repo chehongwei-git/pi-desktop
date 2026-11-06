@@ -235,6 +235,10 @@ TAURI_BUNDLER_TOOLS_GITHUB_MIRROR=https://v4.gh-proxy.org/https://github.com npm
 - 最终版本在 macOS：`CI=true npm run test:browser` 82 项通过；`npm test` 297 项通过；启动脚本 3 项通过；类型检查、生产构建、Rust fmt/Clippy 通过，Rust 测试 54 项通过、1 项原有环境依赖测试忽略。修改文件 Prettier 与 diff 检查通过。
 - 状态：待 Windows/Linux CI 和原生打包验证，不宣称远端问题全部解决。
 
+## 文件与图片附件
+
+文件选择和原生拖放统一为图片输入或绝对路径引用，配套行内卡片、草稿恢复及 Windows 内部拖动兼容。当前修改的检查结果、截图检查、失败排查和原生待验范围见 [文件与图片附件验证记录](file-attachments-validation.md)。
+
 ## 尚待验收与已知限制
 
 - Pi 1.4.0 的真实模型发送、真实 CLI 历史恢复、工具和扩展交互仍需使用者实机验收；模拟协议不等同于完整用户环境。

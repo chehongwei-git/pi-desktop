@@ -63,3 +63,31 @@ export function replaceParts(
   }
   return normalizeParts([...before, ...inserted, ...after]);
 }
+
+/** 拖动仍使用全文偏移；完整卡片保持边界，复制则分配新实例，撤销由编辑器统一记录。 */
+export function moveParts(
+  parts: DraftPart[],
+  start: number,
+  end: number,
+  target: number,
+  copy = false,
+): { parts: DraftPart[]; start: number; end: number } {
+  if (!copy && target >= start && target <= end) return { parts, start, end };
+  let selected = replaceParts(
+    replaceParts(parts, end, draftText(parts).length, []),
+    0,
+    start,
+    [],
+  );
+  if (copy)
+    selected = selected.map((part) =>
+      part.kind === 'paste' ? { ...part, id: crypto.randomUUID() } : part,
+    );
+  const at = !copy && target > end ? target - (end - start) : target;
+  const rest = copy ? parts : replaceParts(parts, start, end, []);
+  return {
+    parts: replaceParts(rest, at, at, selected),
+    start: at,
+    end: at + end - start,
+  };
+}

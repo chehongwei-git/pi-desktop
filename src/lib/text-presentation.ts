@@ -1,14 +1,28 @@
 /** 发送快照只描述范围；原文始终由 prompt 和宿主正文引用负责传递。 */
 import { draftText, normalizeParts, type DraftPart } from './draft-parts';
-import type { ContentPage, Message, MessageTextPart, TextRange } from './types';
+import type {
+  ContentPage,
+  Message,
+  MessageFileReference,
+  MessageTextPart,
+  TextRange,
+} from './types';
 export function textRanges(
   parts: DraftPart[],
   text: string,
+  files: MessageFileReference[] = [],
+  fileStart = text.length,
 ): TextRange[] | undefined {
-  if (!parts.some((p) => p.kind === 'paste') || draftText(parts) !== text)
+  if (
+    (!files.length && !parts.some((p) => p.kind === 'paste')) ||
+    draftText(parts) !== text
+  )
     return;
   let offset = 0;
-  return normalizeParts(parts).map((part, index) => {
+  const source = files.length
+    ? restorePresentationParts(parts, fileStart)
+    : normalizeParts(parts);
+  const ranges: TextRange[] = source.map((part, index) => {
     const start = offset;
     offset += part.text.length;
     return {
@@ -18,15 +32,42 @@ export function textRanges(
       end: offset,
     };
   });
+  if (files.length)
+    ranges.push({
+      kind: 'files',
+      id: 'file-references',
+      start: fileStart,
+      end: text.length,
+      files,
+    });
+  return ranges;
+}
+/** 文件区块从正文边界独立切分，保留此前长粘贴片段的原子边界。 */
+function restorePresentationParts(
+  parts: DraftPart[],
+  end: number,
+): DraftPart[] {
+  let remaining = end;
+  const result: DraftPart[] = [];
+  for (const part of parts) {
+    if (remaining <= 0) break;
+    const text = part.text.slice(0, remaining);
+    if (text) result.push({ ...part, text });
+    remaining -= text.length;
+  }
+  return normalizeParts(result);
 }
 export function localTextParts(
   parts: DraftPart[],
   text: string,
+  files: MessageFileReference[] = [],
+  fileStart = text.length,
 ): MessageTextPart[] | undefined {
-  return textRanges(parts, text)?.map((range) => {
+  return textRanges(parts, text, files, fileStart)?.map((range) => {
     const body = text.slice(range.start, range.end);
     return {
       kind: range.kind,
+      files: range.files,
       id: range.id,
       text: body,
       chars: Array.from(body).length,

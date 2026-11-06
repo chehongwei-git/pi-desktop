@@ -1507,9 +1507,12 @@ test('projects support drag and keyboard reordering and retain order after reloa
   const tree = page.getByRole('region', { name: '工作项目', exact: true });
   const alpha = tree.getByRole('button', { name: 'alpha 1', exact: true });
   const beta = tree.getByRole('button', { name: 'beta 1', exact: true });
-  await expect(alpha).toHaveAttribute('draggable', 'true');
+  await expect(alpha).not.toHaveAttribute('draggable', 'true');
   const original = await tree.locator('.project-name').allTextContents();
-  await beta.dragTo(alpha, { targetPosition: { x: 40, y: 4 } });
+  await beta.hover();
+  await page.mouse.down();
+  await alpha.hover({ position: { x: 40, y: 4 } });
+  await page.mouse.up();
   await expect
     .poll(() => tree.locator('.project-name').allTextContents())
     .toEqual(['mock', 'beta', 'alpha']);

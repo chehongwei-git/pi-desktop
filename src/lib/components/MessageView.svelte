@@ -6,6 +6,7 @@
   import ToolMessage from './ToolMessage.svelte';
   import MessageImage from './MessageImage.svelte';
   import UserText from './UserText.svelte';
+  import MessageFiles from './MessageFiles.svelte';
   import { foldable } from '../draft-parts';
   import { fullText } from '../text-presentation';
   import type { ContentPage, Message, MessageTextPart } from '../types';
@@ -44,9 +45,16 @@
   let copied = $state(false);
   let copyTimer: ReturnType<typeof setTimeout>;
   let copying = $state(false);
+  let hasFiles = $derived(
+    message.role === 'user' &&
+      !!message.textParts?.some(
+        (part) => part.kind === 'files' && part.files?.length,
+      ),
+  );
+  let raw = $derived(!!toolViews[message.id]?.['files:raw']);
   let longUser = $derived(
     message.role === 'user' &&
-      (!!message.textParts?.length ||
+      (!!message.textParts?.some((part) => part.kind === 'paste') ||
         !!message.truncated ||
         foldable(message.text)),
   );
@@ -156,7 +164,90 @@
     {#if message.role === 'compactionSummary'}<div class="summary-label">
         上下文已压缩
       </div>{/if}
-    {#if longUser}
+    {#if hasFiles && !raw}
+      <div class="user-message-parts">
+        {#each message.textParts ?? [] as part (part.id)}
+          {#if part.kind === 'files' && part.files}
+            <MessageFiles
+              files={part.files}
+              views={toolViews[message.id] ?? {}}
+              toggle={(key) => ontoggletool(message.id, key)}
+              {onlayout}
+            />
+          {:else if part.kind === 'paste'}
+            <button
+              type="button"
+              class="message-text-card"
+              class:selected={selectedPart === part.id}
+              aria-label={`查看粘贴文本：${
+                part.text
+                  .trim()
+                  .split(/\r\n|\r|\n/)[0]
+                  ?.slice(0, 100) || '空文本'
+              }，${part.chars.toLocaleString()} 字`}
+              aria-expanded={selectedPart === part.id}
+              onclick={(event) => ontext?.(message, part, event.currentTarget)}
+              ><Icon name="copy" size={16} /><span class="message-card-content"
+                ><span class="message-card-title"
+                  >{Array.from(
+                    part.text.trim().split(/\r\n|\r|\n/)[0] || '空文本',
+                  )
+                    .slice(0, 100)
+                    .join('')}</span
+                ><span class="message-card-meta"
+                  >粘贴文本 · {part.chars.toLocaleString()} 字</span
+                ></span
+              ><span aria-hidden="true">›</span></button
+            >
+          {:else if part.text || part.truncated}
+            {#if !part.truncated && !foldable(part.text) && !message.textParts?.some((p) => p.kind === 'paste')}
+              <div
+                class="markdown"
+                onclick={click}
+                onkeydown={() => {}}
+                role="presentation"
+              >
+                {@html markdown(part.text)}
+              </div>
+            {:else}
+              <UserText
+                source={part}
+                {read}
+                {onlayout}
+                expanded={toolViews[message.id]?.[`text:${part.id}`] ?? false}
+                ontoggle={() => ontoggletool(message.id, `text:${part.id}`)}
+              />
+            {/if}
+          {/if}
+        {/each}
+      </div>
+      <button
+        type="button"
+        class="text-button"
+        onclick={(event) =>
+          onlayout(
+            () => ontoggletool(message.id, 'files:raw'),
+            event.currentTarget,
+          )}>查看原文</button
+      >
+    {:else if hasFiles && raw}
+      <UserText
+        source={message}
+        {read}
+        {onlayout}
+        expanded={true}
+        ontoggle={() => {}}
+      />
+      <button
+        type="button"
+        class="text-button"
+        onclick={(event) =>
+          onlayout(
+            () => ontoggletool(message.id, 'files:raw'),
+            event.currentTarget,
+          )}>返回卡片</button
+      >
+    {:else if longUser}
       <div class="user-message-parts">
         {#if message.textParts?.length}
           {#each message.textParts as part (part.id)}

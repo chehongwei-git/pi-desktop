@@ -104,12 +104,12 @@ describe('image messages', () => {
     await desktop.send();
     vi.spyOn(desktop, 'syncState').mockResolvedValue();
     await desktop.stop();
-    expect(desktop.recoveredImages).toHaveLength(1);
+    expect(desktop.recoveredDrafts).toHaveLength(1);
     desktop.draft = '正在编辑';
-    desktop.restoreImages(0);
+    desktop.restoreDraft(0);
     expect(desktop.images).toEqual([image]);
     expect(desktop.draft).toBe('');
-    expect(desktop.recoveredImages[0].text).toBe('正在编辑');
+    expect(desktop.recoveredDrafts[0].text).toBe('正在编辑');
     expect(
       action.mock.calls.filter(([, command]) => command.type === 'prompt'),
     ).toHaveLength(1);
