@@ -22,8 +22,9 @@ jobs:
             artifact: src-tauri/target/release/bundle/deb/*.deb
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      # Action 自身使用 Node.js 24；自托管 runner 至少需要 2.327.1。
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: 24
           cache: npm
@@ -55,13 +56,13 @@ jobs:
         if: runner.os == 'macOS'
         working-directory: src-tauri/target/release/bundle/macos
         run: tar -czf "Pi-Desktop-macOS-${{ runner.arch }}.app.tar.gz" "Pi Desktop.app"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: pi-desktop-${{ matrix.os }}-unsigned
           path: ${{ matrix.artifact }}
           if-no-files-found: error
       # 截图与安装包分开，避免截图掩盖安装包缺失，也保留失败现场。
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         if: always()
         with:
           name: screenshots-${{ matrix.os }}
