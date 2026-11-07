@@ -1,6 +1,8 @@
 <!-- 消息项可被虚拟列表频繁挂载；异步高亮与正文读取必须随组件销毁取消 DOM 更新。 -->
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, tick } from 'svelte';
+  import MessageEditView from './MessageEdit.svelte';
+  import type { MessageEdit } from '../message-edit';
   import { openUrl } from '@tauri-apps/plugin-opener';
   import { markdown, highlight, safeExternal } from '../markdown';
   import ToolMessage from './ToolMessage.svelte';
@@ -14,6 +16,12 @@
   /** onfull 打开分块正文，onload 只读取有界预览；不向组件暴露本地路径。 */
   let {
     message,
+    edit,
+    editUnavailable = '',
+    editLocked = false,
+    onedit,
+    oncancelEdit,
+    onresend,
     onfull,
     onload,
     onerror,
@@ -26,6 +34,12 @@
     onlayout = (change) => change(),
   }: {
     message: Message;
+    edit?: MessageEdit | null;
+    editUnavailable?: string;
+    editLocked?: boolean;
+    onedit?: (message: Message) => void;
+    oncancelEdit?: () => void;
+    onresend?: () => void;
     ontext?: (
       message: Message,
       part: MessageTextPart,
@@ -41,6 +55,11 @@
     ontoggletool: (id: string, section: string) => void;
     read: (id: string, offset: number) => Promise<ContentPage>;
   } = $props();
+  let editTrigger = $state<HTMLButtonElement>();
+  function cancelEdit(): void {
+    onlayout(() => oncancelEdit?.());
+    void tick().then(() => editTrigger?.focus({ preventScroll: true }));
+  }
   let body = $state<HTMLDivElement>();
   let copied = $state(false);
   let copyTimer: ReturnType<typeof setTimeout>;
@@ -145,6 +164,20 @@
       {read}
       {onchange}
     />
+  {:else if edit?.message.id === message.id}
+    {#if edit.loading || (edit.error && !edit.draft.text && !edit.draft.attachments.length)}
+      <div class="inline-edit-loading" role={edit.error ? 'alert' : 'status'}>
+        {edit.error || '正在读取原消息…'}
+        <button class="text-button" onclick={cancelEdit}>取消</button>
+      </div>
+    {:else}
+      <MessageEditView
+        {edit}
+        unavailable={editUnavailable}
+        onsend={() => onresend?.()}
+        oncancel={cancelEdit}
+      />
+    {/if}
   {:else}
     {#if message.delivery}<div class="delivery-status" role="status">
         {message.delivery.mode === 'steer' ? '引导消息' : '后续消息'} · {message
@@ -316,7 +349,7 @@
         >回答未完成，请检查连接或模型配置。</small
       >{/if}
     <!-- 工具调用旁可能有仅含空白的助手消息，不为其显示无内容可复制的操作栏。 -->
-    {#if message.status !== 'streaming' && message.text.trim()}<div
+    {#if message.status !== 'streaming' && (message.text.trim() || message.images?.length)}<div
         class="message-actions"
       >
         <button
@@ -325,7 +358,16 @@
           disabled={copying}
           onclick={() => void copyMessage()}
           ><Icon name={copied ? 'check' : 'copy'} size={15} /></button
-        >{#if !longUser && message.contentRef && message.truncated}<button
+        >{#if message.role === 'user' && !message.delivery && !message.id.startsWith('accepted-') && onedit}<button
+            bind:this={editTrigger}
+            type="button"
+            class="icon-button"
+            title="编辑并重发"
+            aria-label="编辑并重发"
+            disabled={editLocked}
+            onclick={() => onlayout(() => onedit?.(message))}
+            ><Icon name="edit" size={15} /></button
+          >{/if}{#if !longUser && message.contentRef && message.truncated}<button
             class="text-button"
             onclick={() => onfull(message)}>查看完整正文</button
           >{/if}

@@ -18,6 +18,11 @@ import {
   type ProviderConfig,
 } from '../model-config';
 import { terminalText } from '../terminal-text';
+import {
+  editEntryId,
+  restoreMessageDraft,
+  type MessageEdit,
+} from '../message-edit';
 import { completedPlan, planSteps } from '../plan-steps';
 import { SessionContent } from './session-content';
 import { reduceEvents } from './reducer';
@@ -683,6 +688,164 @@ export class Desktop {
       this.attachments = attachments;
       this.draftParts = parts;
     } else this.restoreAttachmentDraft();
+  }
+  /** 编辑快照归属会话实例，切换视图不覆盖底部草稿。 */
+  messageEdit = $state<MessageEdit | null>(null);
+  async editMessage(message: Message): Promise<void> {
+    if (
+      this.messageEdit ||
+      this.submitting ||
+      message.role !== 'user' ||
+      message.delivery ||
+      message.id.startsWith('accepted-')
+    )
+      return;
+    const edit: MessageEdit = {
+      message,
+      draft: { text: '', parts: [], attachments: [] },
+      session: this.snapshot.sessionFile,
+      loading: true,
+      busy: false,
+      error: '',
+    };
+    this.messageEdit = edit;
+    const current = () =>
+      this.messageEdit?.message.id === message.id &&
+      this.snapshot.sessionFile === edit.session;
+    try {
+      const draft = await restoreMessageDraft(
+        message,
+        (id, offset) => this.readContent(id, offset),
+        current,
+      );
+      if (current()) this.messageEdit!.draft = draft;
+    } catch (cause) {
+      if (current()) this.messageEdit!.error = errorMessage(cause);
+    } finally {
+      if (current()) this.messageEdit!.loading = false;
+    }
+  }
+  /** 分支与发送分阶段记录；已建分支的重试绝不再次 fork，未知结果禁止盲重发。 */
+  async resendMessage(): Promise<void> {
+    const edit = this.messageEdit;
+    if (!edit || edit.busy || edit.loading || edit.uncertain) return;
+    if (
+      this.run !== 'idle' ||
+      this.submitting ||
+      this.restoring ||
+      this.task?.state === 'queued'
+    ) {
+      edit.error = '请等待当前任务结束后发送。';
+      return;
+    }
+    edit.error = '';
+    edit.busy = true;
+    this.submitting = true;
+    let mutating = false;
+    const runtime = this.runtimeId;
+    try {
+      if (this.connection !== 'ready')
+        throw new Error('请先重新连接 Pi，再发送。');
+      if (this.snapshot.sessionFile !== (edit.branch ?? edit.session))
+        throw new Error('会话已切换，请取消后重新编辑。');
+      const { text, parts, images, files, fileStart } = composePrompt(
+        edit.draft,
+      );
+      if (!text.trim() && !images.length)
+        throw new Error('请输入消息或保留附件。');
+      if (text.trimStart().startsWith('/'))
+        throw new Error('编辑重发不执行斜杠命令，请使用底部输入框。');
+      await this.applyPendingSelection();
+      const model = this.snapshot.model;
+      const thinking = this.snapshot.thinkingLevel;
+      if (
+        images.length &&
+        this.snapshot.model?.input &&
+        !this.snapshot.model.input.includes('image')
+      )
+        throw new Error('当前模型不支持图片输入，请切换模型。');
+      if (!edit.branch) {
+        const tree = await this.action<{
+          nodes: { id: string; parentId: string | null; label: string }[];
+          leafId: string | null;
+        }>({ type: 'session_tree' });
+        const entryId = editEntryId(
+          edit.message,
+          this.messages,
+          tree.nodes,
+          tree.leafId,
+        );
+        mutating = true;
+        const result = await this.action<{ cancelled?: boolean }>({
+          type: 'fork',
+          entryId,
+        });
+        if (result.cancelled) {
+          mutating = false;
+          throw new Error('编辑重发已被 Pi 扩展取消。');
+        }
+        await this.syncState();
+        edit.branch = this.snapshot.sessionFile;
+        if (!edit.branch || edit.branch === edit.session)
+          throw new Error('无法确认新分支，请检查会话状态。');
+        mutating = false;
+        this.navigation?.changed();
+      }
+      // fork 重建 Pi 运行时可能恢复历史模型；本次主动发送沿用界面确认的选择。
+      if (
+        model &&
+        (this.snapshot.model?.id !== model.id ||
+          this.snapshot.model?.provider !== model.provider ||
+          this.snapshot.thinkingLevel !== thinking)
+      ) {
+        await this.action({
+          type: 'set_model',
+          provider: model.provider,
+          model: model.id,
+          thinking,
+        });
+      }
+      mutating = true;
+      await this.action({
+        type: 'prompt',
+        message: text,
+        textParts: textRanges(parts, text, files, fileStart),
+        ...(images.length
+          ? {
+              images: images.map((image) => ({
+                type: 'image' as const,
+                data: image.data!,
+                mimeType: image.mimeType,
+              })),
+            }
+          : {}),
+      });
+      mutating = false;
+      // 接受后才替换旧展示；刷新失败也不能把同一消息再发一次。
+      this.messageEdit = null;
+      this.sentMessageRevision++;
+      this.lastSentAt = new Date().toISOString();
+      await this.refreshCommandSession(false);
+      this.navigation?.changed();
+    } catch (cause) {
+      if (this.messageEdit === edit) {
+        edit.error = errorMessage(cause);
+        const rejected =
+          typeof cause === 'object' &&
+          cause !== null &&
+          'code' in cause &&
+          cause.code === 'PI_COMMAND';
+        if (mutating && !rejected) {
+          edit.uncertain = true;
+          edit.error += ' 操作可能已执行，请检查会话后再操作，不要重复发送。';
+        }
+      } else this.error = errorMessage(cause);
+    } finally {
+      edit.busy = false;
+      this.submitting = false;
+      if (runtime !== this.runtimeId && this.messageEdit === edit)
+        edit.uncertain = true;
+    }
   }
   notice = $state('');
   modelConfigPending = $state(false);
@@ -1749,6 +1912,8 @@ export class Desktop {
   }
   /** 发送接受前保留原草稿，超时绝不自动重发；用户消息由 Pi 权威事件插入。 */
   async send(mode?: 'steer' | 'followUp'): Promise<void> {
+    if (this.messageEdit)
+      throw new Error('正在编辑历史消息，请先发送或取消编辑。');
     if (
       this.navigation &&
       this.newChatProject !== null &&
@@ -1994,7 +2159,7 @@ export class Desktop {
     }
   }
   /** 分支与压缩改变 Pi 的历史，先使宿主投影失效，再按权威历史恢复。 */
-  async refreshCommandSession(): Promise<void> {
+  async refreshCommandSession(applyProjectModel = true): Promise<void> {
     await this.drain();
     this.toolViews = {};
     this.accessed.clear();
@@ -2007,7 +2172,7 @@ export class Desktop {
       this.refreshSessions(),
       this.refreshStats(),
     ]);
-    await this.applyProjectModel();
+    if (applyProjectModel) await this.applyProjectModel();
   }
   /** 计划命令直接走 RPC，保留当前草稿和图片；只接受空闲状态下的显式操作。 */
   async planAction(action: 'continue' | 'stop'): Promise<void> {

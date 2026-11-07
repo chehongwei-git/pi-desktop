@@ -1276,6 +1276,22 @@
               {#if session.transcriptMessages.length}
                 <Transcript
                   messages={session.transcriptMessages}
+                  edit={session.messageEdit}
+                  editUnavailable={session.run !== 'idle' ||
+                  session.task?.state === 'queued'
+                    ? '请等待当前任务结束后发送。'
+                    : session.restoring || session.connection !== 'ready'
+                      ? '请先连接 Pi，编辑内容会保留。'
+                      : ''}
+                  onedit={(message) => {
+                    void session.editMessage(message);
+                  }}
+                  oncancelEdit={() => {
+                    session.messageEdit = null;
+                  }}
+                  onresend={() => {
+                    void session.resendMessage();
+                  }}
                   registerChange={(open) => {
                     if (open) changeOpeners.set(session, open);
                     else changeOpeners.delete(session);

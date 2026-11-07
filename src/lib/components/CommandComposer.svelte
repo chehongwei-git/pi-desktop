@@ -98,6 +98,7 @@
       : undefined,
   );
   function open(name: string): boolean {
+    if (desktop.messageEdit) return true;
     if (
       !['settings', 'model', 'thinking', 'resume', 'fork', 'tree'].includes(
         name,
@@ -347,7 +348,8 @@
     (!desktop.historyCached &&
       ['starting', 'stopping'].includes(desktop.connection))}
   running={desktop.run !== 'idle'}
-  submitting={desktop.submitting ||
+  submitting={!!desktop.messageEdit ||
+    desktop.submitting ||
     desktop.waitingToSend ||
     modelChanging ||
     busy ||
@@ -387,7 +389,11 @@
     <ModelControls
       {desktop}
       bind:busy={modelChanging}
-      disabled={busy || loading || page !== null || desktop.restoring}
+      disabled={busy ||
+        loading ||
+        page !== null ||
+        desktop.restoring ||
+        !!desktop.messageEdit}
     />
   {/snippet}
 </Composer>

@@ -3,6 +3,7 @@
   import { getContext, onMount, tick } from 'svelte';
   import { reviewKey, type ReviewLayoutState } from '../review-layout.svelte';
   import MessageView from './MessageView.svelte';
+  import type { MessageEdit } from '../message-edit';
   import ProcessGroup from './ProcessGroup.svelte';
   import ConversationActivity from './ConversationActivity.svelte';
   import type { ConversationActivity as Activity } from '../conversation-activity';
@@ -14,6 +15,11 @@
   import type { ContentPage, Message, MessageTextPart } from '../types';
   let {
     messages,
+    edit,
+    editUnavailable,
+    onedit,
+    oncancelEdit,
+    onresend,
     registerChange,
     active = true,
     scrollState = { top: 0, follow: true },
@@ -32,6 +38,11 @@
     read,
   }: {
     messages: Message[];
+    edit?: MessageEdit | null;
+    editUnavailable?: string;
+    onedit?: (message: Message) => void;
+    oncancelEdit?: () => void;
+    onresend?: () => void;
     /** 输入区文件列表复用本视图详情区域；卸载后撤销入口，避免悬挂回调。 */
     registerChange?: (
       open:
@@ -412,6 +423,12 @@
           {:else}
             <MessageView
               {message}
+              {edit}
+              {editUnavailable}
+              editLocked={!!edit}
+              {onedit}
+              {oncancelEdit}
+              {onresend}
               selectedPart={textTarget?.messageId === message.id
                 ? textTarget.partId
                 : undefined}
