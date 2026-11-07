@@ -4,7 +4,6 @@
   let { name, size = 20 }: { name: string; size?: number } = $props();
   const paths: Record<string, string> = {
     edit: 'm16 3 5 5M4 20l4-1L21 6a2.1 2.1 0 0 0-3-3L5 16l-1 4Z',
-    bookmark: 'M6 3h12v18l-6-4-6 4V3Z',
     panel:
       'M9 3v18M4 3h16a1 1 0 0 1 1 1v16a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1Z',
     attachment:

@@ -4,7 +4,6 @@
   import { reviewKey, type ReviewLayoutState } from '../review-layout.svelte';
   import MessageView from './MessageView.svelte';
   import type { MessageEdit } from '../message-edit';
-  import MessageNavigator from './MessageNavigator.svelte';
   import ProcessGroup from './ProcessGroup.svelte';
   import ConversationActivity from './ConversationActivity.svelte';
   import type { ConversationActivity as Activity } from '../conversation-activity';
@@ -13,12 +12,7 @@
   import TextPanel from './TextPanel.svelte';
   import ChangePanel from './ChangePanel.svelte';
   import Icon from './Icon.svelte';
-  import type {
-    ContentPage,
-    HistoryPage,
-    Message,
-    MessageTextPart,
-  } from '../types';
+  import type { ContentPage, Message, MessageTextPart } from '../types';
   let {
     messages,
     edit,
@@ -27,7 +21,6 @@
     oncancelEdit,
     onresend,
     registerChange,
-    onhistory,
     active = true,
     scrollState = { top: 0, follow: true },
     activity = null,
@@ -50,8 +43,6 @@
     onedit?: (message: Message) => void;
     oncancelEdit?: () => void;
     onresend?: () => void;
-    /** 独立读取用户消息目录，不向正文插入历史。 */
-    onhistory?: (before?: number) => Promise<HistoryPage>;
     /** 输入区文件列表复用本视图详情区域；卸载后撤销入口，避免悬挂回调。 */
     registerChange?: (
       open:
@@ -103,72 +94,6 @@
   let sentinel: HTMLDivElement;
   let follow = $state(true);
   let atBottom = $state(true);
-  let currentUserId = $state('');
-  let highlightedId = $state('');
-  let highlightTimer: ReturnType<typeof setTimeout>;
-  let navigationRevision = 0;
-  let navigating = false;
-  let navigationFrame = 0;
-  /** 每帧最多扫描一次用户节点；目录不因流式增量重复计算几何位置。 */
-  function trackUser(): void {
-    cancelAnimationFrame(navigationFrame);
-    navigationFrame = requestAnimationFrame(() => {
-      if (!alive || !active) return;
-      const top = viewport.getBoundingClientRect().top + 24;
-      let id = '';
-      for (const node of content.querySelectorAll<HTMLElement>(
-        '[data-user-message]',
-      )) {
-        if (!id || node.getBoundingClientRect().top <= top)
-          id = node.dataset.messageId ?? '';
-        else break;
-      }
-      currentUserId = id;
-    });
-  }
-  function cancelNavigation(): void {
-    navigationRevision++;
-    navigating = false;
-  }
-  /** 正文仍使用原串行分页和提交时锚点；取消后不继续补页或抢夺焦点。 */
-  async function locateMessage(id: string): Promise<void> {
-    const request = ++navigationRevision;
-    navigating = true;
-    pauseFollow();
-    scrollState.follow = false;
-    try {
-      while (!messages.some((message) => message.id === id)) {
-        if (!alive || !active || request !== navigationRevision) return;
-        if (pending || loading) throw new Error('历史正在加载，请稍后重新定位');
-        if (!hasMore) throw new Error('未找到目标消息，请重新加载目录');
-        await older();
-        if (error) throw new Error(error);
-      }
-      await tick();
-      if (!alive || !active || request !== navigationRevision) return;
-      const node = [
-        ...content.querySelectorAll<HTMLElement>('[data-message-id]'),
-      ].find((item) => item.dataset.messageId === id);
-      if (!node) throw new Error('目标消息暂不可见，请重试');
-      viewport.scrollTop +=
-        (node.getBoundingClientRect().top -
-          viewport.getBoundingClientRect().top -
-          24) /
-        (viewport.getBoundingClientRect().height / viewport.offsetHeight || 1);
-      lastScrollTop = viewport.scrollTop;
-      scrollState.top = viewport.scrollTop;
-      highlightedId = id;
-      currentUserId = id;
-      node.focus({ preventScroll: true });
-      clearTimeout(highlightTimer);
-      highlightTimer = setTimeout(() => {
-        highlightedId = '';
-      }, 1800);
-      atBottom = isAtBottom();
-    } finally {
-      if (request === navigationRevision) navigating = false;
-    }
-  }
   /** 滚动位置可能含小数像素，使用与浏览器取整相容的底部容差。 */
   function isAtBottom(): boolean {
     return (
@@ -282,7 +207,6 @@
       lastScrollHeight = viewport.scrollHeight;
       lastClientHeight = viewport.clientHeight;
       checkOlder();
-      trackUser();
     });
   }
   function pauseFollow(): void {
@@ -333,14 +257,7 @@
   }
   function checkOlder(): void {
     if (!alive || !viewport || !active) return;
-    if (
-      !navigating &&
-      !error &&
-      viewport.scrollTop <= 200 &&
-      hasMore &&
-      !loading &&
-      !pending
-    )
+    if (!error && viewport.scrollTop <= 200 && hasMore && !loading && !pending)
       void older();
   }
   function scroll(): void {
@@ -359,7 +276,6 @@
     scrollState.top = top;
     scrollState.follow = follow;
     checkOlder();
-    trackUser();
   }
   onMount(() => {
     mounted = true;
@@ -417,9 +333,6 @@
       observer.disconnect();
       resize.disconnect();
       cancelAnimationFrame(frame);
-      cancelAnimationFrame(navigationFrame);
-      clearTimeout(highlightTimer);
-      cancelNavigation();
     };
   });
   $effect(() => {
@@ -450,11 +363,7 @@
   });
 </script>
 
-<div
-  class="transcript-workspace"
-  class:has-navigator={!!onhistory}
-  class:has-change={panelOpen && !review}
->
+<div class="transcript-workspace" class:has-change={panelOpen && !review}>
   <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions (独立滚动区域支持键盘阅读。) -->
   <div
     class="transcript"
@@ -499,14 +408,7 @@
     </div>
     <div class="message-list" bind:this={content}>
       {#snippet renderMessage(message: Message)}
-        <!-- svelte-ignore a11y_no_noninteractive_tabindex (仅主动定位后接收焦点，不进入普通 Tab 顺序。) -->
-        <div
-          class="message-item"
-          class:navigation-target={highlightedId === message.id}
-          data-message-id={message.id}
-          data-user-message={message.role === 'user' ? '' : undefined}
-          tabindex="-1"
-        >
+        <div class="message-item" data-message-id={message.id}>
           {#if isPlanComplete(message)}
             <PlanMessage
               {message}
@@ -574,16 +476,6 @@
       <ConversationActivity {activity} />
     </div>
   </div>
-  {#if onhistory}
-    <MessageNavigator
-      {messages}
-      {active}
-      {onhistory}
-      currentId={currentUserId}
-      onlocate={locateMessage}
-      oncancel={cancelNavigation}
-    />
-  {/if}
   {#if panelOpen}
     <div class="review-panel-content" hidden={!active} use:mountPanel>
       {#if textPart && textTarget}
@@ -626,15 +518,5 @@
   }
   .scroll-bottom {
     bottom: 16px;
-  }
-  .has-navigator > .transcript {
-    margin-inline-end: 36px;
-    min-width: 0;
-  }
-  .navigation-target {
-    outline: 2px solid var(--accent);
-    outline-offset: 4px;
-    border-radius: 12px;
-    background: var(--accent-soft);
   }
 </style>
