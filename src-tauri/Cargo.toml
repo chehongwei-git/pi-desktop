@@ -1,6 +1,6 @@
 [package]
 name = "pi-desktop"
-version = "2026.11.6"
+version = "2026.11.7"
 description = "A lightweight desktop host for your installed Pi"
 license = "Apache-2.0"
 edition = "2021"
