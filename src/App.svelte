@@ -1292,6 +1292,7 @@
                   onresend={() => {
                     void session.resendMessage();
                   }}
+                  onhistory={(before) => session.promptHistory(before)}
                   registerChange={(open) => {
                     if (open) changeOpeners.set(session, open);
                     else changeOpeners.delete(session);
