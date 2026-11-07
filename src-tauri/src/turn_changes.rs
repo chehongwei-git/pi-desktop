@@ -143,7 +143,23 @@ fn diff(before: &str, after: &str) -> (String, usize, usize) {
             removed += 1;
         }
     };
-    if a.len().saturating_mul(b.len()) <= 1_000_000 {
+    // 先剥离公共首尾：长文件中的局部修改不应因总行数触发整文件替换。
+    let prefix = a.iter().zip(&b).take_while(|(x, y)| x == y).count();
+    let suffix = a[prefix..]
+        .iter()
+        .rev()
+        .zip(b[prefix..].iter().rev())
+        .take_while(|(x, y)| x == y)
+        .count();
+    for (i, line) in a[..prefix].iter().enumerate() {
+        emit(' ', line, i + 1);
+    }
+    let original_a = &a;
+    let original_b = &b;
+    let a = &original_a[prefix..original_a.len() - suffix];
+    let b = &original_b[prefix..original_b.len() - suffix];
+    let fallback = a.len().saturating_mul(b.len()) > 1_000_000;
+    if !fallback {
         let width = b.len() + 1;
         let mut table = vec![0u32; (a.len() + 1) * width];
         for i in (0..a.len()).rev() {
@@ -158,26 +174,35 @@ fn diff(before: &str, after: &str) -> (String, usize, usize) {
         let (mut i, mut j) = (0, 0);
         while i < a.len() || j < b.len() {
             if i < a.len() && j < b.len() && a[i] == b[j] {
-                emit(' ', a[i], i + 1);
+                emit(' ', a[i], prefix + i + 1);
                 i += 1;
                 j += 1;
             } else if i < a.len()
                 && (j == b.len() || table[(i + 1) * width + j] >= table[i * width + j + 1])
             {
-                emit('-', a[i], i + 1);
+                emit('-', a[i], prefix + i + 1);
                 i += 1;
             } else {
-                emit('+', b[j], j + 1);
+                emit('+', b[j], prefix + j + 1);
                 j += 1;
             }
         }
     } else {
         for (i, line) in a.iter().enumerate() {
-            emit('-', line, i + 1);
+            emit('-', line, prefix + i + 1);
         }
         for (i, line) in b.iter().enumerate() {
-            emit('+', line, i + 1);
+            emit('+', line, prefix + i + 1);
         }
+    }
+    for (i, line) in original_a[original_a.len() - suffix..].iter().enumerate() {
+        emit(' ', line, original_a.len() - suffix + i + 1);
+    }
+    if fallback {
+        rows.insert(
+            0,
+            "! 完整替换：中间差异超过精确比较预算，以下增删统计按该区域完整替换计算。".into(),
+        );
     }
     (rows.join("\n"), added, removed)
 }
@@ -349,6 +374,31 @@ mod tests {
         assert!(turn.files[0].diff.contains(" local") || turn.files[0].diff.contains("1 local"));
         assert!(!turn.files[0].diff.contains("intermediate"));
         assert_eq!(turn.files[1].kind, "added");
+    }
+    #[test]
+    fn large_local_edit_preserves_context_and_line_numbers() {
+        let before = (0..5000).map(|i| format!("line {i}\n")).collect::<String>();
+        let after = before.replace("line 2500\n", "changed\nextra\n");
+        let (text, added, removed) = diff(&before, &after);
+        assert_eq!((added, removed), (2, 1));
+        assert!(text.contains("-2501 line 2500\n+2501 changed\n+2502 extra"));
+        assert!(text.contains(" 5000 line 4999"));
+        assert!(!text.contains("完整替换"));
+    }
+    #[test]
+    fn bounded_fallback_is_explicit_and_preserves_edges() {
+        let before = format!("head\n{}tail\n", "old\n".repeat(1001));
+        let after = format!("head\n{}tail\n", "new\n".repeat(1001));
+        let (text, added, removed) = diff(&before, &after);
+        assert_eq!((added, removed), (1001, 1001));
+        assert!(text.starts_with("! 完整替换："));
+        assert!(text.contains(" 1 head"));
+        assert!(text.ends_with(" 1003 tail"));
+        assert_eq!(
+            diff("", "new"),
+            ("+1 new\n\\ No newline at end of file".into(), 1, 0)
+        );
+        assert_eq!(diff("old\r\n", ""), ("-1 old".into(), 0, 1));
     }
     #[test]
     fn deletion_revert_binary_and_restart() {

@@ -3,6 +3,7 @@
   import { onMount, tick } from 'svelte';
   import type { ContentPage, Message } from '../types';
   import ToolCode from './ToolCode.svelte';
+  import CompactDiff from './CompactDiff.svelte';
   import Icon from './Icon.svelte';
   import { languageForPath } from '../tool-presentation';
   let {
@@ -113,22 +114,22 @@
   {#if copyError}<p class="tool-load-error" role="alert">{copyError}</p>{/if}
   {#if !message.tool?.diffRef}<p class="tool-load-status">新增内容</p>{/if}
   <div class="change-panel-body">
-    {#if text}<ToolCode
-        {text}
-        diff={!!message.tool?.diffRef}
-        language={message.tool?.diffRef
-          ? undefined
-          : languageForPath(message.tool?.path ?? '')}
-      />{/if}
+    {#if text}
+      {#if message.tool?.diffRef}<CompactDiff {text} {done} />
+      {:else}<ToolCode
+          {text}
+          language={languageForPath(message.tool?.path ?? '')}
+        />{/if}
+    {/if}
     {#if loading}<p role="status" class="tool-load-status">
-        正在读取完整变更…
+        正在读取差异…
       </p>{/if}
     {#if error}<p role="alert" class="tool-load-error">{error}</p>
       <button class="text-button" onclick={() => void load()}
         >重试读取变更</button
       >{/if}
     {#if done}<p class="tool-load-status">
-        {text ? '已显示完整内容' : '无变更内容'}
+        {text ? '已读取全部可用内容' : '无变更内容'}
       </p>{/if}
   </div>
 </aside>
