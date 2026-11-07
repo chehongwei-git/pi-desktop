@@ -6,7 +6,7 @@
   import type { Message } from '../../src/lib/types';
   let open:
     ((message: Message, trigger: HTMLButtonElement) => void) | undefined;
-  const turns = [
+  let turns = $state([
     {
       id: 'one',
       title: '调整输入布局',
@@ -23,7 +23,14 @@
         },
       ],
     },
-  ];
+  ]);
+  // 测试入口模拟宿主生成新快照，不改变生产组件接口。
+  function nextRound() {
+    turns = [
+      { ...turns[0], id: `round-${turns.length}`, title: '新一轮调整' },
+      ...turns,
+    ];
+  }
 </script>
 
 <div
@@ -64,6 +71,7 @@
         onretry={() => {}}
         onselect={(message, trigger) => open?.(message, trigger)}
       />
+      <button onclick={nextRound}>生成新轮次</button>
       <textarea aria-label="消息输入" style="width:100%;height:100px"
         >继续调整</textarea
       >

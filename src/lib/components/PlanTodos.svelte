@@ -1,6 +1,7 @@
 <!-- Plan 扩展仍是完成状态的唯一来源；此处只解析展示，不提供可误操作的复选框。 -->
 <script lang="ts">
   import Icon from './Icon.svelte';
+  import { planSteps } from '../plan-steps';
   let {
     lines,
     running = false,
@@ -38,19 +39,7 @@
   let expanded = $state(false);
   const listId = $props.id();
   let toggle = $state<HTMLButtonElement>();
-  // 未识别的非空行也保留，避免扩展格式演进后悄悄丢失计划内容。
-  let steps = $derived(
-    lines
-      .filter((line) => line.trim() && !line.startsWith('ℹ '))
-      .map((line) => {
-        const match = /^\s*([☑☐⊘])\s*(.*)$/.exec(line);
-        return {
-          text: match ? match[2] : line,
-          completed: match?.[1] === '☑',
-          skipped: match?.[1] === '⊘',
-        };
-      }),
-  );
+  let steps = $derived(planSteps(lines));
   let completed = $derived(steps.filter((step) => step.completed).length);
   let skipped = $derived(steps.filter((step) => step.skipped).length);
   let processed = $derived(completed + skipped);

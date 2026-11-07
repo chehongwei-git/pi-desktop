@@ -28,6 +28,20 @@ test('returns from a new-chat draft to existing sessions', async ({ page }) => {
         },
       },
     ];
+    // 通过真实事件泵发布计划更新，验证组件与会话可见性规则一起工作。
+    (window as any).publishPlan = (lines: string[]) => {
+      extensionEvents = [
+        {
+          type: 'extension',
+          request: {
+            method: 'setWidget',
+            widgetKey: 'plan-todos',
+            widgetLines: lines,
+          },
+        },
+      ];
+      (window as any).wakeExtensions();
+    };
     const cwd = '/workspace/project';
     const sessions = ['original', 'other'].map((id) => ({
       id,
@@ -43,10 +57,11 @@ test('returns from a new-chat draft to existing sessions', async ({ page }) => {
     (window as any).planControls = [];
     (window as any).__TAURI_INTERNALS__ = {
       transformCallback: (callback: (event: unknown) => void) => {
-        // 模拟宿主扩展事件唤醒，连接完成后才触发拉取。
+        // Channel 按 index 去重，连续唤醒必须使用递增序号。
+        let index = 0;
         (window as any).wakeExtensions = () =>
           callback({
-            index: 0,
+            index: index++,
             message: { type: 'available', runtimeId: 'runtime' },
           });
         return 1;
@@ -153,6 +168,28 @@ test('returns from a new-chat draft to existing sessions', async ({ page }) => {
     '/todos continue',
     '/todos stop',
   ]);
+  await page.evaluate(() =>
+    (window as any).publishPlan(['☑ 检查项目', '☑ 完成方案']),
+  );
+  await expect(todo).toContainText('全部步骤已完成');
+  await input.fill('下一轮任务');
+  await input.press('Enter');
+  await expect(todo).toHaveCount(0);
+  await expect(input).toBeFocused();
+  await page.evaluate(() =>
+    (window as any).publishPlan(['☑ 检查项目', '☑ 完成方案', 'ℹ 已完成']),
+  );
+  await expect(todo).toHaveCount(0);
+  await page.evaluate(() =>
+    (window as any).publishPlan([
+      '☑ 检查项目',
+      '☐ 原会话待办：完成方案',
+      '☐ 验证最终实现',
+      'ℹ 执行停滞，请检查后继续',
+    ]),
+  );
+  await expect(todo).toBeVisible();
+  await input.fill('Existing draft');
   await page.getByRole('button', { name: /^新对话/ }).click();
   await expect(page.locator('.welcome')).toBeVisible();
   await expect(input).toHaveValue('');

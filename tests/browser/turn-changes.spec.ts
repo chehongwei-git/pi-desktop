@@ -70,4 +70,22 @@ test('review keeps full height when the file list or composer grows', async ({
   await file.click();
   await expect(panel).toBeVisible();
   await expect(details.locator('.turn-changes')).toHaveCount(0);
+  await page.setViewportSize({ width: 1500, height: 900 });
+  await panel.getByRole('button', { name: '关闭变更' }).click();
+  await left.getByRole('button', { name: '生成新轮次' }).click();
+  await left.getByLabel('选择变更轮次').click();
+  await left.getByRole('button', { name: /前 1 轮/ }).click();
+  await file.click();
+  await expect(panel).toBeVisible();
+  const input = left.getByLabel('消息输入');
+  await input.focus();
+  // 后台新结果不应夺走仍在编辑的输入焦点。
+  await left
+    .getByRole('button', { name: '生成新轮次' })
+    .evaluate((button: HTMLButtonElement) => button.click());
+  await expect(panel).toHaveCount(0);
+  await expect(left.getByLabel('选择变更轮次')).toHaveText('最近一轮');
+  await expect(toggle).toHaveAttribute('aria-expanded', 'true');
+  await expect(input).toBeFocused();
+  await expect(file).toHaveAttribute('aria-pressed', 'false');
 });

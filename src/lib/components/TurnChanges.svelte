@@ -26,6 +26,27 @@
   let root = $state<HTMLElement>();
   let trigger = $state<HTMLButtonElement>();
   let roundTrigger = $state<HTMLButtonElement>();
+  let latest = untrack(() => turns[0]?.id);
+  // 只跟随新轮次身份，同轮刷新不打断历史阅读，也不自动展开清单。
+  $effect(() => {
+    const next = turns[0]?.id;
+    if (next === latest) return;
+    const hadLatest = latest !== undefined;
+    latest = next;
+    untrack(() => {
+      if (hadLatest && review?.current?.id?.startsWith('turn:')) {
+        const focused = document.activeElement;
+        // 自动切换不执行普通关闭的回焦；只有焦点随旧面板消失时才恢复入口。
+        const restoreFocus =
+          focused instanceof HTMLElement &&
+          !!focused.closest('.review-details');
+        review.current.close(restoreFocus);
+      }
+      selected = '';
+      lastOpened = '';
+      menu = false;
+    });
+  });
   let turn = $derived(turns.find((item) => item.id === selected) ?? turns[0]);
   let index = $derived(turns.findIndex((item) => item.id === turn?.id));
   let added = $derived(

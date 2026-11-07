@@ -73,7 +73,8 @@
       reviewOwner,
       active && panelOpen,
       change?.id,
-      () => void showChange(),
+      (restoreFocus = true) =>
+        void showChange(undefined, undefined, restoreFocus),
     );
   });
   let rows = $derived(processRows(messages));
@@ -148,6 +149,7 @@
   async function showChange(
     message?: Message,
     trigger?: HTMLButtonElement,
+    restoreFocus = true,
   ): Promise<void> {
     pauseFollow();
     const saved = anchor();
@@ -161,7 +163,7 @@
     if (saved?.node.isConnected)
       viewport.scrollTop += saved.node.getBoundingClientRect().top - saved.top;
     lastScrollTop = viewport.scrollTop;
-    if (!message) {
+    if (!message && restoreFocus) {
       // 文件列表收起再展开会重建按钮，按稳定路径找回入口，避免焦点落到已卸载节点。
       const layoutRoot = viewport.closest('.review-layout');
       const replacement = [

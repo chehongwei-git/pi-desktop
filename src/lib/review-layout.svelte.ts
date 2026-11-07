@@ -4,7 +4,12 @@ export const reviewKey = Symbol('review-layout');
 export class ReviewLayoutState {
   host?: HTMLElement;
   entries = $state<
-    { owner: symbol; active: boolean; id?: string; close: () => void }[]
+    {
+      owner: symbol;
+      active: boolean;
+      id?: string;
+      close: (restoreFocus?: boolean) => void;
+    }[]
   >([]);
   get current() {
     return this.entries.find((entry) => entry.active);
@@ -13,7 +18,7 @@ export class ReviewLayoutState {
     owner: symbol,
     active: boolean,
     id: string | undefined,
-    close: () => void,
+    close: (restoreFocus?: boolean) => void,
   ): void {
     untrack(() => {
       this.entries = [

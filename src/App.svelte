@@ -1359,7 +1359,7 @@
                 >
                   {value}
                 </div>{/each}
-              {#each Object.entries(desktop.widgets).filter(([, value]) => value.length) as [key, value] (key)}
+              {#each Object.entries(desktop.visibleWidgets).filter(([, value]) => value.length) as [key, value] (key)}
                 {#if key === 'plan-todos'}
                   {#key `${desktop.runtimeId}:${desktop.snapshot.sessionFile ?? ''}`}
                     <PlanTodos

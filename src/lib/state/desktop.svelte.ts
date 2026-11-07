@@ -18,6 +18,7 @@ import {
   type ProviderConfig,
 } from '../model-config';
 import { terminalText } from '../terminal-text';
+import { completedPlan, planSteps } from '../plan-steps';
 import { SessionContent } from './session-content';
 import { reduceEvents } from './reducer';
 import {
@@ -735,6 +736,15 @@ export class Desktop {
   extensions = $state<ExtensionRequest[]>([]);
   statuses = $state<Record<string, string>>({});
   widgets = $state<Record<string, string[]>>({});
+  /** 只隐藏已提交前完成的那份计划；原始扩展数据仍保留供重连和新计划使用。 */
+  private hiddenPlan = $state('');
+  private planRevision = 0;
+  get visibleWidgets(): Record<string, string[]> {
+    const lines = this.widgets['plan-todos'] ?? [];
+    return this.hiddenPlan && completedPlan(lines) === this.hiddenPlan
+      ? { ...this.widgets, 'plan-todos': [] }
+      : this.widgets;
+  }
   recovered = $state<string[]>([]);
   queued = $state<string[]>([]);
   pendingSwitch = $state<{
@@ -1120,6 +1130,7 @@ export class Desktop {
               clearTimeout(timer);
             this.extensionTimers.clear();
             this.widgets = {};
+            this.hiddenPlan = '';
             this.statuses = {};
             this.extensions = [];
           }
@@ -1243,10 +1254,22 @@ export class Desktop {
     if (request.method === 'notify') this.notice = request.message ?? '';
     if (request.method === 'setStatus' && request.statusKey)
       this.statuses[request.statusKey] = terminalText(request.statusText ?? '');
-    if (request.method === 'setWidget' && request.widgetKey)
-      this.widgets[request.widgetKey] = (request.widgetLines ?? []).map(
-        terminalText,
-      );
+    if (request.method === 'setWidget' && request.widgetKey) {
+      const lines = (request.widgetLines ?? []).map(terminalText);
+      if (
+        request.widgetKey === 'plan-todos' &&
+        JSON.stringify(planSteps(lines)) !==
+          JSON.stringify(planSteps(this.widgets['plan-todos'] ?? []))
+      )
+        this.planRevision++;
+      // 重复完成通知不能复活旧卡片；清空或未完成步骤标志新计划，即使文字相同。
+      if (
+        request.widgetKey === 'plan-todos' &&
+        completedPlan(lines) !== this.hiddenPlan
+      )
+        this.hiddenPlan = '';
+      this.widgets[request.widgetKey] = lines;
+    }
     if (request.method === 'setTitle')
       this.currentSessionTitle = request.title || '';
     if (request.method === 'set_editor_text') {
@@ -1869,6 +1892,9 @@ export class Desktop {
     const ranges = textRanges(submittedParts, text, files, fileStart);
     const sessionFile = this.snapshot.sessionFile;
     const generation = this.generation;
+    // 在提交前捕获，不能把请求期间刚完成的新计划误当作上一轮结果。
+    const previousPlanRevision = this.planRevision;
+    const finishedPlan = completedPlan(this.widgets['plan-todos'] ?? []);
     const sentAt = new Date().toISOString();
     const delivery = mode ?? (this.run !== 'idle' ? 'steer' : undefined);
     const pendingId = delivery
@@ -1930,8 +1956,11 @@ export class Desktop {
         sessionFile === this.snapshot.sessionFile &&
         this.newChatProject === null &&
         !this.openingSession
-      )
+      ) {
         this.sentMessageRevision++;
+        if (finishedPlan && this.planRevision === previousPlanRevision)
+          this.hiddenPlan = finishedPlan;
+      }
       this.sidebarPreview ||= text.replace(/\s+/g, ' ').trim().slice(0, 80);
       this.lastSentAt = sentAt;
       this.restored = false;
