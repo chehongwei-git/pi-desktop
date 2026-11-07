@@ -159,6 +159,42 @@ export class Desktop {
       ? [this.initialPending, ...this.messages]
       : this.messages;
   }
+  /** 轮次变更独立于历史分页；会话恢复后按真实身份重新读取。 */
+  turnChanges = $state<import('../types').TurnChanges[]>([]);
+  changesError = $state('');
+  private changesRequest = 0;
+  async refreshChanges(): Promise<void> {
+    const request = ++this.changesRequest;
+    const runtime = this.runtimeId;
+    try {
+      const turns = await this.action<import('../types').TurnChanges[]>({
+        type: 'changes',
+      });
+      if (request !== this.changesRequest || runtime !== this.runtimeId) return;
+      this.turnChanges = turns.map((turn) => ({
+        ...turn,
+        files: turn.files.map((file) => {
+          const message = this.content.bind(
+            {
+              id: `turn:${turn.id}:${file.path}`,
+              role: 'toolResult',
+              text: '',
+              thinking: '',
+              status: 'done',
+              name: null,
+              contentRef: file.contentRef,
+            },
+            runtime,
+          );
+          return { ...file, contentRef: message.contentRef! };
+        }),
+      }));
+      this.changesError = '';
+    } catch (error) {
+      if (request === this.changesRequest && runtime === this.runtimeId)
+        this.changesError = errorMessage(error);
+    }
+  }
   toolViews = $state<Record<string, Record<string, boolean>>>({});
   toggleTool(id: string, section: string): void {
     const view = this.toolViews[id] ?? {};
@@ -933,6 +969,7 @@ export class Desktop {
           : this.refreshHistory(undefined, undefined, true),
         this.refreshSessions(),
         this.refreshStats(),
+        this.refreshChanges(),
       ]);
       // restoreHistory 在暂存区补齐已读窗口，完成后一次提交。
       if (
@@ -1076,6 +1113,8 @@ export class Desktop {
           }
           // reset 是会话边界，按事件顺序清理；不能在批次末尾保留旧会话 widget。
           if (event.type === 'reset') {
+            this.turnChanges = [];
+            this.changesRequest++;
             this.queuedDrafts = [];
             for (const timer of this.extensionTimers.values())
               clearTimeout(timer);
@@ -1259,7 +1298,10 @@ export class Desktop {
   async syncState(): Promise<void> {
     const generation = this.generation;
     const snapshot = await this.action<Snapshot>({ type: 'state' });
-    if (generation === this.generation) this.snapshot = snapshot;
+    if (generation === this.generation) {
+      this.snapshot = snapshot;
+      await this.refreshChanges();
+    }
   }
   /**
    * 只读会话统计：上下文窗口估算与累计 tokens/费用。
@@ -1428,7 +1470,20 @@ export class Desktop {
       this.historyCached = true;
       this.before = before ?? 0;
       this.hasMore = hasMore;
-      this.content.retain(merged);
+      this.content.retain([
+        ...merged,
+        ...this.turnChanges.flatMap((turn) =>
+          turn.files.map((file) => ({
+            id: `${turn.id}:${file.path}`,
+            role: 'toolResult',
+            text: '',
+            thinking: '',
+            status: 'done',
+            name: null,
+            contentRef: file.contentRef,
+          })),
+        ),
+      ]);
       afterCommit?.();
     } finally {
       if (generation === this.generation) this.loadingHistory = false;

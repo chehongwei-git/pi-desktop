@@ -148,6 +148,8 @@ export interface Message {
   /** 本地提交占位，Pi 返回正式用户消息后替换。 */
   delivery?: { mode: 'steer' | 'followUp'; state: 'sending' | 'queued' };
   tool?: ToolPresentation | null;
+  /** 仅本地轮次审阅使用，不改变 Pi 消息协议。 */
+  reviewTitle?: string;
 }
 export interface Model {
   id: string;
@@ -205,6 +207,21 @@ export interface HistoryPage {
   messages: Message[];
   before: number;
   hasMore: boolean;
+}
+/** 每轮合并差异由宿主计算；正文仍按引用分块读取。 */
+export interface TurnChanges {
+  id: string;
+  title: string;
+  state: string;
+  warnings: string[];
+  files: {
+    path: string;
+    kind: string;
+    added: number | null;
+    removed: number | null;
+    binary: boolean;
+    contentRef: string;
+  }[];
 }
 export interface ContentPage {
   text: string;
@@ -291,6 +308,7 @@ export type Action =
         | 'refresh_models'
         | 'thinking_levels'
         | 'commands'
+        | 'changes'
         | 'state';
     }
   | { type: 'new_project_session'; project: string }

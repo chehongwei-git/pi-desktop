@@ -26,6 +26,13 @@
   import MessageNotice from './lib/components/MessageNotice.svelte';
   import ContextUsage from './lib/components/ContextUsage.svelte';
   import PlanTodos from './lib/components/PlanTodos.svelte';
+  import TurnChanges from './lib/components/TurnChanges.svelte';
+  import ReviewLayout from './lib/components/ReviewLayout.svelte';
+  // 按会话实例注册详情入口，缓存页面之间不交叉打开差异。
+  const changeOpeners = new Map<
+    object,
+    (message: Message, trigger: HTMLButtonElement) => void
+  >();
   const workspace = new Workspace();
   let desktop = $derived(workspace.active);
   $effect(() => {
@@ -1219,207 +1226,231 @@
           </div>
         </div>
       </header>
-      <div
-        class="conversation"
-        class:empty
-        aria-busy={!!desktop.openingSession}
-      >
-        {#if desktop.openingSession}
-          <div class="session-loading" role="status" aria-label="正在加载会话">
-            <span class="loading-indicator" aria-hidden="true"
-              ><Icon name="refresh" size={20} /></span
+      <ReviewLayout>
+        <div
+          class="conversation"
+          class:empty
+          aria-busy={!!desktop.openingSession}
+        >
+          {#if desktop.openingSession}
+            <div
+              class="session-loading"
+              role="status"
+              aria-label="正在加载会话"
             >
-          </div>
-        {:else if empty}<div class="welcome">
-            <div class="welcome-logo"><Icon name="pi" size={40} /></div>
-            <h1>
-              {displayProject ? '今天想做些什么？' : '让 Pi 与你的项目一起工作'}
-            </h1>
-            <p>
-              {displayProject
-                ? displayProject
-                : '直接新建对话，或选择项目文件夹开始。'}
-            </p>
-            {#if !displayProject}<button
-                class="choose-project"
-                onclick={chooseProject}
-                ><Icon name="folder" size={18} />选择项目文件夹</button
-              >{/if}
-            <!-- 新草稿在首次发送时自动连接；未分配运行实例不代表连接故障。 -->
-            {#if displayProject && desktop.newChatProject === null && (desktop.connection === 'disconnected' || desktop.connection === 'failed')}<button
-                class="choose-project"
-                onclick={() => {
-                  void desktop.connect(desktop.project);
-                }}>连接 Pi</button
-              >{/if}
-          </div>
-        {/if}
-        {#each workspace.retained as session (session)}
-          <div
-            class="session-transcript"
-            hidden={session !== desktop || empty || !!desktop.openingSession}
-          >
-            {#if session.transcriptMessages.length}
-              <Transcript
-                messages={session.transcriptMessages}
-                activity={session === desktop ? activity : null}
-                active={session === desktop &&
-                  !empty &&
-                  !desktop.openingSession}
-                scrollState={session.scrollState}
-                resumeFollow={session.sentMessageRevision}
-                hasMore={session.hasMore}
-                loading={session.loadingHistory ||
-                  session.restoring ||
-                  session.connection !== 'ready'}
-                oncommit={(handler) => {
-                  session.beforeHistoryCommit = handler;
-                }}
-                onolder={(beforeInsert) =>
-                  session.refreshHistory(session.before, beforeInsert)}
-                onfull={(message) => {
-                  if (session === desktop) void showFull(message);
-                }}
-                toolViews={session.toolViews}
-                ontoggletool={(id, section) => session.toggleTool(id, section)}
-                read={(id, offset) => session.readContent(id, offset)}
-                onvisible={(ids) => session.pinVisible(ids)}
-                onload={(message) => session.loadPreview(message)}
-                onerror={(message) => {
-                  session.error = message;
+              <span class="loading-indicator" aria-hidden="true"
+                ><Icon name="refresh" size={20} /></span
+              >
+            </div>
+          {:else if empty}<div class="welcome">
+              <div class="welcome-logo"><Icon name="pi" size={40} /></div>
+              <h1>
+                {displayProject
+                  ? '今天想做些什么？'
+                  : '让 Pi 与你的项目一起工作'}
+              </h1>
+              <p>
+                {displayProject
+                  ? displayProject
+                  : '直接新建对话，或选择项目文件夹开始。'}
+              </p>
+              {#if !displayProject}<button
+                  class="choose-project"
+                  onclick={chooseProject}
+                  ><Icon name="folder" size={18} />选择项目文件夹</button
+                >{/if}
+              <!-- 新草稿在首次发送时自动连接；未分配运行实例不代表连接故障。 -->
+              {#if displayProject && desktop.newChatProject === null && (desktop.connection === 'disconnected' || desktop.connection === 'failed')}<button
+                  class="choose-project"
+                  onclick={() => {
+                    void desktop.connect(desktop.project);
+                  }}>连接 Pi</button
+                >{/if}
+            </div>
+          {/if}
+          {#each workspace.retained as session (session)}
+            <div
+              class="session-transcript"
+              hidden={session !== desktop || empty || !!desktop.openingSession}
+            >
+              {#if session.transcriptMessages.length}
+                <Transcript
+                  messages={session.transcriptMessages}
+                  registerChange={(open) => {
+                    if (open) changeOpeners.set(session, open);
+                    else changeOpeners.delete(session);
+                  }}
+                  activity={session === desktop ? activity : null}
+                  active={session === desktop &&
+                    !empty &&
+                    !desktop.openingSession}
+                  scrollState={session.scrollState}
+                  resumeFollow={session.sentMessageRevision}
+                  hasMore={session.hasMore}
+                  loading={session.loadingHistory ||
+                    session.restoring ||
+                    session.connection !== 'ready'}
+                  oncommit={(handler) => {
+                    session.beforeHistoryCommit = handler;
+                  }}
+                  onolder={(beforeInsert) =>
+                    session.refreshHistory(session.before, beforeInsert)}
+                  onfull={(message) => {
+                    if (session === desktop) void showFull(message);
+                  }}
+                  toolViews={session.toolViews}
+                  ontoggletool={(id, section) =>
+                    session.toggleTool(id, section)}
+                  read={(id, offset) => session.readContent(id, offset)}
+                  onvisible={(ids) => session.pinVisible(ids)}
+                  onload={(message) => session.loadPreview(message)}
+                  onerror={(message) => {
+                    session.error = message;
+                  }}
+                />
+              {/if}
+            </div>
+          {/each}
+          <div class="composer-area">
+            {#if !empty && !desktop.openingSession}
+              {#key desktop}
+                <TurnChanges
+                  turns={desktop.turnChanges}
+                  error={desktop.changesError}
+                  onretry={() => void desktop.refreshChanges()}
+                  onselect={(message, trigger) =>
+                    changeOpeners.get(desktop)?.(message, trigger)}
+                />
+              {/key}
+            {/if}
+            {#if desktop.historyCached && desktop.connection === 'failed' && !desktop.restoring}
+              <div class="queue-hint" role="status">
+                连接恢复失败，已缓存内容仍可阅读。
+                <button
+                  onclick={() =>
+                    void desktop.guard(() => workspace.ensure(desktop))}
+                  >重试连接</button
+                >
+              </div>
+            {/if}
+            {#if desktop.extensions[0]}
+              {@const request = desktop.extensions[0]}
+              {#key `${desktop.runtimeId}:${request.id}`}
+                <ExtensionDialog
+                  {request}
+                  onrespond={async (value) => {
+                    const owner = desktop;
+                    await owner.respond(request, value);
+                    // 只有写入成功且用户仍在此会话时恢复底部跟随。
+                    if (
+                      owner === desktop &&
+                      !value.cancelled &&
+                      (value.value !== undefined || value.confirmed === true)
+                    )
+                      owner.sentMessageRevision++;
+                  }}
+                />
+              {/key}
+            {/if}
+            <!-- 新对话只是本地草稿，后台扩展状态仍属于原会话；返回时继续展示。 -->
+            {#if desktop.newChatProject === null && !desktop.openingSession}
+              {#each Object.entries(desktop.statuses).filter(([, value]) => value) as [key, value] (key)}<div
+                  class="extension-status"
+                >
+                  {value}
+                </div>{/each}
+              {#each Object.entries(desktop.widgets).filter(([, value]) => value.length) as [key, value] (key)}
+                {#if key === 'plan-todos'}
+                  {#key `${desktop.runtimeId}:${desktop.snapshot.sessionFile ?? ''}`}
+                    <PlanTodos
+                      lines={value}
+                      running={desktop.run !== 'idle'}
+                      disabled={desktop.connection !== 'ready' ||
+                        desktop.restoring ||
+                        desktop.submitting}
+                      oncontinue={desktop.commands.some(
+                        (command) => command.name === 'todos',
+                      )
+                        ? () => desktop.planAction('continue')
+                        : undefined}
+                      onstop={desktop.commands.some(
+                        (command) => command.name === 'todos',
+                      )
+                        ? () =>
+                            desktop.run !== 'idle'
+                              ? desktop.stop()
+                              : desktop.planAction('stop')
+                        : undefined}
+                    />
+                  {/key}
+                {:else}<details class="widget">
+                    <summary>{key}</summary>
+                    <pre>{value.join('\n')}</pre>
+                  </details>{/if}
+              {/each}
+            {/if}
+            {#if desktop.task?.state === 'queued'}<div
+                class="queue-hint"
+                role="status"
+              >
+                排队中，第 {desktop.task.position || '…'} 位；其他项目的任务仍在执行。
+                <button
+                  onclick={() => desktop.guard(() => workspace.cancel(desktop))}
+                  >取消排队</button
+                >
+              </div>{/if}
+            {#if workspace.sessions.filter((item) => item.project === desktop.project && item.task?.state === 'running').length > 1}
+              <div class="queue-hint">
+                此项目的多个会话正在执行，它们共享文件修改。
+              </div>
+            {/if}
+            {#if desktop.queued.length}<div class="queue-hint">
+                已排队 {desktop.queued.length} 条消息
+              </div>{/if}
+            {#if desktop.recovered.length}<div class="recovered-drafts">
+                <span>可恢复草稿</span
+                >{#each desktop.recovered as text, index}<button
+                    title={text}
+                    onclick={() => {
+                      if (desktop.draft) desktop.recovered.push(desktop.draft);
+                      desktop.draft = text;
+                      desktop.recovered.splice(index, 1);
+                    }}>草稿 {index + 1}</button
+                  >{/each}
+              </div>{/if}
+            {#if desktop.newChatProject !== null || empty}
+              <ProjectPicker
+                projects={workspace.projects}
+                project={displayProject}
+                disabled={!!desktop.openingSession ||
+                  desktop.connection === 'starting'}
+                onselect={selectNewProject}
+                oncreate={() => {
+                  void createNewProject();
                 }}
               />
             {/if}
-          </div>
-        {/each}
-        <div class="composer-area">
-          {#if desktop.historyCached && desktop.connection === 'failed' && !desktop.restoring}
-            <div class="queue-hint" role="status">
-              连接恢复失败，已缓存内容仍可阅读。
-              <button
-                onclick={() =>
-                  void desktop.guard(() => workspace.ensure(desktop))}
-                >重试连接</button
-              >
-            </div>
-          {/if}
-          {#if desktop.extensions[0]}
-            {@const request = desktop.extensions[0]}
-            {#key `${desktop.runtimeId}:${request.id}`}
-              <ExtensionDialog
-                {request}
-                onrespond={async (value) => {
-                  const owner = desktop;
-                  await owner.respond(request, value);
-                  // 只有写入成功且用户仍在此会话时恢复底部跟随。
-                  if (
-                    owner === desktop &&
-                    !value.cancelled &&
-                    (value.value !== undefined || value.confirmed === true)
-                  )
-                    owner.sentMessageRevision++;
+            {#key desktop}<CommandComposer
+                {desktop}
+                active={!settingsVisible && sidebarCollection === null}
+                onsend={(mode) => {
+                  void desktop.guard(async () => {
+                    await desktop.send(mode);
+                  });
                 }}
-              />
-            {/key}
-          {/if}
-          <!-- 新对话只是本地草稿，后台扩展状态仍属于原会话；返回时继续展示。 -->
-          {#if desktop.newChatProject === null && !desktop.openingSession}
-            {#each Object.entries(desktop.statuses).filter(([, value]) => value) as [key, value] (key)}<div
-                class="extension-status"
-              >
-                {value}
-              </div>{/each}
-            {#each Object.entries(desktop.widgets).filter(([, value]) => value.length) as [key, value] (key)}
-              {#if key === 'plan-todos'}
-                {#key `${desktop.runtimeId}:${desktop.snapshot.sessionFile ?? ''}`}
-                  <PlanTodos
-                    lines={value}
-                    running={desktop.run !== 'idle'}
-                    disabled={desktop.connection !== 'ready' ||
-                      desktop.restoring ||
-                      desktop.submitting}
-                    oncontinue={desktop.commands.some(
-                      (command) => command.name === 'todos',
-                    )
-                      ? () => desktop.planAction('continue')
-                      : undefined}
-                    onstop={desktop.commands.some(
-                      (command) => command.name === 'todos',
-                    )
-                      ? () =>
-                          desktop.run !== 'idle'
-                            ? desktop.stop()
-                            : desktop.planAction('stop')
-                      : undefined}
-                  />
-                {/key}
-              {:else}<details class="widget">
-                  <summary>{key}</summary>
-                  <pre>{value.join('\n')}</pre>
-                </details>{/if}
-            {/each}
-          {/if}
-          {#if desktop.task?.state === 'queued'}<div
-              class="queue-hint"
-              role="status"
-            >
-              排队中，第 {desktop.task.position || '…'} 位；其他项目的任务仍在执行。
-              <button
-                onclick={() => desktop.guard(() => workspace.cancel(desktop))}
-                >取消排队</button
-              >
-            </div>{/if}
-          {#if workspace.sessions.filter((item) => item.project === desktop.project && item.task?.state === 'running').length > 1}
-            <div class="queue-hint">
-              此项目的多个会话正在执行，它们共享文件修改。
+              />{/key}
+            <div class="composer-footnote">
+              <p class="composer-note">
+                Pi 在本地项目中工作，请检查重要改动。{#if desktop.version}<span
+                    >Pi {desktop.version}</span
+                  >{/if}
+              </p>
+              <!-- 上下文使用率固定在右下角，与终端 footer 的位置与读数保持一致。 -->
+              <ContextUsage {desktop} />
             </div>
-          {/if}
-          {#if desktop.queued.length}<div class="queue-hint">
-              已排队 {desktop.queued.length} 条消息
-            </div>{/if}
-          {#if desktop.recovered.length}<div class="recovered-drafts">
-              <span>可恢复草稿</span
-              >{#each desktop.recovered as text, index}<button
-                  title={text}
-                  onclick={() => {
-                    if (desktop.draft) desktop.recovered.push(desktop.draft);
-                    desktop.draft = text;
-                    desktop.recovered.splice(index, 1);
-                  }}>草稿 {index + 1}</button
-                >{/each}
-            </div>{/if}
-          {#if desktop.newChatProject !== null || empty}
-            <ProjectPicker
-              projects={workspace.projects}
-              project={displayProject}
-              disabled={!!desktop.openingSession ||
-                desktop.connection === 'starting'}
-              onselect={selectNewProject}
-              oncreate={() => {
-                void createNewProject();
-              }}
-            />
-          {/if}
-          {#key desktop}<CommandComposer
-              {desktop}
-              active={!settingsVisible && sidebarCollection === null}
-              onsend={(mode) => {
-                void desktop.guard(async () => {
-                  await desktop.send(mode);
-                });
-              }}
-            />{/key}
-          <div class="composer-footnote">
-            <p class="composer-note">
-              Pi 在本地项目中工作，请检查重要改动。{#if desktop.version}<span
-                  >Pi {desktop.version}</span
-                >{/if}
-            </p>
-            <!-- 上下文使用率固定在右下角，与终端 footer 的位置与读数保持一致。 -->
-            <ContextUsage {desktop} />
           </div>
         </div>
-      </div>
+      </ReviewLayout>
     </div>
   </main>
 </div>

@@ -1,6 +1,7 @@
 <!-- 普通文档流保留已读节点；只在历史前插时恢复一次阅读锚点。 -->
 <script lang="ts">
-  import { onMount, tick } from 'svelte';
+  import { getContext, onMount, tick } from 'svelte';
+  import { reviewKey, type ReviewLayoutState } from '../review-layout.svelte';
   import MessageView from './MessageView.svelte';
   import ProcessGroup from './ProcessGroup.svelte';
   import ConversationActivity from './ConversationActivity.svelte';
@@ -13,6 +14,7 @@
   import type { ContentPage, Message, MessageTextPart } from '../types';
   let {
     messages,
+    registerChange,
     active = true,
     scrollState = { top: 0, follow: true },
     activity = null,
@@ -30,6 +32,11 @@
     read,
   }: {
     messages: Message[];
+    /** 输入区文件列表复用本视图详情区域；卸载后撤销入口，避免悬挂回调。 */
+    registerChange?: (
+      open:
+        ((message: Message, trigger: HTMLButtonElement) => void) | undefined,
+    ) => void;
     active?: boolean;
     /** 被缓存视图卸载后仍能恢复阅读位置。 */
     scrollState?: {
@@ -56,6 +63,19 @@
     ontoggletool: (id: string, section: string) => void;
     read: (id: string, offset: number) => Promise<ContentPage>;
   } = $props();
+  const review = getContext<ReviewLayoutState | undefined>(reviewKey);
+  // symbol 不会被深层响应式代理替换，保证重复更新与移除匹配同一所有者。
+  const reviewOwner = Symbol('transcript-review');
+  const mountPanel =
+    review?.mount ?? ((_node: HTMLElement) => ({ destroy: () => {} }));
+  $effect(() => {
+    review?.update(
+      reviewOwner,
+      active && panelOpen,
+      change?.id,
+      () => void showChange(),
+    );
+  });
   let rows = $derived(processRows(messages));
   let viewport: HTMLDivElement;
   let content: HTMLDivElement;
@@ -142,7 +162,21 @@
       viewport.scrollTop += saved.node.getBoundingClientRect().top - saved.top;
     lastScrollTop = viewport.scrollTop;
     if (!message) {
-      const trigger = changeTrigger?.isConnected ? changeTrigger : viewport;
+      // 文件列表收起再展开会重建按钮，按稳定路径找回入口，避免焦点落到已卸载节点。
+      const layoutRoot = viewport.closest('.review-layout');
+      const replacement = [
+        ...(layoutRoot?.querySelectorAll<HTMLButtonElement>(
+          '.review-conversation .changes-file',
+        ) ?? []),
+      ].find((node) => node.title === changeTrigger?.title);
+      const fallback = layoutRoot?.querySelector<HTMLButtonElement>(
+        '.review-conversation .changes-toggle',
+      );
+      const trigger =
+        changeTrigger?.isConnected &&
+        !changeTrigger.closest('.review-mobile-files')
+          ? changeTrigger
+          : (replacement ?? fallback ?? viewport);
       trigger.focus({ preventScroll: true });
     }
   }
@@ -232,6 +266,7 @@
   }
   onMount(() => {
     mounted = true;
+    registerChange?.((message, trigger) => void showChange(message, trigger));
     oncommit?.(() => {
       if (!active) return () => {};
       const saved = anchor();
@@ -278,6 +313,8 @@
     update();
     return () => {
       alive = false;
+      registerChange?.(undefined);
+      review?.remove(reviewOwner);
       oncommit?.(undefined);
       onvisible([]);
       observer.disconnect();
@@ -313,7 +350,7 @@
   });
 </script>
 
-<div class="transcript-workspace" class:has-change={panelOpen}>
+<div class="transcript-workspace" class:has-change={panelOpen && !review}>
   <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions (独立滚动区域支持键盘阅读。) -->
   <div
     class="transcript"
@@ -420,19 +457,27 @@
       <ConversationActivity {activity} />
     </div>
   </div>
-  {#if textPart && textTarget}
-    {#key `${textTarget.messageId}:${textPart.id}:${textPart.contentRef}`}
-      <TextPanel
-        part={textPart}
-        {read}
-        bind:position={textTarget.top}
-        onclose={() => void showChange()}
-      />
-    {/key}
-  {:else if change}
-    {#key `${change.id}:${change.tool?.diffRef ?? change.tool?.writeRef}`}
-      <ChangePanel message={change} {read} onclose={() => void showChange()} />
-    {/key}
+  {#if panelOpen}
+    <div class="review-panel-content" hidden={!active} use:mountPanel>
+      {#if textPart && textTarget}
+        {#key `${textTarget.messageId}:${textPart.id}:${textPart.contentRef}`}
+          <TextPanel
+            part={textPart}
+            {read}
+            bind:position={textTarget.top}
+            onclose={() => void showChange()}
+          />
+        {/key}
+      {:else if change}
+        {#key `${change.id}:${change.tool?.diffRef ?? change.tool?.writeRef}`}
+          <ChangePanel
+            message={change}
+            {read}
+            onclose={() => void showChange()}
+          />
+        {/key}
+      {/if}
+    </div>
   {/if}
   {#if !follow && !atBottom}<button
       class="scroll-bottom icon-button"

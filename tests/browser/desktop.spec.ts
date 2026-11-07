@@ -352,6 +352,8 @@ async function mock(
                 ];
                 setTimeout(() => wake(runtime, { type: 'available' }), 10);
                 return {};
+              case 'changes':
+                return [];
               case 'session_stats':
                 // 用量叠在真实统计形状上，浏览器验收同时覆盖折叠读数与展开明细。
                 if (host.statsError) throw new Error('模拟统计失败');

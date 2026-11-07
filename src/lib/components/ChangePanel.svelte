@@ -3,6 +3,7 @@
   import { onMount, tick } from 'svelte';
   import type { ContentPage, Message } from '../types';
   import ToolCode from './ToolCode.svelte';
+  import Icon from './Icon.svelte';
   import { languageForPath } from '../tool-presentation';
   let {
     message,
@@ -19,6 +20,19 @@
   let loading = $state(false);
   let error = $state('');
   let alive = true;
+  let copied = $state(false);
+  let copyError = $state('');
+  let path = $derived(message.tool?.path ?? '代码变更');
+  let segments = $derived(path.split(/[\\/]/));
+  async function copyPath(): Promise<void> {
+    try {
+      await navigator.clipboard.writeText(path);
+      copied = true;
+      copyError = '';
+    } catch {
+      copyError = '路径复制失败，请重试';
+    }
+  }
   let close: HTMLButtonElement;
   let ref = $derived(message.tool?.diffRef ?? message.tool?.writeRef);
   /** 完整差异逐块串行读取；每块让出主线程，失败保留正文与读取偏移。 */
@@ -65,11 +79,38 @@
   }}
 >
   <header class="change-panel-header">
-    <strong>{message.tool?.path ?? '代码变更'}</strong>
-    <button class="text-button" bind:this={close} onclick={onclose}
-      >关闭变更</button
+    <Icon name="file" size={19} />
+    <div class="review-file-title">
+      <strong title={path}>{segments.at(-1)}</strong>
+      <span title={message.reviewTitle}
+        >{segments.slice(0, -1).join('/') ||
+          '项目根目录'}{#if message.reviewTitle}
+          · {message.reviewTitle}{/if}</span
+      >
+    </div>
+    <div class="review-file-counts">
+      {#if message.tool?.addedLines != null}<span class="change-added"
+          >+{message.tool.addedLines}</span
+        >{/if}{#if message.tool?.removedLines != null}<span
+          class="change-removed">−{message.tool.removedLines}</span
+        >{/if}
+    </div>
+    <button
+      class="icon-button"
+      aria-label={copied ? '路径已复制' : '复制文件路径'}
+      title={copied ? '已复制路径' : '复制路径'}
+      onclick={() => void copyPath()}
+      ><Icon name={copied ? 'check' : 'copy'} size={16} /></button
+    >
+    <button
+      class="icon-button"
+      aria-label="关闭变更"
+      title="关闭变更"
+      bind:this={close}
+      onclick={onclose}><Icon name="close" size={18} /></button
     >
   </header>
+  {#if copyError}<p class="tool-load-error" role="alert">{copyError}</p>{/if}
   {#if !message.tool?.diffRef}<p class="tool-load-status">新增内容</p>{/if}
   <div class="change-panel-body">
     {#if text}<ToolCode

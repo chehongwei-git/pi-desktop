@@ -221,6 +221,7 @@ pub enum Action {
         level: String,
     },
     Commands,
+    Changes,
     Compact {
         instructions: Option<String>,
     },

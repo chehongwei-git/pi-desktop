@@ -23,6 +23,9 @@ use tokio::{
     time::{Instant, MissedTickBehavior},
 };
 
+#[path = "turn_changes.rs"]
+mod turn_changes;
+
 static RUNTIME_ID: AtomicU64 = AtomicU64::new(0);
 /// 轻量句柄可克隆；有界邮箱避免快速连点导致无限分配。
 #[derive(Clone)]
@@ -397,6 +400,10 @@ impl Handle {
                 )
                 .await
             }
+            Action::Changes => {
+                self.rpc(json!({"type":"desktop_changes"}), Kind::Query)
+                    .await
+            }
             Action::Commands => self.rpc(json!({"type":"get_commands"}), Kind::Query).await,
             Action::State => self.rpc(json!({"type":"get_state"}), Kind::Query).await,
             Action::History { before } => {
@@ -560,6 +567,10 @@ pub async fn start_reserved(
     };
     let projection =
         Projection::with_timing_dir(crate::history::root(settings).join(".desktop-process"));
+    let changes = turn_changes::Recorder::new(
+        project.into(),
+        crate::history::root(settings).join(".desktop-changes"),
+    );
     tokio::spawn(async move {
         actor(
             id,
@@ -573,6 +584,7 @@ pub async fn start_reserved(
             projection,
             lifecycle_tx,
             operations,
+            changes,
         )
         .await;
         reader.abort();
@@ -596,10 +608,13 @@ async fn actor(
     mut projection: Projection,
     lifecycle: watch::Sender<Progress>,
     operations: Arc<AtomicUsize>,
+    mut changes: turn_changes::Recorder,
 ) {
     let mut pending: HashMap<String, Pending> = HashMap::new();
     let mut serial = 0u64;
     let mut restored = false;
+    let mut change_refs: HashMap<String, String> = HashMap::new();
+    let mut stopped = false;
     let mut previous_store: Option<(String, Store)> = None;
     // RPC 超时后的副作用未知，禁止把该进程借给其他会话。
     let mut uncertain = false;
@@ -628,6 +643,7 @@ async fn actor(
                                 Err(error) => { let _ = reply.send(Err(error)); continue; }
                             }
                         }
+                        change_refs.clear();
                         id = next; channel = target;
                         let _ = reply.send(Ok(Value::Null));
                     }
@@ -640,6 +656,38 @@ async fn actor(
                     }
                     if matches!(kind, Kind::Restore) && restored {
                         let before = command["_before"].as_u64().map(|v| v as usize); let _ = reply.send(Ok(projection.page(before))); continue;
+                    }
+                    if command["type"] == "desktop_changes" {
+                        let (recorder, records) = tokio::task::spawn_blocking(move || { let records = changes.list(); (changes, records) }).await.expect("changes recorder panicked");
+                        changes = recorder;
+                        let result = (|| -> Result<Value> {
+                            let mut turns = serde_json::to_value(records).map_err(|_| AppError::new("CHANGES", "读取轮次失败"))?;
+                            if let Some(turns) = turns.as_array_mut() {
+                                for turn in turns {
+                                    let turn_id = turn["id"].as_str().unwrap_or("").to_string();
+                                    if let Some(files) = turn["files"].as_array_mut() {
+                                        for file in files {
+                                            let diff = file["diff"].as_str().unwrap_or("");
+                                            let key = format!("{}:{}", turn_id, file["path"]);
+                                            let reference = if let Some(reference) = change_refs.get(&key) { reference.clone() } else {
+                                                let reference = store.body(diff)?;
+                                                change_refs.insert(key, reference.clone()); reference
+                                            };
+                                            file.as_object_mut().unwrap().remove("diff");
+                                            file["contentRef"] = reference.into();
+                                        }
+                                    }
+                                }
+                            }
+                            Ok(turns)
+                        })();
+                        let _ = reply.send(result); continue;
+                    }
+                    if command["type"] == "abort" { stopped = true; }
+                    // 提交前完成基线采集，避免 agent_start 通知到达时文件已经被工具改写。
+                    if command["type"] == "prompt" && !command["message"].as_str().unwrap_or("").starts_with('/') {
+                        let title = command["message"].as_str().unwrap_or("").to_string();
+                        changes = tokio::task::spawn_blocking(move || { changes.begin(&title); changes }).await.expect("changes recorder panicked");
                     }
                     serial += 1; let request_id = format!("req-{serial}");
                     // 扩展交互以 Pi 分配的 ID 关联等待者，且不产生普通 RPC 响应。
@@ -683,6 +731,8 @@ async fn actor(
                         if let Some(request) = pending.remove(request_id) {
                             if event["success"] != true { projection.text_presentations.reject(request_id); }
                             else if request.clears_text_queue { projection.text_presentations.clear(); }
+                            changes.context(&event["data"]);
+                            if event["success"] != true && matches!(request.kind, Kind::Mutate) && lifecycle.borrow().state == Lifecycle::Idle { changes.cancel(); }
                             if let Some(path) = event["data"]["sessionFile"].as_str() { projection.text_presentations.context(path); }
                             let result = if event["success"] != true { Err(AppError::new("PI_COMMAND", event["error"].as_str().unwrap_or("Pi 拒绝了请求"))) }
                             else if let Some(error) = request.bridge_error { Err(AppError::new("BRIDGE_FAILED", error)) }
@@ -701,7 +751,7 @@ async fn actor(
                 }
                 Some(Ok(Some(event))) => {
                     let mut previous = *lifecycle.borrow();
-                    if event["type"] == "agent_start" { previous.failed = false; }
+                    if event["type"] == "agent_start" { previous.failed = false; stopped = false; }
                     if event["type"] == "message_end" && event["message"]["stopReason"] == "error" {
                         previous.failed = true; lifecycle.send_replace(previous);
                     }
@@ -710,6 +760,20 @@ async fn actor(
                         Some("agent_settled") => Some(Lifecycle::Idle),
                         _ => None,
                     };
+                    if event["type"] == "agent_start" {
+                        changes = tokio::task::spawn_blocking(move || { changes.begin("后续任务"); changes }).await.expect("changes recorder panicked");
+                    }
+                    if event["type"] == "agent_settled" {
+                        let state = if previous.failed { "error" } else if stopped { "stopped" } else { "done" };
+                        let (recorder, result) = tokio::task::spawn_blocking(move || {
+                            let result = changes.finish(state);
+                            (changes, result)
+                        }).await.expect("changes recorder panicked");
+                        changes = recorder;
+                        if result.is_err() {
+                            let _ = store.push(json!({"type":"notice","message":"本轮代码变更保存失败，请从处理过程查看单次修改。"}));
+                        }
+                    }
                     if let Err(error) = projection.event(event, &mut store) { failure=Some(error); break; }
                     if let Some(next) = next {
                         lifecycle.send_replace(Progress { state: next, settled: previous.settled + u64::from(next == Lifecycle::Idle), failed:previous.failed });
@@ -725,6 +789,7 @@ async fn actor(
             }
         }
     }
+    let _ = tokio::task::spawn_blocking(move || changes.finish("stopped")).await;
     for (_, request) in pending {
         let _ = request.reply.send(Err(failure
             .clone()
