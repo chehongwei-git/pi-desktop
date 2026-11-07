@@ -6,6 +6,12 @@ export default defineConfig(({ mode }) => ({
   // 独立端口仍会共享默认缓存；测试单独存储预构建，避免并发开发使动态导入失效。
   cacheDir:
     mode === 'browser-test' ? 'node_modules/.vite-browser-tests' : undefined,
+  // 组件夹具通过路由注入脚本，不在 index.html 的依赖图中。提前扫描所有入口，
+  // 避免后续用例发现新依赖时重新预构建并重载正在执行断言的页面。
+  optimizeDeps:
+    mode === 'browser-test'
+      ? { entries: ['index.html', 'tests/browser/*-fixture.ts'] }
+      : undefined,
   server: {
     port: 1420,
     strictPort: true,
