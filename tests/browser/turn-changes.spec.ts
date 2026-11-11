@@ -1,5 +1,65 @@
 /** 独立审阅列不得受文件列表和输入区高度影响；窄屏保留页面上下文。 */
 import { test, expect } from '@playwright/test';
+
+test('partial results remain explicit across themes, narrow layouts and keyboard review', async ({
+  page,
+}) => {
+  await page.route('**/turn-changes-fixture', (route) =>
+    route.fulfill({
+      contentType: 'text/html',
+      body: '<!doctype html><html><head><meta charset="utf-8"></head><body><main></main><script type="module" src="/tests/browser/turn-changes-fixture.ts"></script></body></html>',
+    }),
+  );
+  await page.goto('/turn-changes-fixture');
+  await page.getByRole('button', { name: '部分统计轮次', exact: true }).click();
+  await page.getByRole('button', { name: /代码变更/ }).click();
+  await expect(page.getByLabel('已精确统计部分')).toHaveText('+1−1');
+  const file = page.getByRole('button', { name: /large.ts/ });
+  await expect(file).toHaveText(/无法精确统计/);
+  for (const theme of ['light', 'dark']) {
+    await page.evaluate(
+      (theme) => (document.documentElement.dataset.theme = theme),
+      theme,
+    );
+    for (const width of [1500, 480]) {
+      await page.setViewportSize({ width, height: 900 });
+      await expect(
+        page
+          .getByRole('region', { name: '变更文件', exact: true })
+          .getByRole('status'),
+      ).toContainText('部分统计');
+      await file.focus();
+      await file.press('Enter');
+      const panel = page.getByRole('complementary', {
+        name: '代码变更',
+        exact: true,
+      });
+      await expect(panel).toContainText('无法精确统计增删行数');
+      await expect(panel.locator('.review-file-counts')).toHaveText('');
+      await page.screenshot({
+        path: `test-results/partial-changes-${theme}-${width}.png`,
+      });
+      await panel
+        .getByRole('button', { name: '关闭变更', exact: true })
+        .press('Escape');
+      await expect(file).toBeFocused();
+      expect(
+        await page.evaluate(
+          () => document.documentElement.scrollWidth <= innerWidth,
+        ),
+      ).toBe(true);
+    }
+  }
+  await page
+    .getByRole('button', { name: '未完整采集轮次', exact: true })
+    .click();
+  await expect(
+    page.getByText('部分文件未比较，无法确认本轮是否还有其他变更。'),
+  ).toBeVisible();
+  await expect(page.getByText('本轮没有检测到可展示的文件变更。')).toHaveCount(
+    0,
+  );
+});
 test('review keeps full height when the file list or composer grows', async ({
   page,
 }) => {

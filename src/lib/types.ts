@@ -222,12 +222,15 @@ export interface TurnChanges {
   title: string;
   state: string;
   warnings: string[];
+  captureVersion?: number | null;
   files: {
     path: string;
     kind: string;
     added: number | null;
     removed: number | null;
     binary: boolean;
+    /** 超出精确比较预算时只提供替换视图，增删统计为空。 */
+    diffAccuracy?: 'exact' | 'replacement' | null;
     contentRef: string;
   }[];
 }

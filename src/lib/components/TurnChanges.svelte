@@ -49,17 +49,23 @@
   });
   let turn = $derived(turns.find((item) => item.id === selected) ?? turns[0]);
   let index = $derived(turns.findIndex((item) => item.id === turn?.id));
-  let added = $derived(
-    turn?.files.reduce((sum, file) => sum + (file.added ?? 0), 0) ?? 0,
+  // 未知计数不能按零处理；汇总只包含两项均精确的文本文件。
+  let counted = $derived(
+    turn?.files.filter((file) => file.added != null && file.removed != null) ??
+      [],
   );
-  let removed = $derived(
-    turn?.files.reduce((sum, file) => sum + (file.removed ?? 0), 0) ?? 0,
-  );
+  let added = $derived(counted.reduce((sum, file) => sum + file.added!, 0));
+  let removed = $derived(counted.reduce((sum, file) => sum + file.removed!, 0));
   let current = $derived(review ? review.current?.id : lastOpened);
   let incomplete = $derived(
     turn?.warnings.some((warning) =>
       /未比较|不完整|无法读取|超限/.test(warning),
     ) ?? false,
+  );
+  let partialStats = $derived(
+    incomplete ||
+      (turn?.files.some((file) => file.added == null || file.removed == null) ??
+        false),
   );
   function id(file: TurnChanges['files'][number]): string {
     return `turn:${turn?.id}:${file.path}`;
@@ -151,12 +157,15 @@
           >{turn?.files.length ?? 0}</span
         >
       </button>
-      {#if turn?.files.length}<span class="summary-counts"
+      {#if counted.length}<span
+          class="summary-counts"
+          aria-label={partialStats ? '已精确统计部分' : '增删行数'}
           ><span class="changes-added">+{added}</span><span
             class="changes-removed">−{removed}</span
           ></span
         >{/if}
       <div class="changes-actions">
+        {#if partialStats}<span class="round-hint">部分统计</span>{/if}
         {#if incomplete}<span
             class="round-hint"
             title="部分文件未纳入，查看采集范围与说明">部分文件未纳入</span
@@ -253,6 +262,9 @@
                 ? '任务未完成，以下为已保存的修改'
                 : '任务已停止，以下为已保存的修改'}
             </p>{/if}
+          {#if partialStats}<p class="changes-message" role="status">
+              部分统计：仅汇总已精确比较的文本文件，请查看采集范围与说明。
+            </p>{/if}
           {#each turn.files as file (file.path)}
             <button
               class="changes-file"
@@ -282,6 +294,8 @@
                     : 'M'}</span
               >
               {#if file.binary}<span class="file-stats">二进制</span
+                >{:else if file.added == null || file.removed == null}<span
+                  class="file-stats">无法精确统计</span
                 >{:else}<span class="file-stats"
                   ><span class="changes-added">+{file.added}</span><span
                     class="changes-removed">−{file.removed}</span
@@ -289,7 +303,9 @@
                 >{/if}
             </button>
           {:else}<p class="changes-message">
-              本轮没有检测到可展示的文件变更。
+              {incomplete
+                ? '部分文件未比较，无法确认本轮是否还有其他变更。'
+                : '本轮没有检测到可展示的文件变更。'}
             </p>{/each}
         {/if}
       </div>

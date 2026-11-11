@@ -77,6 +77,52 @@ describe('轮次变更', () => {
     );
   });
 
+  it('shows only known counts and distinguishes an incomplete empty result', async () => {
+    const partial: Turn = {
+      ...turns[0],
+      warnings: ['2 个路径未比较：超过总内容预算。'],
+      files: [
+        ...turns[0].files,
+        {
+          ...turns[0].files[0],
+          path: 'large.ts',
+          added: null,
+          removed: null,
+          diffAccuracy: 'replacement',
+        },
+        {
+          ...turns[0].files[0],
+          path: 'image.png',
+          added: null,
+          removed: null,
+          binary: true,
+        },
+      ],
+    };
+    const view = render(TurnChanges, {
+      turns: [partial],
+      expandedInitially: true,
+      onselect: vi.fn(),
+      onretry: vi.fn(),
+    });
+    expect(screen.getByLabelText('已精确统计部分')).toHaveTextContent('+2−1');
+    expect(screen.getByRole('button', { name: /large.ts/ })).toHaveTextContent(
+      '无法精确统计',
+    );
+    expect(screen.getByRole('button', { name: /image.png/ })).toHaveTextContent(
+      '二进制',
+    );
+    expect(screen.queryByText('+0')).toBeNull();
+    expect(screen.getByRole('status')).toHaveTextContent('部分统计');
+    await view.rerender({ turns: [{ ...partial, files: [] }] });
+    expect(
+      screen.getByText('部分文件未比较，无法确认本轮是否还有其他变更。'),
+    ).toBeTruthy();
+    expect(screen.queryByText('本轮没有检测到可展示的文件变更。')).toBeNull();
+    await view.rerender({ turns: [{ ...partial, warnings: [], files: [] }] });
+    expect(screen.getByText('本轮没有检测到可展示的文件变更。')).toBeTruthy();
+  });
+
   it('defaults collapsed and opens merged file differences', async () => {
     const onselect = vi.fn();
     render(TurnChanges, { turns, onselect, onretry: vi.fn() });

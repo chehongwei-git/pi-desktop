@@ -3,10 +3,10 @@
   import ReviewLayout from '../../src/lib/components/ReviewLayout.svelte';
   import Transcript from '../../src/lib/components/Transcript.svelte';
   import TurnChanges from '../../src/lib/components/TurnChanges.svelte';
-  import type { Message } from '../../src/lib/types';
+  import type { Message, TurnChanges as Turn } from '../../src/lib/types';
   let open:
     ((message: Message, trigger: HTMLButtonElement) => void) | undefined;
-  let turns = $state([
+  let turns = $state<Turn[]>([
     {
       id: 'one',
       title: '调整输入布局',
@@ -24,6 +24,29 @@
       ],
     },
   ]);
+  function partialRound(empty = false) {
+    turns = [
+      {
+        ...turns[0],
+        id: `partial-${turns.length}`,
+        warnings: ['2 个路径未比较：超过总内容预算。'],
+        files: empty
+          ? []
+          : [
+              turns[0].files[0],
+              {
+                ...turns[0].files[0],
+                path: 'src/large.ts',
+                contentRef: 'replacement',
+                added: null,
+                removed: null,
+                diffAccuracy: 'replacement',
+              },
+            ],
+      },
+      ...turns,
+    ];
+  }
   // 测试入口模拟宿主生成新快照，不改变生产组件接口。
   function nextRound() {
     turns = [
@@ -58,8 +81,10 @@
         onload={async () => {}}
         onvisible={() => {}}
         onerror={() => {}}
-        read={async () => ({
-          text: '-1 const value = 1;\n+1 const value = 2;',
+        read={async (id) => ({
+          text: id.includes('replacement')
+            ? '! 完整替换：差异超过精确比较预算，无法精确统计增删行数。\n-1 old\n+1 new'
+            : '-1 const value = 1;\n+1 const value = 2;',
           next: 0,
           done: true,
         })}
@@ -72,6 +97,8 @@
         onselect={(message, trigger) => open?.(message, trigger)}
       />
       <button onclick={nextRound}>生成新轮次</button>
+      <button onclick={() => partialRound()}>部分统计轮次</button>
+      <button onclick={() => partialRound(true)}>未完整采集轮次</button>
       <textarea aria-label="消息输入" style="width:100%;height:100px"
         >继续调整</textarea
       >
