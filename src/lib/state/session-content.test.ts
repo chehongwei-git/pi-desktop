@@ -51,6 +51,86 @@ describe('runtime-owned content references', () => {
       expect(cache.resolve(handle, 'new')).toBe(raw);
     expect(() => cache.resolve(old.contentRef!, 'old')).toThrow();
   });
+  it('owns nested skill references and rebinds them across reconnects without losing the wrapper', () => {
+    const cache = new SessionContent();
+    const skillMessage: Message = {
+      ...message,
+      role: 'user',
+      tool: null,
+      images: [],
+      textParts: [
+        {
+          kind: 'skill',
+          id: 'skill',
+          text: '',
+          chars: 1000,
+          contentRef: 'wrapper-1',
+          truncated: true,
+          skill: {
+            name: 'ego-browser',
+            location: '/skills/SKILL.md',
+            text: '',
+            contentRef: 'instructions-1',
+            truncated: true,
+          },
+        },
+      ],
+    };
+    const old = cache.bind(skillMessage, 'old');
+    const handle = old.textParts![0].skill!.contentRef!;
+    expect(cache.resolve(handle, 'old')).toBe('instructions-1');
+    expect(() => cache.resolve(handle, 'new')).toThrow('引用尚未恢复');
+    cache.retain([old]);
+    expect(cache.resolve(handle, 'old')).toBe('instructions-1');
+    const next = cache.bind(
+      {
+        ...skillMessage,
+        contentRef: 'body-9',
+        textParts: [
+          {
+            ...skillMessage.textParts![0],
+            contentRef: 'wrapper-2',
+            skill: {
+              ...skillMessage.textParts![0].skill!,
+              contentRef: 'instructions-2',
+            },
+          },
+        ],
+      },
+      'new',
+      old,
+    );
+    expect(next.textParts![0].skill!.contentRef).toBe(handle);
+    expect(next.textParts![0].contentRef).toBe(old.textParts![0].contentRef);
+    cache.retain([next]);
+    expect(cache.resolve(handle, 'new')).toBe('instructions-2');
+    expect(cache.resolve(next.textParts![0].contentRef!, 'new')).toBe(
+      'wrapper-2',
+    );
+    expect(() => cache.resolve(handle, 'old')).toThrow();
+    const changed = cache.bind(
+      {
+        ...skillMessage,
+        textParts: [
+          {
+            ...skillMessage.textParts![0],
+            skill: { ...skillMessage.textParts![0].skill!, name: 'changed' },
+          },
+        ],
+      },
+      'third',
+      next,
+    );
+    cache.retain([changed]);
+    expect(() => cache.resolve(handle, 'third')).toThrow();
+    expect(
+      cache.resolve(changed.textParts![0].skill!.contentRef!, 'third'),
+    ).toBe('instructions-1');
+    cache.retain([]);
+    expect(() =>
+      cache.resolve(changed.textParts![0].skill!.contentRef!, 'third'),
+    ).toThrow();
+  });
   it('never treats reused body numbers as the same content after a history change', () => {
     const cache = new SessionContent();
     const old = cache.bind(message, 'old');

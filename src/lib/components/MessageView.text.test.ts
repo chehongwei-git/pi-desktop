@@ -3,6 +3,7 @@ import { cleanup, fireEvent, render, waitFor } from '@testing-library/svelte';
 import { afterEach, expect, it, vi } from 'vitest';
 import MessageView from './MessageView.svelte';
 import type { Message } from '../types';
+import { restoreMessageDraft } from '../message-edit';
 afterEach(cleanup);
 function props(message: Partial<Message> = {}) {
   return {
@@ -149,6 +150,102 @@ it('renders sent references as read-only cards while retaining raw message copyi
   expect(view.container.querySelector('.user-plain-text')?.textContent).toBe(
     text,
   );
+});
+it('folds skill instructions without hiding the request and preserves copy/edit originals', async () => {
+  const wrapper =
+    '<skill name="docx" location="C:\\skills\\SKILL.md">\n说明\n</skill>';
+  const request = '\n\n请整理文档';
+  const p = props({
+    text: wrapper + request,
+    textParts: [
+      {
+        kind: 'skill',
+        id: 'skill',
+        text: '',
+        chars: wrapper.length,
+        contentRef: 'raw',
+        truncated: true,
+        skill: {
+          name: 'docx',
+          location: 'C:\\skills\\SKILL.md',
+          text: '',
+          contentRef: 'instructions',
+          truncated: true,
+        },
+      },
+      {
+        kind: 'text',
+        id: 'request',
+        text: request,
+        chars: request.length,
+        contentRef: null,
+        truncated: false,
+      },
+    ],
+  });
+  p.read.mockImplementation(async (id: string) => ({
+    text: id === 'raw' ? wrapper : '说明',
+    next: 100,
+    done: true,
+  }));
+  const writeText = vi.fn().mockResolvedValue(undefined);
+  Object.defineProperty(navigator, 'clipboard', {
+    configurable: true,
+    value: { writeText },
+  });
+  const view = render(MessageView, p);
+  expect(view.getByText('请整理文档')).toBeVisible();
+  expect(view.queryByRole('region', { name: '技能说明' })).toBeNull();
+  expect(p.read).not.toHaveBeenCalled();
+  await fireEvent.click(view.getByRole('button', { name: /查看说明/ }));
+  expect(p.ontoggletool).toHaveBeenCalledWith('user', 'skill:skill');
+  await view.rerender({ toolViews: { user: { 'skill:skill': true } } });
+  expect(await view.findByText('说明', { exact: true })).toBeVisible();
+  const skillBody = view
+    .getByRole('region', { name: '技能说明' })
+    .querySelector<HTMLElement>('.skill-body')!;
+  skillBody.focus();
+  await fireEvent.keyDown(skillBody, { key: 'Escape' });
+  await view.rerender({ toolViews: {} });
+  await waitFor(() =>
+    expect(view.getByRole('button', { name: /查看说明/ })).toHaveFocus(),
+  );
+  await fireEvent.click(view.getByRole('button', { name: '复制消息' }));
+  await waitFor(() =>
+    expect(writeText).toHaveBeenCalledWith(wrapper + request),
+  );
+  const draft = await restoreMessageDraft(p.message, p.read);
+  expect(draft.text).toBe(wrapper + request);
+});
+it('retries failed skill reads in place', async () => {
+  const p = props({
+    text: 'raw',
+    textParts: [
+      {
+        kind: 'skill',
+        id: 'skill',
+        text: '',
+        chars: 100,
+        contentRef: 'raw',
+        truncated: true,
+        skill: {
+          name: 'demo',
+          location: '/skills/SKILL.md',
+          text: '',
+          contentRef: 'instructions',
+          truncated: true,
+        },
+      },
+    ],
+  });
+  p.read.mockRejectedValueOnce(new Error('读取失败'));
+  const view = render(MessageView, {
+    ...p,
+    toolViews: { user: { 'skill:skill': true } },
+  });
+  expect(await view.findByRole('alert')).toHaveTextContent('读取失败');
+  await fireEvent.click(view.getByRole('button', { name: '重试读取全文' }));
+  expect(await view.findByText('完整内容')).toBeVisible();
 });
 it('keeps assistant Markdown outside user folding rules', () => {
   const view = render(

@@ -88,6 +88,15 @@ export class SessionContent {
         : message.tool,
       textParts: message.textParts?.map((part) => ({
         ...part,
+        // 技能说明与原始包装是两个独立正文引用，必须一起绑定、恢复和保留。
+        skill: part.skill
+          ? {
+              ...part.skill,
+              contentRef: part.skill.contentRef
+                ? transform(part.skill.contentRef)
+                : part.skill.contentRef,
+            }
+          : part.skill,
         contentRef: part.contentRef
           ? transform(part.contentRef)
           : part.contentRef,

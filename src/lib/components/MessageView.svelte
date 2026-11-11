@@ -8,6 +8,7 @@
   import ToolMessage from './ToolMessage.svelte';
   import MessageImage from './MessageImage.svelte';
   import UserText from './UserText.svelte';
+  import SkillCard from './SkillCard.svelte';
   import MessageFiles from './MessageFiles.svelte';
   import { foldable } from '../draft-parts';
   import { fullText } from '../text-presentation';
@@ -70,6 +71,10 @@
         (part) => part.kind === 'files' && part.files?.length,
       ),
   );
+  let hasSkill = $derived(
+    message.role === 'user' &&
+      message.textParts?.some((part) => part.kind === 'skill' && part.skill),
+  );
   let raw = $derived(!!toolViews[message.id]?.['files:raw']);
   let longUser = $derived(
     message.role === 'user' &&
@@ -78,7 +83,10 @@
         foldable(message.text)),
   );
   let html = $derived(
-    longUser || message.role === 'toolResult' || message.status === 'streaming'
+    hasSkill ||
+      longUser ||
+      message.role === 'toolResult' ||
+      message.status === 'streaming'
       ? ''
       : markdown(message.text),
   );
@@ -197,7 +205,36 @@
     {#if message.role === 'compactionSummary'}<div class="summary-label">
         上下文已压缩
       </div>{/if}
-    {#if hasFiles && !raw}
+    {#if hasSkill}
+      <div class="user-message-parts skill-message-parts">
+        {#each message.textParts ?? [] as part (part.id)}
+          {#if part.kind === 'skill' && part.skill}
+            <SkillCard
+              skill={part.skill}
+              {read}
+              {onlayout}
+              expanded={toolViews[message.id]?.[`skill:${part.id}`] ?? false}
+              ontoggle={() => ontoggletool(message.id, `skill:${part.id}`)}
+            />
+          {:else if part.kind === 'files' && part.files}
+            <MessageFiles
+              files={part.files}
+              views={toolViews[message.id] ?? {}}
+              toggle={(key) => ontoggletool(message.id, key)}
+              {onlayout}
+            />
+          {:else}
+            <UserText
+              source={part}
+              {read}
+              {onlayout}
+              expanded={toolViews[message.id]?.[`text:${part.id}`] ?? false}
+              ontoggle={() => ontoggletool(message.id, `text:${part.id}`)}
+            />
+          {/if}
+        {/each}
+      </div>
+    {:else if hasFiles && !raw}
       <div class="user-message-parts">
         {#each message.textParts ?? [] as part (part.id)}
           {#if part.kind === 'files' && part.files}
@@ -367,10 +404,19 @@
             disabled={editLocked}
             onclick={() => onlayout(() => onedit?.(message))}
             ><Icon name="edit" size={15} /></button
-          >{/if}{#if !longUser && message.contentRef && message.truncated}<button
+          >{/if}{#if !hasSkill && !longUser && message.contentRef && message.truncated}<button
             class="text-button"
             onclick={() => onfull(message)}>查看完整正文</button
           >{/if}
       </div>{/if}
   {/if}
 </article>
+
+<style>
+  /* flex 子项需要显式允许收缩，否则长技能名会在窄窗口撑出正文边界。 */
+  .skill-message-parts {
+    min-width: 0;
+    max-width: 100%;
+    width: 480px;
+  }
+</style>

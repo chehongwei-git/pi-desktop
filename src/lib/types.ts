@@ -122,7 +122,15 @@ export interface TextRange {
   end: number;
 }
 export interface MessageTextPart {
-  kind: 'text' | 'paste' | 'files';
+  kind: 'text' | 'paste' | 'files' | 'skill';
+  /** 仅宿主生成的展示信息；原包装仍由片段正文引用保留，供编辑恢复。 */
+  skill?: {
+    name: string;
+    location: string;
+    text: string;
+    contentRef: string | null;
+    truncated: boolean;
+  };
   files?: MessageFileReference[];
   id: string;
   text: string;

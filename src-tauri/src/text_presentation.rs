@@ -26,6 +26,8 @@ pub struct FileReference {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TextPart {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skill: Option<SkillInfo>,
     pub kind: String,
     pub id: String,
     pub text: String,
@@ -34,6 +36,43 @@ pub struct TextPart {
     pub truncated: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub files: Option<Vec<FileReference>>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillInfo {
+    pub name: String,
+    pub location: String,
+    pub text: String,
+    pub content_ref: Option<String>,
+    pub truncated: bool,
+}
+/// 只识别消息开头的标准包装；缺少闭合或出现嵌套标签时保留原文。
+fn skill(text: &str) -> Option<(&str, &str, &str, usize)> {
+    let rest = text.strip_prefix("<skill name=\"")?;
+    let (name, rest) = rest.split_once("\" location=\"")?;
+    let (location, rest) = rest.split_once("\">")?;
+    if name.is_empty()
+        || location.is_empty()
+        || name.contains(['\n', '\r', '<', '>'])
+        || location.contains(['\n', '\r', '<', '>'])
+    {
+        return None;
+    }
+    let newline = if rest.starts_with("\r\n") {
+        "\r\n"
+    } else {
+        "\n"
+    };
+    let body = rest.strip_prefix(newline)?;
+    let (instructions, tail) = body.split_once(&format!("{newline}</skill>"))?;
+    if instructions.contains("<skill ") || instructions.contains("</skill>") {
+        return None;
+    }
+    let end = text.len() - tail.len();
+    if !tail.is_empty() && !tail.starts_with(&format!("{newline}{newline}")) {
+        return None;
+    }
+    Some((name, location, instructions, end))
 }
 #[derive(Serialize, Deserialize)]
 struct Saved {
@@ -231,6 +270,39 @@ impl Presentations {
             return Ok(None);
         }
         let text = text_content(&value["content"]);
+        // 在消息预览截断前切分，确保技能再长也不会吞掉用户任务；不写入 Pi 历史。
+        if let Some((name, location, instructions, end)) = skill(&text) {
+            let mut parts = vec![TextPart {
+                kind: "skill".into(),
+                id: "skill".into(),
+                text: String::new(),
+                chars: text[..end].chars().count(),
+                content_ref: Some(store.body(&text[..end])?),
+                truncated: true,
+                files: None,
+                skill: Some(SkillInfo {
+                    name: name.into(),
+                    location: location.into(),
+                    text: String::new(),
+                    content_ref: Some(store.body(instructions)?),
+                    truncated: true,
+                }),
+            }];
+            if end < text.len() {
+                let tail = &text[end..];
+                parts.push(TextPart {
+                    kind: "text".into(),
+                    id: "skill-request".into(),
+                    text: tail.chars().take(64 * 1024).collect(),
+                    chars: tail.chars().count(),
+                    content_ref: Some(store.body(tail)?),
+                    truncated: tail.chars().count() > 64 * 1024,
+                    files: None,
+                    skill: None,
+                });
+            }
+            return Ok(Some(parts));
+        }
         let hash = digest(&text, &images(&value["content"]));
         // 原始时间戳在实时事件和 get_entries 中保持不变；不使用运行时临时 message-N。
         let key = value["timestamp"]
@@ -352,6 +424,7 @@ impl Presentations {
             let chars = text.chars().count();
             let limit = if part.kind == "paste" { 360 } else { 64 * 1024 };
             parts.push(TextPart {
+                skill: None,
                 kind: part.kind.clone(),
                 id: part.id.clone(),
                 text: text.chars().take(limit).collect(),
@@ -385,6 +458,51 @@ mod tests {
                 files: None,
             },
         ]
+    }
+    #[test]
+    fn skill_projection_is_bounded_and_preserves_request_and_raw_parts() {
+        for newline in ["\n", "\r\n"] {
+            for location in ["/skills/中文/SKILL.md", "C:\\skills\\demo\\SKILL.md"] {
+                let instructions = "规则😀".repeat(30_000);
+                let text = format!("<skill name=\"demo\" location=\"{location}\">{newline}{instructions}{newline}</skill>{newline}{newline}请整理文档");
+                let mut store = Store::new().unwrap();
+                let mut p = Presentations::default();
+                for live in [false, true] {
+                    let parts = p
+                        .project(&json!({"role":"user", "content":text}), live, &mut store)
+                        .unwrap()
+                        .unwrap();
+                    assert_eq!(parts.len(), 2);
+                    assert!(parts[0].text.is_empty());
+                    assert_eq!(parts[0].skill.as_ref().unwrap().location, location);
+                    assert_eq!(parts[1].text, format!("{newline}{newline}请整理文档"));
+                    assert!(parts.iter().all(|part| part.content_ref.is_some()));
+                }
+                assert!(p
+                    .project(
+                        &json!({"role":"assistant", "content":text}),
+                        false,
+                        &mut store
+                    )
+                    .unwrap()
+                    .is_none());
+            }
+        }
+    }
+    #[test]
+    fn skill_parser_rejects_examples_and_malformed_blocks() {
+        let valid = "<skill name=\"demo\" location=\"/skills/SKILL.md\">\n规则\n</skill>";
+        assert_eq!(skill(valid).unwrap().2, "规则");
+        for text in [
+            format!("```\n{valid}\n```"),
+            format!("示例：{valid}"),
+            valid.replace("</skill>", ""),
+            format!("{valid}unexpected"),
+            valid.replace("规则", "<skill name=\"nested\">"),
+            valid.replace("demo", ""),
+        ] {
+            assert!(skill(&text).is_none(), "{text}");
+        }
     }
     #[test]
     fn validates_unicode_and_full_coverage() {
