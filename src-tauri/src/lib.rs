@@ -7,6 +7,8 @@ mod model_config;
 mod model_discovery;
 mod new_session;
 mod platform;
+mod plugin_commands;
+mod plugins;
 mod rpc;
 mod runtime;
 mod settings;
@@ -36,6 +38,7 @@ struct AppState {
     lifecycle: AsyncMutex<()>,
     drops: Mutex<file_import::Drops>,
     file_reads: AsyncMutex<()>,
+    plugin_operations: AsyncMutex<()>,
 }
 impl AppState {
     /// 克隆句柄后立即释放锁，让响应和停止可并发进入 actor。
@@ -536,6 +539,92 @@ async fn read_dropped_files(
         .map_err(|_| AppError::new("FILE", "文件读取任务失败，请重试。"))
 }
 
+/// 插件扫描和写入均在 blocking 池执行，不启动 Pi 或执行项目代码。
+#[tauri::command]
+async fn plugin_catalog(
+    app: tauri::AppHandle,
+    project: Option<String>,
+) -> Result<plugins::Catalog> {
+    let home = app
+        .path()
+        .home_dir()
+        .map_err(|_| AppError::new("HOME", "无法读取用户目录"))?;
+    tokio::task::spawn_blocking(move || {
+        plugins::load(
+            &model_config::directory(&home),
+            &home,
+            project.as_deref().map(std::path::Path::new),
+        )
+    })
+    .await
+    .map_err(|_| AppError::new("PLUGINS", "读取插件任务失败"))?
+}
+#[tauri::command]
+async fn change_plugin(
+    app: tauri::AppHandle,
+    project: Option<String>,
+    change: plugins::Change,
+) -> Result<plugins::Catalog> {
+    let home = app
+        .path()
+        .home_dir()
+        .map_err(|_| AppError::new("HOME", "无法读取用户目录"))?;
+    tokio::task::spawn_blocking(move || {
+        plugins::change(
+            &model_config::directory(&home),
+            &home,
+            project.as_deref().map(std::path::Path::new),
+            change,
+        )
+    })
+    .await
+    .map_err(|_| AppError::new("PLUGINS", "插件保存任务失败，请重新读取确认状态"))?
+}
+#[tauri::command]
+async fn plugin_detail(
+    app: tauri::AppHandle,
+    project: Option<String>,
+    kind: String,
+    id: String,
+) -> Result<String> {
+    let home = app
+        .path()
+        .home_dir()
+        .map_err(|_| AppError::new("HOME", "无法读取用户目录"))?;
+    tokio::task::spawn_blocking(move || {
+        plugins::detail(
+            &model_config::directory(&home),
+            &home,
+            project.as_deref().map(std::path::Path::new),
+            &kind,
+            &id,
+        )
+    })
+    .await
+    .map_err(|_| AppError::new("PLUGINS", "读取插件详情失败"))?
+}
+/// 来源操作有独立串行锁；不与会话生命周期锁耦合，不阻塞停止任务。
+#[tauri::command]
+async fn plugin_command(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    project: Option<String>,
+    request: plugin_commands::Request,
+) -> Result<Value> {
+    let _gate = state.plugin_operations.lock().await;
+    let home = app
+        .path()
+        .home_dir()
+        .map_err(|_| AppError::new("HOME", "无法读取用户目录"))?;
+    plugin_commands::run(
+        &state.config()?,
+        &home,
+        project.as_deref().map(std::path::Path::new),
+        request,
+    )
+    .await
+}
+
 /// 统一安装受限插件和命令；关闭窗口必须先 await 自有进程回收。
 pub fn run() {
     tauri::Builder::default()
@@ -555,6 +644,7 @@ pub fn run() {
                 lifecycle: AsyncMutex::new(()),
                 drops: Mutex::new(file_import::Drops::default()),
                 file_reads: AsyncMutex::new(()),
+                plugin_operations: AsyncMutex::new(()),
             });
             let state = app.state::<AppState>();
             state
@@ -564,6 +654,10 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             get_settings,
+            plugin_catalog,
+            change_plugin,
+            plugin_detail,
+            plugin_command,
             pick_files,
             read_dropped_files,
             save_settings,

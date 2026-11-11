@@ -3,6 +3,7 @@
   /** name 选择静态 SVG 路径，size 为 CSS 像素；组件不接收任意 SVG 字符串。 */
   let { name, size = 20 }: { name: string; size?: number } = $props();
   const paths: Record<string, string> = {
+    plug: 'M9 3v5m6-5v5M6 8h12v4a6 6 0 0 1-12 0V8ZM12 18v4',
     edit: 'm16 3 5 5M4 20l4-1L21 6a2.1 2.1 0 0 0-3-3L5 16l-1 4Z',
     panel:
       'M9 3v18M4 3h16a1 1 0 0 1 1 1v16a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1Z',

@@ -16,6 +16,7 @@
   import { conversationActivity } from './lib/conversation-activity';
   import Modal from './lib/components/Modal.svelte';
   import SettingsDialog from './lib/components/SettingsDialog.svelte';
+  import PluginsPage from './lib/components/PluginsPage.svelte';
   import ExtensionDialog from './lib/components/ExtensionDialog.svelte';
   import BuiltinCommandDialog from './lib/components/BuiltinCommandDialog.svelte';
   import SidebarSession from './lib/components/SidebarSession.svelte';
@@ -108,6 +109,31 @@
   }
   let displayProject = $derived(desktop.newChatProject ?? desktop.project);
   let sidebar = $state(true);
+  let pluginsOpen = $state(false);
+  let pluginsPage = $state<PluginsPage>();
+  let pluginsTrigger: HTMLElement | null = null;
+  /** 插件与设置分别保护草稿，导航共用同一入口，保留后台对话挂载。 */
+  function openPlugins(): void {
+    if (pluginsOpen) return;
+    leaveSettings(() => {
+      hideSettings();
+      pluginsTrigger =
+        document.activeElement instanceof HTMLElement
+          ? document.activeElement
+          : null;
+      pluginsOpen = true;
+      sidebarCollection = null;
+      sidebar = window.innerWidth > 900;
+    });
+  }
+  async function closePlugins(): Promise<void> {
+    pluginsOpen = false;
+    await tick();
+    (sidebar && pluginsTrigger?.isConnected
+      ? pluginsTrigger
+      : document.querySelector<HTMLElement>('[data-composer-input]')
+    )?.focus({ preventScroll: true });
+  }
   let settingsOpen = $state(false);
   let settingsVisible = $derived(
     settingsOpen || desktop.builtinRequest?.name === 'settings',
@@ -119,6 +145,11 @@
   function leaveSettings(action: () => void, target = ''): void {
     if (settingsVisible && settingsPage)
       settingsPage.requestLeave(action, target);
+    else if (pluginsOpen && pluginsPage)
+      pluginsPage.requestLeave(() => {
+        pluginsOpen = false;
+        action();
+      });
     else action();
   }
   function hideSettings(): void {
@@ -129,6 +160,13 @@
   }
   let settingsTrigger: HTMLElement | null = null;
   function openSettings(): void {
+    if (pluginsOpen && pluginsPage) {
+      pluginsPage.requestLeave(() => {
+        pluginsOpen = false;
+        openSettings();
+      });
+      return;
+    }
     if (settingsVisible) return;
     settingsTrigger =
       document.activeElement instanceof HTMLElement
@@ -918,6 +956,12 @@
     <div class="sidebar-footer">
       <button
         class="sidebar-settings"
+        aria-current={pluginsOpen ? 'page' : undefined}
+        onclick={openPlugins}
+        ><Icon name="plug" size={19} /><span>插件</span></button
+      >
+      <button
+        class="sidebar-settings"
         aria-current={sidebarCollection === 'archived' && !settingsVisible
           ? 'page'
           : undefined}
@@ -1131,7 +1175,17 @@
         </div>
       </section>
     {/snippet}
-    {#if sidebarCollection !== null || settingsVisible}{@render notices()}{/if}
+    {#if sidebarCollection !== null || settingsVisible || pluginsOpen}{@render notices()}{/if}
+    {#if pluginsOpen}
+      <PluginsPage
+        bind:this={pluginsPage}
+        projects={workspace.projects}
+        sessions={workspace.sessions}
+        onclose={() => {
+          void closePlugins();
+        }}
+      />
+    {/if}
     {#if settingsVisible}
       <SettingsDialog
         bind:this={settingsPage}
@@ -1161,8 +1215,10 @@
     {/if}
     <div
       class="conversation-workspace"
-      class:collection-hidden={sidebarCollection !== null || settingsVisible}
-      inert={sidebarCollection !== null || settingsVisible}
+      class:collection-hidden={sidebarCollection !== null ||
+        settingsVisible ||
+        pluginsOpen}
+      inert={sidebarCollection !== null || settingsVisible || pluginsOpen}
     >
       <header class="topbar" class:show-feedback={feedbackOpen}>
         <div class="topbar-left">
@@ -1448,7 +1504,9 @@
             {/if}
             {#key desktop}<CommandComposer
                 {desktop}
-                active={!settingsVisible && sidebarCollection === null}
+                active={!settingsVisible &&
+                  !pluginsOpen &&
+                  sidebarCollection === null}
                 onsend={(mode) => {
                   void desktop.guard(async () => {
                     await desktop.send(mode);
