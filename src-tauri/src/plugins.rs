@@ -764,7 +764,8 @@ mod tests {
     fn skills_disable_does_not_modify_source() {
         let home = tempfile::tempdir().unwrap();
         let dir = home.path().join("agent");
-        let skill = dir.join("skills/review");
+        // 分段拼接以匹配目录扫描返回的原生路径，避免 Windows 混用分隔符导致 ID 不一致。
+        let skill = dir.join("skills").join("review");
         fs::create_dir_all(&skill).unwrap();
         let content = "---\nname: review\ndescription: Review code\n---\n# Instructions";
         fs::write(skill.join("SKILL.md"), content).unwrap();
