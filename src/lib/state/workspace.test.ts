@@ -14,6 +14,7 @@ const workspaces: Workspace[] = [];
 afterEach(() => {
   for (const workspace of workspaces.splice(0)) workspace.dispose();
   localStorage.clear();
+  vi.useRealTimers();
 });
 function fixture() {
   let serial = 0;
@@ -1012,6 +1013,175 @@ describe('cross-project workspace', () => {
     ).toBe(entry.id);
     expect(second.tasks).toHaveLength(0);
   });
+  it('stops only the archived background session before saving and preserves drafts', async () => {
+    const { workspace, api, action, states, tasks } = fixture();
+    await workspace.init();
+    await workspace.open('/a', '/a/one.jsonl');
+    const target = workspace.active;
+    target.draft = 'keep this draft';
+    target.run = 'running';
+    states.get(target.runtimeId)!.isStreaming = true;
+    target.task = {
+      taskId: 'archive-task',
+      position: 0,
+      runtimeId: target.runtimeId,
+      state: 'running',
+    };
+    tasks.push(target.task);
+    workspace.newDraft('/other');
+    const current = workspace.active;
+    const original = action.getMockImplementation()!;
+    action.mockImplementation(async (runtime, command, submission) => {
+      if (command.type === 'stop') {
+        expect(runtime).toBe(target.runtimeId);
+        states.get(runtime)!.isStreaming = false;
+        tasks[0].state = 'stopped';
+        return { ...states.get(runtime)!, followUp: ['queued message'] };
+      }
+      return original(runtime, command, submission);
+    });
+    const save = vi.spyOn(api, 'save').mockImplementation(async () => {
+      expect(target.run).toBe('idle');
+      expect(target.task?.state).toBe('stopped');
+    });
+    await current.manageSidebar('session', '/a/one.jsonl', {
+      state: 'archived',
+    });
+    expect(save).toHaveBeenCalledOnce();
+    expect(workspace.active).toBe(current);
+    expect(target.draft).toBe('keep this draft');
+    expect(target.recovered).toContain('queued message');
+    expect(
+      workspace.sidebarSessions.some((entry) => entry.path === '/a/one.jsonl'),
+    ).toBe(false);
+    await current.undoSidebar();
+    expect(
+      workspace.sidebarSessions.some((entry) => entry.path === '/a/one.jsonl'),
+    ).toBe(true);
+    expect(
+      action.mock.calls.filter(([, command]) => command.type === 'stop'),
+    ).toHaveLength(1);
+  });
+  it('waits for delayed settlement on one archive click and leaves the current conversation only after saving', async () => {
+    const { workspace, api, action, states, tasks } = fixture();
+    await workspace.init();
+    await workspace.open('/a', '/a/one.jsonl');
+    const target = workspace.active;
+    target.draft = 'preserved archive draft';
+    target.run = 'running';
+    target.task = {
+      taskId: 'delayed-stop',
+      runtimeId: target.runtimeId,
+      state: 'running',
+      position: 0,
+    };
+    tasks.push({ ...target.task });
+    const original = action.getMockImplementation()!;
+    let stateReads = 0;
+    action.mockImplementation(async (runtime, command, submission) => {
+      if (command.type === 'stop') {
+        states.get(runtime)!.isStreaming = true;
+        return {};
+      }
+      if (command.type === 'state' && ++stateReads >= 3) {
+        states.get(runtime)!.isStreaming = false;
+        tasks[0].state = 'stopped';
+      }
+      return original(runtime, command, submission);
+    });
+    const save = vi.spyOn(api, 'save').mockImplementationOnce(async () => {
+      expect(workspace.active).toBe(target);
+      expect(target.run).toBe('idle');
+    });
+    await target.manageSidebar('session', '/a/one.jsonl', {
+      state: 'archived',
+    });
+    expect(save).toHaveBeenCalledOnce();
+    expect(workspace.active).not.toBe(target);
+    expect(workspace.active.project).toBe('/a');
+    expect(workspace.active.snapshot.sessionFile).toBeUndefined();
+    expect(workspace.active.messages).toEqual([]);
+    expect(workspace.active.draft).toBe('');
+    expect(workspace.retained).not.toContain(target);
+    expect(target.notice).toBe('');
+    expect(target.draft).toBe('preserved archive draft');
+    expect(workspace.active.sidebarFeedback).toContain('已归档');
+    expect(
+      workspace.sidebarSessions.some((entry) => entry.path === '/a/one.jsonl'),
+    ).toBe(false);
+    expect(
+      action.mock.calls.filter(([, command]) => command.type === 'stop'),
+    ).toHaveLength(1);
+    await workspace.active.undoSidebar();
+    await workspace.open('/a', '/a/one.jsonl');
+    expect(workspace.active).toBe(target);
+    expect(target.draft).toBe('preserved archive draft');
+  });
+  it('keeps the current conversation and draft when saving its archive fails', async () => {
+    const { workspace, api } = fixture();
+    await workspace.init();
+    await workspace.open('/a', '/a/one.jsonl');
+    const session = workspace.active;
+    session.draft = 'keep on failure';
+    vi.spyOn(api, 'save').mockRejectedValueOnce(new Error('save failed'));
+    await expect(
+      session.manageSidebar('session', '/a/one.jsonl', { state: 'archived' }),
+    ).rejects.toThrow('save failed');
+    expect(workspace.active).toBe(session);
+    expect(workspace.retained).toContain(session);
+    expect(session.draft).toBe('keep on failure');
+  });
+  it('cancels queued work before archiving without sending a stop to Pi', async () => {
+    const { workspace, action, tasks } = fixture();
+    await workspace.init();
+    await workspace.open('/a', '/a/one.jsonl');
+    const session = workspace.active;
+    session.draft = 'queued input';
+    await session.send();
+    await session.manageSidebar('session', '/a/one.jsonl', {
+      state: 'archived',
+    });
+    expect(tasks[0].state).toBe('cancelled');
+    expect(session.recoveredDrafts[0].text).toBe('queued input');
+    expect(
+      action.mock.calls.some(([, command]) => command.type === 'stop'),
+    ).toBe(false);
+    expect(
+      workspace.sidebarSessions.some((entry) => entry.path === '/a/one.jsonl'),
+    ).toBe(false);
+  });
+  it.each(['failed', 'still running'] as const)(
+    'keeps the session reachable when stopping is %s',
+    async (failure) => {
+      const { workspace, api, action, states } = fixture();
+      await workspace.init();
+      await workspace.open('/a', '/a/one.jsonl');
+      const session = workspace.active;
+      session.run = 'running';
+      states.get(session.runtimeId)!.isStreaming = true;
+      const original = action.getMockImplementation()!;
+      action.mockImplementation(async (runtime, command, submission) => {
+        if (command.type === 'stop' && failure === 'failed')
+          throw new Error('stop failed');
+        return original(runtime, command, submission);
+      });
+      const save = vi.spyOn(api, 'save');
+      if (failure === 'still running') vi.useFakeTimers();
+      const rejected = expect(
+        session.manageSidebar('session', '/a/one.jsonl', { state: 'archived' }),
+      ).rejects.toThrow();
+      if (failure === 'still running') await vi.advanceTimersByTimeAsync(5100);
+      await rejected;
+      expect(save).not.toHaveBeenCalled();
+      expect(session.sidebarItem('session', '/a/one.jsonl')).toBeUndefined();
+      expect(session.sidebarSaving).toBe(false);
+      expect(
+        workspace.sidebarSessions.some(
+          (entry) => entry.path === '/a/one.jsonl',
+        ),
+      ).toBe(true);
+    },
+  );
   it.each(['project', 'session'] as const)(
     'keeps archived %s work reachable until execution and requests finish',
     async (kind) => {

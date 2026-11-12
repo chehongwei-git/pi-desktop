@@ -232,6 +232,9 @@ async function mock(
                   host.finishPlanStop?.({});
                 return {};
               case 'stop':
+                if (host.archiveStopDelay)
+                  runtime.archiveStoppingUntil =
+                    Date.now() + host.archiveStopDelay;
                 if (host.planStop) {
                   return new Promise((resolve) => {
                     host.finishPlanStop = resolve;
@@ -396,7 +399,7 @@ async function mock(
                     : runtime.sessionFile,
                   model: { provider: 'mock', id: 'model' },
                   thinkingLevel: 'off',
-                  isStreaming: false,
+                  isStreaming: Date.now() < (runtime.archiveStoppingUntil ?? 0),
                 };
             }
           }
@@ -2839,6 +2842,66 @@ test('large histories initially mount only the latest server page', async ({
   await expect(page.locator('.virtual-item, .virtual-space')).toHaveCount(0);
 });
 
+test('archiving a running session stops it, hides its rows and keeps its history recoverable', async ({
+  page,
+}, testInfo) => {
+  await mock(page, 2, true);
+  await page.goto('/');
+  const rows = page.locator(
+    '[data-sidebar-kind="session"][data-sidebar-path="alpha.jsonl"]',
+  );
+  await rows.first().click();
+  await page.locator('.transcript:visible').evaluate((node) => {
+    (window as any).archivedTranscript = node;
+  });
+  await page.evaluate(() =>
+    (window as any).emitEvents([{ type: 'run', state: 'running' }]),
+  );
+  await expect(
+    page.getByRole('button', { name: '停止任务', exact: true }),
+  ).toBeVisible();
+  await page.locator('.composer textarea').fill('归档后保留的草稿');
+  await page.evaluate(() => {
+    (window as any).archiveStopDelay = 300;
+  });
+  await rows.first().click({ button: 'right' });
+  await page.getByRole('menuitem', { name: '归档', exact: true }).click();
+  await expect(rows).toHaveCount(0);
+  await expect(
+    page.getByRole('button', { name: '停止任务', exact: true }),
+  ).toHaveCount(0);
+  expect(
+    await page.evaluate(
+      () =>
+        (window as any).ipcCalls.filter(
+          (call: any) =>
+            call.command === 'perform' && call.action?.type === 'stop',
+        ).length,
+    ),
+  ).toBe(1);
+  await expect(page.locator('.composer textarea')).toHaveValue('');
+  await expect(page.locator('.transcript:visible')).toHaveCount(0);
+  expect(
+    await page.evaluate(() => (window as any).archivedTranscript.isConnected),
+  ).toBe(false);
+  await page.getByRole('button', { name: '已归档', exact: true }).click();
+  const archive = page.getByRole('region', { name: '已归档', exact: true });
+  await expect(
+    archive.getByRole('button', { name: '恢复会话 修复登录', exact: true }),
+  ).toBeVisible();
+  await page.screenshot({
+    path: testInfo.outputPath('running-session-archived.png'),
+  });
+  await archive
+    .getByRole('button', { name: '恢复会话 修复登录', exact: true })
+    .click();
+  await archive.getByRole('button', { name: '返回对话', exact: true }).click();
+  await rows.first().click();
+  await expect(page.locator('.composer textarea')).toHaveValue(
+    '归档后保留的草稿',
+  );
+});
+
 test('sidebar context menus rename, archive and restore projects and sessions across reload', async ({
   page,
 }) => {
@@ -3227,6 +3290,22 @@ test('history management preserves transcript and draft, filters and restores ke
   await page.getByRole('button', { name: '撤销', exact: true }).click();
   await expect(restore).toBeVisible();
   await archive.getByRole('button', { name: '返回对话', exact: true }).click();
+  // 当前会话归档后退出正文；恢复并重新打开时仍找回原草稿。
+  await expect(input).toHaveValue('');
+  await expect(page.locator('.transcript:visible')).toHaveCount(0);
+  expect(
+    await page.evaluate(() => (window as any).savedTranscript.isConnected),
+  ).toBe(false);
+  await page.getByRole('button', { name: '已归档', exact: true }).click();
+  await restore.click();
+  await archive.getByRole('button', { name: '返回对话', exact: true }).click();
+  await session.click();
+  await expect(input).toHaveValue('保留草稿');
+  await page.locator('.transcript:visible').evaluate((node) => {
+    (window as any).savedTranscript = node;
+  });
+  await page.getByRole('button', { name: '已归档', exact: true }).click();
+  await archive.getByRole('button', { name: '返回对话', exact: true }).click();
   await expect(input).toHaveValue('保留草稿');
   expect(
     await page
@@ -3234,9 +3313,7 @@ test('history management preserves transcript and draft, filters and restores ke
       .evaluate((node) => node === (window as any).savedTranscript),
   ).toBe(true);
   await page.getByRole('button', { name: '已归档', exact: true }).click();
-  await expect(
-    page.getByRole('region', { name: '已归档', exact: true }),
-  ).toContainText('修复登录');
+  await expect(archive).toContainText('还没有归档内容');
   await page.screenshot({ path: 'test-results/history-management-light.png' });
 });
 

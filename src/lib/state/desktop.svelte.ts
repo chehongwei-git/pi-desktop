@@ -52,6 +52,8 @@ export interface SessionNavigation {
   connect(project: string): Promise<void>;
   ensure(): Promise<void>;
   changed(): void;
+  stopForArchive(path: string): Promise<void>;
+  archived(path: string): void;
 }
 export class Desktop {
   /** 桌面身份早于 Pi 文件存在，排队转历史及恢复时继续沿用。 */
@@ -322,6 +324,20 @@ export class Desktop {
       for (const entry of sidebarItems) {
         if (entry.state === 'deleted') entry.state = 'archived';
       }
+      if (kind === 'session' && item.state === 'archived' && change.state) {
+        // 归档对象可能在后台运行，须按路径停止所属实例，不能停止当前视图。
+        if (this.navigation) await this.navigation.stopForArchive(path);
+        else if (
+          this.snapshot.sessionFile &&
+          this.sessionKey(this.snapshot.sessionFile) ===
+            this.sessionKey(path) &&
+          (this.run !== 'idle' || this.extensions.length)
+        ) {
+          await this.stop();
+          if (this.run !== 'idle' || this.extensions.length)
+            throw new Error('会话尚未停止，请等待停止完成后重试归档。');
+        }
+      }
       await this.api.save({ ...$state.snapshot(this.settings), sidebarItems });
       this.settings.sidebarItems = sidebarItems;
       if ('state' in change) {
@@ -339,6 +355,8 @@ export class Desktop {
       } else {
         this.notice = '名称已更新';
       }
+      if (kind === 'session' && item.state === 'archived' && change.state)
+        this.navigation?.archived(path);
     } finally {
       this.sidebarSaving = false;
     }

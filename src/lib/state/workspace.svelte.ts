@@ -31,7 +31,7 @@ export class Workspace {
   private exitTimer?: ReturnType<typeof setTimeout>;
   error = $state('');
   private timer?: ReturnType<typeof setInterval>;
-  private polling = false;
+  private polling?: Promise<void>;
   private cacheTick = 0;
   private poolRevision = 0;
   /** 页面顺序仍用于内容缓存；进程 LRU 和预留由宿主管理。 */
@@ -134,6 +134,8 @@ export class Workspace {
         await this.ensure(this.active);
       },
       ensure: () => this.ensure(session),
+      stopForArchive: (path) => this.stopForArchive(path),
+      archived: (path) => this.finishArchive(path),
       changed: () => {
         void this.poll();
         this.persist();
@@ -598,6 +600,58 @@ export class Workspace {
       this.projects.map((project) => project.path),
     );
   }
+  /** 会话归档先停止实际所属实例；项目归档仍仅收起项目，不终止其任务。 */
+  private async stopForArchive(path: string): Promise<void> {
+    const session = this.sessions.find(
+      (entry) =>
+        entry.snapshot.sessionFile &&
+        this.key(entry.snapshot.sessionFile) === this.key(path),
+    );
+    if (!session) return;
+    if (session.submitting || session.waitingToSend || session.restoring)
+      throw new Error('会话正在提交或连接，请稍后重试归档。');
+    if (session.task?.state === 'queued') await this.cancel(session);
+    if (this.isExecuting(session)) {
+      await session.stop();
+      const deadline = Date.now() + 5000;
+      // abort 回执与任务结算独立到达；同一次归档等待两者就绪，不能要求再次点击。
+      while (true) {
+        await this.poll();
+        if (session.run !== 'idle' && session.connection === 'ready') {
+          await session.syncState();
+          if (!session.snapshot.isStreaming && !session.snapshot.isCompacting)
+            session.run = 'idle';
+        }
+        if (!this.isExecuting(session)) {
+          session.notice = '';
+          break;
+        }
+        if (Date.now() >= deadline)
+          throw new Error('停止超过 5 秒，请等待停止完成后重试归档。');
+        await new Promise<void>((resolve) => setTimeout(resolve, 100));
+      }
+    }
+  }
+  /** 保存成功才退出当前归档会话；保留对象和草稿，卸载其视图以免正文残留。 */
+  private finishArchive(path: string): void {
+    const previous = this.active;
+    if (
+      previous.snapshot.sessionFile &&
+      this.key(previous.snapshot.sessionFile) === this.key(path)
+    ) {
+      this.newDraft(previous.project);
+      this.active.sidebarFeedback = previous.sidebarFeedback;
+      this.active.sidebarUndo = previous.sidebarUndo;
+      previous.sidebarFeedback = '';
+      previous.sidebarUndo = null;
+    }
+    this.retained = this.retained.filter(
+      (session) =>
+        !session.snapshot.sessionFile ||
+        this.key(session.snapshot.sessionFile) !== this.key(path),
+    );
+    this.persist();
+  }
   async cancel(session: Desktop): Promise<void> {
     if (!session.task) return;
     await this.api.cancelTask(session.task.taskId);
@@ -616,9 +670,15 @@ export class Workspace {
     }
     await this.poll();
   }
-  private async poll(): Promise<void> {
-    if (this.polling) return;
-    this.polling = true;
+  /** 并发调用共享正在进行的刷新；归档等待真正结算，不能把跳过刷新视作已完成。 */
+  private poll(): Promise<void> {
+    if (this.polling) return this.polling;
+    this.polling = this.pollLocal().finally(() => {
+      this.polling = undefined;
+    });
+    return this.polling;
+  }
+  private async pollLocal(): Promise<void> {
     try {
       const activities = await this.api.activity();
       if (!Array.isArray(activities)) return;
@@ -718,8 +778,6 @@ export class Workspace {
       }
     } catch (error) {
       this.error = errorMessage(error);
-    } finally {
-      this.polling = false;
     }
   }
   /** 单键替换保存草稿和中断快照；图片正文始终不写入 localStorage。 */
