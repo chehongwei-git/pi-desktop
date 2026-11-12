@@ -29,6 +29,12 @@
     };
   }
   const api = {
+    async search() {
+      return { exact: null, items: [], warnings: [] };
+    },
+    async package() {
+      throw new Error('未找到包');
+    },
     async catalog() {
       if (state === 'loading')
         await new Promise<void>((resolve) => {

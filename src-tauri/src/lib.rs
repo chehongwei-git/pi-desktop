@@ -6,6 +6,7 @@ mod images;
 mod model_config;
 mod model_discovery;
 mod new_session;
+mod npm_registry;
 mod platform;
 mod plugin_commands;
 mod plugins;
@@ -603,6 +604,16 @@ async fn plugin_detail(
     .await
     .map_err(|_| AppError::new("PLUGINS", "读取插件详情失败"))?
 }
+/// 公开 npm 查询不读取本机凭据，也不启动 Pi。
+#[tauri::command]
+async fn npm_search(query: String) -> Result<npm_registry::Search> {
+    npm_registry::search(query).await
+}
+#[tauri::command]
+async fn npm_detail(name: String, version: String) -> Result<npm_registry::Package> {
+    npm_registry::detail(name, version).await
+}
+
 /// 来源操作有独立串行锁；不与会话生命周期锁耦合，不阻塞停止任务。
 #[tauri::command]
 async fn plugin_command(
@@ -655,6 +666,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_settings,
             plugin_catalog,
+            npm_search,
+            npm_detail,
             change_plugin,
             plugin_detail,
             plugin_command,

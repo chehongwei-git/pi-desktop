@@ -4,6 +4,7 @@
   import Icon from './Icon.svelte';
   import SettingsSelect from './SettingsSelect.svelte';
   import PluginDetail from './PluginDetail.svelte';
+  import PluginOnlineInstall from './PluginOnlineInstall.svelte';
   import { errorMessage } from '../client';
   import {
     pluginBridge,
@@ -44,6 +45,10 @@
   let detail = $state('');
   let detailLoading = $state(false);
   let adding = $state(false);
+  let online = $state(false);
+  let onlineDirty = $state(false);
+  let onlineTrigger: HTMLElement | null = null;
+  let onlinePosition = 0;
   let mode = $state('http');
   let name = $state('');
   let source = $state('');
@@ -112,9 +117,9 @@
     const draft = modeDrafts.get(mode);
     source = draft?.source ?? '';
     args = draft?.args ?? '';
-    error = '';
+    clearFeedback();
   }
-  const dirty = $derived(adding && !!(name || source || args));
+  const dirty = $derived((adding && !!(name || source || args)) || onlineDirty);
   const rows = $derived(
     (catalog?.items ?? []).filter(
       (p) =>
@@ -161,10 +166,15 @@
     }
     action();
   }
+  /** 操作反馈只属于当前内容；确认导航后清理，取消离开时保留错误与草稿。 */
+  function clearFeedback() {
+    error = '';
+    status = '';
+  }
   async function load() {
     const token = ++generation;
     busy = true;
-    error = '';
+    clearFeedback();
     try {
       const result = await api.catalog(project || null);
       if (token === generation) catalog = result;
@@ -175,8 +185,14 @@
     }
   }
   function reset() {
+    // 导航后丢弃未完成的旧详情响应，防止错误或焦点回写到新的分类。
+    ++generation;
+    detailLoading = false;
+    detail = '';
     modeDrafts.clear();
     adding = false;
+    online = false;
+    onlineDirty = false;
     preview = false;
     name = '';
     source = '';
@@ -187,6 +203,7 @@
   function navigate(action: () => void) {
     requestLeave(() => {
       reset();
+      clearFeedback();
       action();
       void showTop();
     });
@@ -219,6 +236,7 @@
     origin = trigger;
     listPosition = scroller?.scrollTop ?? 0;
     selected = item;
+    clearFeedback();
     void showTop();
     detail = '';
     detailLoading = true;
@@ -232,12 +250,14 @@
       if (token === generation) detailLoading = false;
     }
     await tick();
-    heading?.focus({ preventScroll: true });
+    if (token === generation) heading?.focus({ preventScroll: true });
   }
   async function back() {
     ++generation;
     selected = null;
-    error = '';
+    detailLoading = false;
+    detail = '';
+    clearFeedback();
     await tick();
     if (scroller) scroller.scrollTop = listPosition;
     if (origin?.isConnected) origin.focus({ preventScroll: true });
@@ -283,6 +303,50 @@
       busy = false;
     }
   }
+  /** 全局安装影响所有已连接会话；列表刷新失败不重放安装命令。 */
+  function installedOnline(globalCatalog: PluginCatalog) {
+    if (!project) catalog = globalCatalog;
+    else {
+      const scope = project;
+      const token = generation;
+      void api
+        .catalog(scope)
+        .then((value) => {
+          if (scope === project && token === generation) catalog = value;
+        })
+        .catch(() => {
+          if (scope === project && token === generation)
+            status = '已全局安装，项目列表刷新失败，请重新读取插件。';
+        });
+    }
+    pending = [
+      ...new Set([
+        ...pending,
+        ...sessions
+          .filter((s) => s.runtimeId && s.connection === 'ready')
+          .map((s) => s.runtimeId),
+      ]),
+    ];
+  }
+  function leaveOnline() {
+    requestLeave(() => {
+      reset();
+      clearFeedback();
+      void tick().then(() => {
+        if (scroller) scroller.scrollTop = onlinePosition;
+        onlineTrigger?.focus({ preventScroll: true });
+      });
+    });
+  }
+  function viewInstalled() {
+    reset();
+    project = '';
+    tab = 'extensions';
+    search = '';
+    void load();
+    void showTop();
+    void tick().then(() => heading?.focus({ preventScroll: true }));
+  }
   function add() {
     if (mode === 'package') {
       void command('install');
@@ -318,7 +382,21 @@
       <h1 bind:this={heading} tabindex="-1">插件</h1>
       <p>为 Pi 连接工具、装配技能与扩展。</p>
     </div>
-    <button onclick={() => requestLeave()}>← 返回对话</button>
+    <div class="header-actions">
+      <button
+        disabled={busy}
+        onclick={(event) => {
+          onlineTrigger = event.currentTarget;
+          onlinePosition = scroller?.scrollTop ?? 0;
+          navigate(() => {
+            online = true;
+            status = '';
+            error = '';
+          });
+        }}>在线安装</button
+      >
+      <button onclick={() => requestLeave()}>← 返回对话</button>
+    </div>
   </header>
   <nav aria-label="插件分类">
     {#each pluginTabs as item}<button
@@ -340,7 +418,7 @@
   </nav>
   <div class="plugins-scroll" bind:this={scroller}>
     <div class="content">
-      {#if !adding && !selected}<div class="toolbar">
+      {#if !adding && !selected && !online}<div class="toolbar">
           <div class="scope">
             <SettingsSelect
               label="配置范围"
@@ -400,10 +478,15 @@
             class="text-button"
             disabled={busy}
             onclick={() => {
-              if (selected) void back();
+              if (online) void leaveOnline();
+              else if (selected) void back();
               else navigate(() => {});
             }}>← 返回{current.label}</button
-          ><span><Icon name="folder" size={14} />{scopeLabel}</span>
+          ><span
+            ><Icon name="folder" size={14} />{online
+              ? '全局'
+              : scopeLabel}</span
+          >
         </div>{/if}
       {#if error}<div class="feedback failure" role="alert">
           <Icon name="warning" size={17} />
@@ -438,7 +521,20 @@
             }}>放弃输入并继续</button
           >
         </div>{/if}
-      {#if adding}
+      {#if online}
+        <PluginOnlineInstall
+          {api}
+          projectItems={catalog?.items ?? []}
+          onbusy={(value) => {
+            busy = value;
+          }}
+          ondirty={(value) => {
+            onlineDirty = value;
+          }}
+          oninstalled={installedOnline}
+          onview={viewInstalled}
+        />
+      {:else if adding}
         <div class="form-card">
           <div class="form-heading">
             <span class="type-icon"><Icon name={current.icon} size={22} /></span
@@ -777,6 +873,12 @@
 </section>
 
 <style>
+  .header-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    justify-content: flex-end;
+  }
   .plugins-page {
     display: flex;
     flex: 1;
@@ -822,6 +924,7 @@
     font-size: 13px;
   }
   nav {
+    overflow-x: auto;
     display: flex;
     gap: 24px;
     border-bottom: 1px solid var(--border);
@@ -832,6 +935,8 @@
       );
   }
   nav button {
+    flex-shrink: 0;
+    white-space: nowrap;
     border: 0;
     border-bottom: 2px solid transparent;
     border-radius: 0;
@@ -1273,6 +1378,31 @@
       flex-wrap: wrap;
     }
   }
+  @container (max-width:600px) {
+    header {
+      flex-direction: column;
+      align-items: flex-start;
+      gap: 14px;
+    }
+    .header-actions {
+      justify-content: flex-start;
+    }
+  }
+  @container (max-width:400px) {
+    header {
+      padding: 16px 20px;
+    }
+    header p {
+      display: none;
+    }
+    h1 {
+      font-size: 24px;
+      white-space: nowrap;
+    }
+    nav {
+      gap: 16px;
+    }
+  }
   @media (max-width: 1100px) {
     header {
       padding: 24px;
@@ -1301,7 +1431,7 @@
       align-items: flex-start;
       padding: 20px;
     }
-    header > button {
+    .header-actions {
       flex-shrink: 0;
     }
     .content {

@@ -82,6 +82,36 @@ for (const variant of [
             };
           if (command === 'next_events')
             return { runtimeId: 'r', sequence: 0, events: [] };
+          if (command === 'npm_search' || command === 'npm_detail') {
+            const pkg = {
+              name: '@example/pi-online-review-tools',
+              version: '1.2.3',
+              description: '在线代码审阅插件，提供项目工作流与检查指引。',
+              publisher: 'example',
+              piPackage: true,
+              piManifest: true,
+            };
+            return command === 'npm_search'
+              ? { exact: pkg, items: [], warnings: [] }
+              : pkg;
+          }
+          if (command === 'plugin_command') {
+            if (
+              args.project !== null ||
+              args.request.action !== 'install' ||
+              args.request.source !==
+                'npm:@example/pi-online-review-tools@1.2.3'
+            )
+              throw new Error('安装范围或来源错误');
+            items.push({
+              ...item,
+              kind: 'packages',
+              id: args.request.source,
+              source: args.request.source,
+              name: args.request.source,
+            });
+            return { success: true, message: '安装结束' };
+          }
           if (command === 'plugin_catalog')
             return {
               revision: 'r1',
@@ -238,6 +268,45 @@ for (const variant of [
         .getByRole('combobox', { name: '插件配置范围' })
         .press('Escape');
     }
+    await page.evaluate(() => {
+      document.documentElement.style.zoom = '1';
+    });
+    await page.getByRole('button', { name: '在线安装', exact: true }).click();
+    const query = page.getByLabel('npm 包名或插件名称');
+    await expect(query).toBeFocused();
+    await query.fill('代码审阅');
+    await query.press('Enter');
+    await page
+      .getByRole('button', { name: /@example\/pi-online-review-tools 1.2.3/ })
+      .click();
+    await expect(
+      page.getByRole('region', { name: '安装包详情' }),
+    ).toContainText('全局 · 所有项目可用');
+    await shot('online-install');
+    await page.evaluate(() => {
+      document.documentElement.style.zoom = '2';
+      document.documentElement.style.setProperty('--preview-zoom', '2');
+    });
+    await page
+      .getByRole('region', { name: '安装包详情' })
+      .scrollIntoViewIfNeeded();
+    const title = page.getByRole('heading', { name: '插件', exact: true });
+    expect(
+      await title.evaluate(
+        (el) =>
+          el.getBoundingClientRect().height /
+          parseFloat(getComputedStyle(el).lineHeight),
+      ),
+    ).toBeLessThanOrEqual(2.1);
+    await shot('online-zoom-2');
+    await page.getByRole('button', { name: '全局安装', exact: true }).click();
+    await expect(page.getByText(/已全局安装。已有会话/)).toBeVisible();
+    await page.getByRole('button', { name: '查看已安装包' }).click();
+    await expect(
+      page.getByRole('button', {
+        name: /npm:@example\/pi-online-review-tools@1.2.3/,
+      }),
+    ).toBeVisible();
   });
 }
 
@@ -280,6 +349,13 @@ for (const theme of ['light', 'dark'] as const) {
     await page.screenshot({
       path: 'test-results/plugins-' + theme + '-error.png',
     });
+    await page.getByRole('button', { name: /^Skills/ }).click();
+    await expect(page.getByRole('alert')).toHaveCount(0);
+    await page.getByRole('button', { name: /^扩展/ }).click();
+    await expect(
+      page.getByText('配置已被外部修改，请重新读取后再提交。'),
+    ).toHaveCount(0);
+    await page.getByRole('button', { name: /^MCP/ }).click();
     await page.getByRole('button', { name: '恢复正常', exact: true }).click();
     await page.getByRole('button', { name: '重新读取插件' }).click();
     await page.getByRole('button', { name: '延迟读取', exact: true }).click();
