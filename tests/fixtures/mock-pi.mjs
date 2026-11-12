@@ -221,6 +221,30 @@ for await (const line of readline.createInterface({
       streaming = true;
       emit({ type: 'agent_start' });
       // 调度测试保持执行链，直到显式 abort，避免依赖机器速度。
+      if (request.message === 'hold:sse-retry') {
+        emit({
+          type: 'message_end',
+          message: {
+            role: 'assistant',
+            content: [],
+            stopReason: 'error',
+            errorMessage:
+              'Error reading response: malformed server-sent event JSON.',
+          },
+        });
+        emit({
+          type: 'extension_ui_request',
+          method: 'setStatus',
+          id: 'sse-retry',
+          statusKey: 'pi-desktop-sse-retry-v1',
+          statusText: JSON.stringify({
+            attempt: 1,
+            maxAttempts: 3,
+            delayMs: 2000,
+          }),
+        });
+        break;
+      }
       if (request.message.startsWith('hold:')) break;
       emit({
         type: 'message_end',

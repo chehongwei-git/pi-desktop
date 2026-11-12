@@ -764,7 +764,9 @@ async fn actor(
                         changes = tokio::task::spawn_blocking(move || { changes.begin("后续任务"); changes }).await.expect("changes recorder panicked");
                     }
                     if event["type"] == "agent_settled" {
-                        let state = if previous.failed { "error" } else if stopped { "stopped" } else { "done" };
+                        // 错误后的退避也允许停止；取消应覆盖此前失败尝试的临时标记。
+                        if stopped { previous.failed = false; }
+                        let state = if stopped { "stopped" } else if previous.failed { "error" } else { "done" };
                         let (recorder, result) = tokio::task::spawn_blocking(move || {
                             let result = changes.finish(state);
                             (changes, result)
@@ -811,6 +813,69 @@ async fn actor(
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// 失败尝试尚在退避时仍为 Busy；停止后的最终结果必须是取消而非失败。
+    #[tokio::test]
+    async fn stop_during_sse_retry_clears_transient_failure() {
+        let project = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap();
+        let settings = Settings {
+            pi_path: project
+                .join("tests/fixtures/mock-pi.mjs")
+                .to_string_lossy()
+                .into(),
+            ..Settings::default()
+        };
+        let handle = start(
+            &settings,
+            project.to_string_lossy().into(),
+            Channel::new(|_| Ok(())),
+        )
+        .await
+        .unwrap();
+        handle
+            .action(Action::Prompt {
+                message: "hold:sse-retry".into(),
+                images: vec![],
+                mode: None,
+                text_parts: None,
+            })
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let batch = handle.events(0).await.unwrap();
+                if batch["events"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|event| event["state"] == "retrying")
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(matches!(handle.lifecycle.borrow().state, Lifecycle::Busy));
+        assert!(handle.lifecycle.borrow().failed);
+        handle.action(Action::Stop).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if handle.lifecycle.borrow().settled > 0 {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(matches!(handle.lifecycle.borrow().state, Lifecycle::Idle));
+        assert!(!handle.lifecycle.borrow().failed);
+        handle.shutdown().await.unwrap();
+    }
+
     #[tokio::test]
     async fn extension_response_preserves_pi_id_and_releases_abort() {
         let project = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))

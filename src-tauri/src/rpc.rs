@@ -554,6 +554,33 @@ impl Projection {
             "compaction_end" | "auto_retry_end" => {
                 store.push(json!({"type":"run","state":"running"}))?
             }
+            "extension_ui_request"
+                if event["method"] == "setStatus"
+                    && event["statusKey"] == "pi-desktop-sse-retry-v1" =>
+            {
+                // 桥接内部 JSON 只驱动状态，不把实现字段展示在对话里。
+                let status = event["statusText"]
+                    .as_str()
+                    .and_then(|text| serde_json::from_str::<Value>(text).ok());
+                let mut request = event.clone();
+                if let Some(status) = status.filter(|status| {
+                    matches!(status["attempt"].as_u64(), Some(1..=3))
+                        && status["maxAttempts"] == 3
+                        && matches!(status["delayMs"].as_u64(), Some(2000 | 4000 | 8000))
+                }) {
+                    request["statusText"] = format!(
+                        "响应读取失败，{} 秒后重试（{}/3）",
+                        status["delayMs"].as_u64().unwrap_or(0) / 1000,
+                        status["attempt"]
+                    )
+                    .into();
+                    store.push(json!({"type":"run","state":"retrying"}))?;
+                } else {
+                    request["statusText"] = Value::Null;
+                    store.push(json!({"type":"run","state":"running"}))?;
+                }
+                store.push(json!({"type":"extension","request":request}))?;
+            }
             "extension_ui_request" => {
                 if matches!(
                     event["method"].as_str(),
@@ -681,6 +708,50 @@ impl Projection {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// 专用重试状态原地展示，清理后仍为 running，只有 settled 发布 idle。
+    #[test]
+    fn desktop_sse_retry_status_does_not_settle_the_run() {
+        let mut projection = Projection::default();
+        let mut store = Store::new().unwrap();
+        projection
+            .event(json!({"type":"agent_start"}), &mut store)
+            .unwrap();
+        for (attempt, delay) in [(1, 2000), (2, 4000), (3, 8000)] {
+            projection.event(json!({
+                "type":"extension_ui_request", "id":"retry-status", "method":"setStatus",
+                "statusKey":"pi-desktop-sse-retry-v1",
+                "statusText":json!({"attempt":attempt,"maxAttempts":3,"delayMs":delay}).to_string()
+            }), &mut store).unwrap();
+            let batch = store.batch("r", 0).unwrap();
+            let last = batch.events.len() - 1;
+            assert_eq!(batch.events[last - 1]["state"], "retrying");
+            assert_eq!(
+                batch.events[last]["request"]["statusText"],
+                format!("响应读取失败，{} 秒后重试（{attempt}/3）", delay / 1000)
+            );
+            assert!(!projection.waiting_for_extension());
+        }
+        projection
+            .event(
+                json!({
+                    "type":"extension_ui_request", "id":"retry-clear", "method":"setStatus",
+                    "statusKey":"pi-desktop-sse-retry-v1"
+                }),
+                &mut store,
+            )
+            .unwrap();
+        let events = store.batch("r", 0).unwrap().events;
+        assert_eq!(events[events.len() - 2]["state"], "running");
+        assert!(!events.iter().any(|event| event["state"] == "idle"));
+        projection
+            .event(json!({"type":"agent_settled"}), &mut store)
+            .unwrap();
+        assert_eq!(
+            store.batch("r", 0).unwrap().events.last().unwrap()["state"],
+            "idle"
+        );
+    }
+
     /// 重叠请求按等待区间扣除，重复响应与非交互通知不能提前恢复。
     #[test]
     fn extension_waiting_pauses_until_all_responses_are_written() {

@@ -17,6 +17,101 @@ function usesAdaptiveThinking(model) {
 
 export default function desktopBridge(pi) {
   let pendingModel;
+  const retryStatusKey = 'pi-desktop-sse-retry-v1';
+  let retryAttempt = 0;
+  let recovery;
+  let generation = 0;
+  let cancelWait;
+  let retryStatusActive = false;
+  const setRetryStatus = (ctx, status) => {
+    if (status || retryStatusActive) {
+      ctx.ui.setStatus(retryStatusKey, status);
+      retryStatusActive = Boolean(status);
+    }
+  };
+  const isMalformedSse = (message) =>
+    message?.role === 'assistant' &&
+    message.stopReason === 'error' &&
+    typeof message.errorMessage === 'string' &&
+    /\bmalformed server-sent event JSON\b/i.test(message.errorMessage);
+  const resetRetry = (_event, ctx) => {
+    generation++;
+    cancelWait?.();
+    cancelWait = undefined;
+    recovery = undefined;
+    retryAttempt = 0;
+    setRetryStatus(ctx, undefined);
+  };
+  // turn_end 仍持有可取消的 turn signal；错误是硬退出，真正继续须留到 settle 边界。
+  pi.on('turn_end', async (event, ctx) => {
+    recovery = undefined;
+    if (!isMalformedSse(event.message) || event.outcome !== 'error') {
+      resetRetry(event, ctx);
+      return;
+    }
+    if (
+      event.continue ||
+      event.context.pendingMessages.length ||
+      ctx.hasPendingMessages() ||
+      !ctx.signal ||
+      ctx.signal.aborted ||
+      retryAttempt >= 3
+    )
+      return;
+    const current = generation;
+    const signal = ctx.signal;
+    const attempt = ++retryAttempt;
+    const delayMs = 2000 * 2 ** (attempt - 1);
+    setRetryStatus(ctx, JSON.stringify({ attempt, maxAttempts: 3, delayMs }));
+    const ready = await new Promise((resolve) => {
+      const finish = (ready) => {
+        clearTimeout(timer);
+        signal.removeEventListener('abort', abort);
+        cancelWait = undefined;
+        resolve(ready);
+      };
+      const abort = () => finish(false);
+      const timer = setTimeout(() => finish(true), delayMs);
+      cancelWait = abort;
+      signal.addEventListener('abort', abort, { once: true });
+      if (signal.aborted) abort();
+    });
+    if (generation !== current) return;
+    setRetryStatus(ctx, undefined);
+    if (!ready || signal.aborted) return;
+    // 原始失败留在历史；只从后续模型投影中省略，不重发用户消息或已完成的工具。
+    recovery = event.messageEntryId;
+    return {
+      entries: [
+        ...event.entries,
+        {
+          type: 'context_edit',
+          targetId: event.messageEntryId,
+          replacement: null,
+        },
+      ],
+    };
+  });
+  pi.on('agent_before_settle', (event, ctx) => {
+    if (!recovery) return;
+    recovery = undefined;
+    if (
+      event.outcome !== 'error' ||
+      event.continue ||
+      event.context.pendingMessages.length ||
+      ctx.hasPendingMessages() ||
+      !event.context.canContinue
+    )
+      return;
+    return { continue: true };
+  });
+  pi.on('before_agent_start', resetRetry);
+  pi.on('turn_start', () => {
+    // 原生恢复或队列已启动新请求时，旧边界不得再补一次继续。
+    recovery = undefined;
+  });
+  pi.on('agent_settled', resetRetry);
+  pi.on('session_shutdown', resetRetry);
   // model_select 在 Pi 更新模型后同步恢复强度，下一次请求不会读取半套配置。
   function applyPendingThinking(model) {
     if (
@@ -89,6 +184,14 @@ export default function desktopBridge(pi) {
   pi.on('message_end', (event, ctx) => {
     const model = ctx.model;
     const message = event.message;
+    if (isMalformedSse(message) && retryAttempt >= 3) {
+      return {
+        message: {
+          ...message,
+          errorMessage: `${message.errorMessage}\n已自动重试 3 次，响应读取仍失败。`,
+        },
+      };
+    }
     if (
       model?.api !== 'anthropic-messages' ||
       !automaticModels.has(model) ||

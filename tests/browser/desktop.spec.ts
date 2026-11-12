@@ -907,6 +907,87 @@ test('inline feedback preserves the reading anchor when it appears and disappear
     .toBeCloseTo(anchor.top, 0);
 });
 
+for (const [width, theme] of [
+  [1200, 'light'],
+  [480, 'dark'],
+] as const) {
+  test(`SSE retry keeps the draft and exposes stop at ${width} ${theme}`, async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width, height: 800 });
+    await mock(page);
+    await page.addInitScript((theme) => {
+      localStorage.setItem('mock-settings', JSON.stringify({ theme }));
+      localStorage.setItem(
+        'pi-desktop-sidebar',
+        JSON.stringify({ sidebar: false }),
+      );
+    }, theme);
+    await page.goto('/');
+    const input = page.getByRole('textbox', { name: '消息输入' });
+    await expect(input).toBeEnabled();
+    await input.fill('保留的后续草稿');
+    await page.evaluate((theme) => {
+      document.documentElement.dataset.theme = theme;
+    }, theme);
+    await expect(page.locator('html')).toHaveAttribute('data-theme', theme);
+    await input.focus();
+    await page.evaluate(() => {
+      const host = window as any;
+      host.holdRun = true;
+      host.emitEvents([
+        { type: 'run', state: 'retrying' },
+        {
+          type: 'extension',
+          request: {
+            method: 'setStatus',
+            statusKey: 'pi-desktop-sse-retry-v1',
+            statusText: '响应读取失败，2 秒后重试（1/3）',
+          },
+        },
+      ]);
+    });
+    await expect(page.locator('.extension-status')).toHaveText(
+      '响应读取失败，2 秒后重试（1/3）',
+    );
+    await expect(page.getByText('正在重试', { exact: true })).toBeVisible();
+    await expect(input).toHaveValue('保留的后续草稿');
+    await expect(input).toBeFocused();
+    await expect(page.getByRole('dialog')).toHaveCount(0);
+    await page.screenshot({
+      path: `test-results/sse-retry-${width}-${theme}.png`,
+    });
+    await page.getByRole('button', { name: '停止任务', exact: true }).click();
+    await expect
+      .poll(() =>
+        page.evaluate(() =>
+          (window as any).ipcCalls.some(
+            (call: any) => call.action?.type === 'stop',
+          ),
+        ),
+      )
+      .toBe(true);
+    // 模拟桥接清理及最终结算，等待过程不能自行吞掉用户输入。
+    await page.evaluate(() =>
+      (window as any).emitEvents([
+        {
+          type: 'extension',
+          request: {
+            method: 'setStatus',
+            statusKey: 'pi-desktop-sse-retry-v1',
+          },
+        },
+        { type: 'run', state: 'idle' },
+      ]),
+    );
+    await expect(page.locator('.extension-status')).toHaveCount(0);
+    await expect(input).toHaveValue('保留的后续草稿');
+    await expect(
+      page.getByRole('button', { name: '发送消息', exact: true }),
+    ).toBeVisible();
+  });
+}
+
 test('plan status is readable and stop cancels the extension choice without hanging', async ({
   page,
 }) => {
