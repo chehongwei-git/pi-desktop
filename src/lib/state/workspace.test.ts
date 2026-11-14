@@ -168,6 +168,52 @@ function summary(path: string, cwd: string): SessionSummary {
   };
 }
 describe('cross-project workspace', () => {
+  it('Skill 草稿、首次提交与索引刷新均使用用户任务，显式名称仍优先', async () => {
+    const { workspace } = fixture();
+    await workspace.init();
+    workspace.active.prepareNewChat('/project');
+    const session = workspace.active;
+    session.draft = `<skill name="ego-browser" location="/skills/ego-browser/SKILL.md">\n${'说明'.repeat(500)}\n</skill>\n\n检查登录页面`;
+    expect(
+      workspace.sidebarSessions.find(
+        (item) => item.desktopId === session.desktopId,
+      )?.name,
+    ).toBe('检查登录页面');
+    await session.send();
+    expect(session.sidebarPreview).toBe('检查登录页面');
+    expect(
+      workspace.sidebarSessions.find(
+        (item) => item.desktopId === session.desktopId,
+      )?.name,
+    ).toBe('检查登录页面');
+    const path = session.snapshot.sessionFile!;
+    session.sessions = [
+      { ...summary(path, '/project'), name: '', preview: '检查登录页面' },
+    ];
+    expect(session.sessionTitle).toBe('检查登录页面');
+    expect(
+      workspace.sidebarSessions.find((item) => item.path === path)?.name,
+    ).toBe('检查登录页面');
+    session.sessions = [
+      {
+        ...summary(path, '/project'),
+        name: '手动名称',
+        preview: '检查登录页面',
+      },
+    ];
+    expect(session.sessionTitle).toBe('手动名称');
+    expect(
+      workspace.sidebarSessions.find((item) => item.path === path)?.name,
+    ).toBe('手动名称');
+    session.sidebarPreview =
+      '<skill name="ego-browser" location="/old/truncated';
+    session.sessions = [];
+    expect(
+      workspace.sidebarSessions.find(
+        (item) => item.desktopId === session.desktopId,
+      )?.name,
+    ).toBe('使用 ego-browser');
+  });
   it('inherits the current selection over project defaults and submits that selection', async () => {
     const { workspace, api } = fixture();
     await workspace.init();

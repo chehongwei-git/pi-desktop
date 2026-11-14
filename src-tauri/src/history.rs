@@ -84,7 +84,7 @@ pub fn same_project(a: &str, b: &str) -> bool {
 impl Catalog {
     /// 磁盘仅缓存摘要和已消费位置；损坏缓存直接丢弃，不影响 Pi 原始文件。
     pub fn load(config_dir: &std::path::Path) -> Self {
-        let persistent = config_dir.join("history-index-v2.json");
+        let persistent = config_dir.join("history-index-v3.json");
         let cache = fs::read(&persistent)
             .ok()
             .and_then(|bytes| serde_json::from_slice(&bytes).ok())
@@ -227,10 +227,9 @@ impl Catalog {
                             }
                         }
                         if cached.summary.preview.is_empty() {
-                            cached.summary.preview = text_content(&entry["message"]["content"])
-                                .chars()
-                                .take(100)
-                                .collect();
+                            cached.summary.preview = crate::text_presentation::session_preview(
+                                &text_content(&entry["message"]["content"]),
+                            );
                             if cached.summary.preview.is_empty()
                                 && entry["message"]["content"]
                                     .as_array()
@@ -319,6 +318,86 @@ pub fn active_branch(entries: &[Value], leaf: Option<&str>) -> Vec<Value> {
 mod tests {
     use super::*;
     use serde_json::json;
+    /// v2 截断摘要不能恢复任务，升级索引后从原始消息重建且不改变文件与排序。
+    #[test]
+    fn skill_preview_rebuilds_old_index_and_survives_reload() {
+        let temp = tempfile::tempdir().unwrap();
+        let sessions = temp.path().join("sessions");
+        fs::create_dir(&sessions).unwrap();
+        let file = sessions.join("skill.jsonl");
+        let skill = format!(
+            "<skill name=\"ego-browser\" location=\"C:\\skills\\SKILL.md\">\r\n{}\r\n</skill>",
+            "说明".repeat(1000)
+        );
+        assert_eq!(
+            crate::text_presentation::session_preview(&skill),
+            "使用 ego-browser"
+        );
+        let text = format!("{skill}\r\n\r\n检查登录页面\n保留草稿");
+        let original = format!(
+            "{}\n{}\n{}\n",
+            json!({"type":"session", "id":"skill", "cwd":"/project", "timestamp":"2026-01-01"}),
+            json!({"type":"message", "timestamp":"2026-01-02", "message":{"role":"user", "content":[{"type":"text", "text":text}]}}),
+            json!({"type":"session_info", "name":"手动名称"})
+        );
+        fs::write(&file, &original).unwrap();
+        let meta = fs::metadata(&file).unwrap();
+        let modified = meta
+            .modified()
+            .unwrap()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        let old = Cached {
+            size: meta.len(),
+            modified,
+            offset: meta.len(),
+            summary: SessionSummary {
+                path: file.to_string_lossy().into(),
+                id: "skill".into(),
+                cwd: "/project".into(),
+                name: "手动名称".into(),
+                preview: "<skill name=\"ego-browser\" location=\"C:\\skills".into(),
+                timestamp: "2026-01-01".into(),
+                last_prompt_at: "2026-01-02".into(),
+                modified,
+                warning: None,
+            },
+        };
+        fs::write(
+            temp.path().join("history-index-v2.json"),
+            serde_json::to_vec(&HashMap::from([(file.clone(), old)])).unwrap(),
+        )
+        .unwrap();
+        let settings = Settings {
+            session_dir: sessions.to_string_lossy().into(),
+            ..Settings::default()
+        };
+        for _ in 0..2 {
+            let mut catalog = Catalog::load(temp.path());
+            let result = catalog.list(&settings, "", "检查登录").unwrap();
+            assert_eq!(result.len(), 1);
+            assert_eq!(result[0].preview, "检查登录页面 保留草稿");
+            assert_eq!(result[0].name, "手动名称");
+            assert_eq!(result[0].last_prompt_at, "2026-01-02");
+            assert!(catalog
+                .list(&settings, "", "C:\\skills")
+                .unwrap()
+                .is_empty());
+        }
+        assert!(temp.path().join("history-index-v3.json").exists());
+        assert_eq!(fs::read_to_string(file).unwrap(), original);
+        for sample in [
+            "普通消息",
+            "> <skill name=\"demo\" location=\"/skill\">",
+            "```\n<skill name=\"demo\" location=\"/skill\">\n```",
+        ] {
+            assert_eq!(
+                crate::text_presentation::session_preview(sample),
+                sample.split_whitespace().collect::<Vec<_>>().join(" ")
+            );
+        }
+    }
     /// 废弃分支不展示，后续 context_edit 也不篡改原始对话。
     #[test]
     fn branch_follows_parent() {

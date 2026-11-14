@@ -1,10 +1,39 @@
 /** 安全 Markdown 渲染端口：拒绝原始 HTML、远程图片与危险协议；缓存限制在 8MiB。 */
 import MarkdownIt from 'markdown-it';
 import DOMPurify from 'dompurify';
+import { codeFileTarget, fileTarget } from './file-links';
 const parser = new MarkdownIt({ html: false, linkify: false, breaks: true });
 // 不给模型输出发起图片网络请求的机会，避免用户打开历史就泄露网络元数据。
 parser.renderer.rules.image = () =>
   '<span class="image-placeholder">[图片未加载]</span>';
+// file:// 只经业务接口处理，不让 WebView 直接导航；危险协议仍由 markdown-it 拒绝。
+const validateLink = parser.validateLink.bind(parser);
+parser.validateLink = (url) => /^file:/i.test(url) || validateLink(url);
+const escape = parser.utils.escapeHtml;
+parser.renderer.rules.link_open = (tokens, index) => {
+  const href = tokens[index].attrGet('href') ?? '';
+  if (safeExternal(href)) return `<a href="${escape(href)}">`;
+  const target = fileTarget(href);
+  return target
+    ? `<a href="#" data-file-path="${escape(target.path)}"${target.line ? ` data-file-line="${target.line}"` : ''}>`
+    : '<a>';
+};
+parser.renderer.rules.code_inline = (tokens, index) => {
+  const value = tokens[index].content;
+  // 链接标签内常用代码样式文件名；不能再嵌套一个 a，否则浏览器会拆坏外层目标。
+  let inLink = false;
+  for (let i = index - 1; i >= 0; i--) {
+    if (tokens[i].type === 'link_close') break;
+    if (tokens[i].type === 'link_open') {
+      inLink = true;
+      break;
+    }
+  }
+  const target = inLink ? null : codeFileTarget(value);
+  return target
+    ? `<a href="#" data-file-path="${escape(target.path)}"${target.line ? ` data-file-line="${target.line}"` : ''}><code>${escape(value)}</code></a>`
+    : `<code>${escape(value)}</code>`;
+};
 const cache = new Map<string, string>();
 let bytes = 0;
 /** 完成块渲染缓存采用 LRU；流式消息由组件直接输出纯文本。 */
@@ -19,6 +48,7 @@ export function markdown(text: string): string {
     FORBID_TAGS: ['img', 'iframe', 'style', 'script', 'form'],
     FORBID_ATTR: ['style'],
     ALLOW_DATA_ATTR: false,
+    ADD_ATTR: ['data-file-path', 'data-file-line'],
   });
   if (text.length + html.length < 1024 * 1024) {
     cache.set(text, html);

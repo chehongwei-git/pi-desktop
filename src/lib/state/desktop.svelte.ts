@@ -12,6 +12,7 @@ import {
 } from '../attachments';
 import { textRanges, localTextParts } from '../text-presentation';
 import { parseBuiltin } from '../commands';
+import { sessionPreview } from '../session-preview';
 import {
   thinkingLevels,
   type ModelSettings,
@@ -1913,7 +1914,7 @@ export class Desktop {
         position: 0,
       };
       this.taskInput = draft;
-      this.sidebarPreview ||= text.replace(/\s+/g, ' ').trim().slice(0, 80);
+      this.sidebarPreview ||= sessionPreview(text);
       this.lastSentAt = new Date().toISOString();
       this.restored = false;
       if (clearSubmitted) this.draft = '';
@@ -2144,7 +2145,7 @@ export class Desktop {
         if (finishedPlan && this.planRevision === previousPlanRevision)
           this.hiddenPlan = finishedPlan;
       }
-      this.sidebarPreview ||= text.replace(/\s+/g, ' ').trim().slice(0, 80);
+      this.sidebarPreview ||= sessionPreview(text);
       this.lastSentAt = sentAt;
       this.restored = false;
       if (sessionFile) this.sentAt[this.sessionKey(sessionFile)] = sentAt;

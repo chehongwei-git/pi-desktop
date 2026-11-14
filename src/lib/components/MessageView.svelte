@@ -1,6 +1,7 @@
 <!-- 消息项可被虚拟列表频繁挂载；异步高亮与正文读取必须随组件销毁取消 DOM 更新。 -->
 <script lang="ts">
-  import { onMount, tick } from 'svelte';
+  import { getContext, onMount, tick } from 'svelte';
+  import { fileLinkKey, type OpenFile } from '../file-links';
   import MessageEditView from './MessageEdit.svelte';
   import type { MessageEdit } from '../message-edit';
   import { openUrl } from '@tauri-apps/plugin-opener';
@@ -56,6 +57,7 @@
     ontoggletool: (id: string, section: string) => void;
     read: (id: string, offset: number) => Promise<ContentPage>;
   } = $props();
+  const openFile = getContext<OpenFile | undefined>(fileLinkKey);
   let editTrigger = $state<HTMLButtonElement>();
   function cancelEdit(): void {
     onlayout(() => oncancelEdit?.());
@@ -134,6 +136,16 @@
     const anchor = target.closest('a');
     if (anchor) {
       event.preventDefault();
+      const path = anchor.getAttribute('data-file-path');
+      if (path) {
+        if (openFile)
+          openFile(
+            { path, line: Number(anchor.dataset.fileLine) || undefined },
+            anchor,
+          );
+        else onerror('文件预览在对话视图中可用');
+        return;
+      }
       const href = anchor.getAttribute('href') ?? '';
       if (safeExternal(href))
         void openUrl(href).catch(() => onerror('无法打开链接'));

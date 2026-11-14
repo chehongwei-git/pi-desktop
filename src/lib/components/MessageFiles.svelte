@@ -1,6 +1,8 @@
 <!-- 已发送引用仅展示路径，不读取磁盘；展开状态由会话保存以适应虚拟列表。 -->
 <script lang="ts">
-  import { tick } from 'svelte';
+  import { getContext, tick } from 'svelte';
+  import { fileLinkKey, type OpenFile } from '../file-links';
+  const openFile = getContext<OpenFile | undefined>(fileLinkKey);
   import { pathName, pathParent } from '../attachments';
   import type { MessageFileReference } from '../types';
   import Icon from './Icon.svelte';
@@ -124,7 +126,15 @@
       </div>
       <code>{selected.path}</code>
       <div class="detail-actions">
-        <span role="status">{feedback}</span><button
+        <span role="status">{feedback}</span>
+        {#if openFile}<button
+            type="button"
+            class="text-button"
+            onclick={(event) =>
+              openFile?.({ path: selected!.path }, event.currentTarget)}
+            >预览文件</button
+          >{/if}
+        <button
           type="button"
           class="text-button"
           onclick={() => void copy(selected!.path)}>复制路径</button

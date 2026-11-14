@@ -46,6 +46,27 @@ pub struct SkillInfo {
     pub content_ref: Option<String>,
     pub truncated: bool,
 }
+/// 自动摘要先剥离完整 Skill 包装，再限长；与消息卡片共用严格识别，不改写原始正文。
+pub fn session_preview(text: &str) -> String {
+    let display = if let Some((name, _, _, end)) = skill(text) {
+        let task = text[end..].trim();
+        if task.is_empty() {
+            format!("使用 {name}")
+        } else {
+            task.to_owned()
+        }
+    } else {
+        text.to_owned()
+    };
+    display
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(100)
+        .collect()
+}
+
 /// 只识别消息开头的标准包装；缺少闭合或出现嵌套标签时保留原文。
 fn skill(text: &str) -> Option<(&str, &str, &str, usize)> {
     let rest = text.strip_prefix("<skill name=\"")?;

@@ -1,6 +1,8 @@
 <!-- 普通文档流保留已读节点；只在历史前插时恢复一次阅读锚点。 -->
 <script lang="ts">
-  import { getContext, onMount, tick } from 'svelte';
+  import { getContext, setContext, onMount, tick } from 'svelte';
+  import { fileLinkKey, type OpenFile, type FileTarget } from '../file-links';
+  import FilePanel from './FilePanel.svelte';
   import { reviewKey, type ReviewLayoutState } from '../review-layout.svelte';
   import MessageView from './MessageView.svelte';
   import type { MessageEdit } from '../message-edit';
@@ -15,6 +17,7 @@
   import type { ContentPage, Message, MessageTextPart } from '../types';
   let {
     messages,
+    project = '',
     edit,
     editUnavailable,
     onedit,
@@ -38,6 +41,8 @@
     read,
   }: {
     messages: Message[];
+    /** 必须由所属会话提供，不能取全局当前项目。 */
+    project?: string;
     edit?: MessageEdit | null;
     editUnavailable?: string;
     onedit?: (message: Message) => void;
@@ -117,7 +122,18 @@
       .find((message) => message.id === textTarget?.messageId)
       ?.textParts?.find((part) => part.id === textTarget?.partId),
   );
-  let panelOpen = $derived(!!change || !!textPart);
+  let fileTarget = $state<FileTarget>();
+  setContext<OpenFile>(fileLinkKey, (target, trigger) => {
+    changeTrigger = trigger;
+    void layout(() => {
+      change = undefined;
+      textTarget = undefined;
+      scrollState.changeId = undefined;
+      scrollState.textTarget = undefined;
+      fileTarget = target;
+    });
+  });
+  let panelOpen = $derived(!!change || !!textPart || !!fileTarget);
   /** 普通正文展开只补偿本次布局；底部收起回到入口，避免落在下一条消息。 */
   async function layout(
     update: () => void,
@@ -150,12 +166,13 @@
     changeTrigger = trigger;
     await layout(() => {
       change = undefined;
+      fileTarget = undefined;
       scrollState.changeId = undefined;
       textTarget = { messageId: message.id, partId: part.id, top: 0 };
       scrollState.textTarget = textTarget;
     });
   }
-  let changeTrigger: HTMLButtonElement | undefined;
+  let changeTrigger: HTMLElement | undefined;
   /** 只在侧栏开关引发布局变化时恢复一次锚点，不干预后续阅读。 */
   async function showChange(
     message?: Message,
@@ -165,6 +182,7 @@
     pauseFollow();
     const saved = anchor();
     change = message;
+    fileTarget = undefined;
     textTarget = undefined;
     scrollState.textTarget = undefined;
     scrollState.changeId = message?.id;
@@ -478,7 +496,15 @@
   </div>
   {#if panelOpen}
     <div class="review-panel-content" hidden={!active} use:mountPanel>
-      {#if textPart && textTarget}
+      {#if fileTarget}
+        {#key fileTarget}
+          <FilePanel
+            target={fileTarget}
+            {project}
+            onclose={() => void showChange()}
+          />
+        {/key}
+      {:else if textPart && textTarget}
         {#key `${textTarget.messageId}:${textPart.id}:${textPart.contentRef}`}
           <TextPanel
             part={textPart}

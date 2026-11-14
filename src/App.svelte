@@ -1332,6 +1332,7 @@
               {#if session.transcriptMessages.length}
                 <Transcript
                   messages={session.transcriptMessages}
+                  project={session.snapshot.cwd || session.project}
                   edit={session.messageEdit}
                   editUnavailable={session.run !== 'idle' ||
                   session.task?.state === 'queued'

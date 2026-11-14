@@ -1,6 +1,7 @@
 //! 应用服务入口：Tauri 命令只表达业务意图；平台与协议实现不泄漏到 UI。
 mod diagnostics;
 mod file_import;
+mod file_preview;
 mod history;
 mod images;
 mod model_config;
@@ -636,6 +637,36 @@ async fn plugin_command(
     .await
 }
 
+/// 点击才读取磁盘；限量 IO 在 blocking 池执行，不阻塞窗口与事件管道。
+#[tauri::command]
+async fn preview_file(
+    project: String,
+    path: String,
+    approved: bool,
+) -> Result<file_preview::Preview> {
+    tokio::task::spawn_blocking(move || file_preview::preview(&project, &path, approved))
+        .await
+        .map_err(|_| AppError::new("FILE", "文件预览任务失败"))?
+}
+/// 不开放通用 opener 权限；宿主再次校验当前路径、项目边界及安全类型。
+#[tauri::command]
+async fn open_message_file(
+    app: tauri::AppHandle,
+    project: String,
+    path: String,
+    approved: bool,
+) -> Result<()> {
+    use tauri_plugin_opener::OpenerExt;
+    tokio::task::spawn_blocking(move || {
+        let path = file_preview::openable(&project, &path, approved)?;
+        app.opener()
+            .open_path(path.to_string_lossy().into_owned(), None::<&str>)
+            .map_err(|error| AppError::new("FILE", format!("无法使用系统应用打开：{error}")))
+    })
+    .await
+    .map_err(|_| AppError::new("FILE", "系统打开任务失败"))?
+}
+
 /// 统一安装受限插件和命令；关闭窗口必须先 await 自有进程回收。
 pub fn run() {
     tauri::Builder::default()
@@ -672,6 +703,8 @@ pub fn run() {
             plugin_detail,
             plugin_command,
             pick_files,
+            preview_file,
+            open_message_file,
             read_dropped_files,
             save_settings,
             get_model_config,

@@ -14,6 +14,7 @@ import {
   type DraftSnapshot,
 } from '../attachments';
 import { Desktop } from './desktop.svelte';
+import { sessionPreview } from '../session-preview';
 
 // 内容缓存与 DOM、进程分开管理；增加内容额度不要求保留更多后台进程。
 const SESSION_CONTENT_LIMIT = 12;
@@ -408,22 +409,19 @@ export class Workspace {
         !!(path && desktop.sidebarItem('session', path)?.state) ||
         this.projectArchived(cwd);
       if (archived && (!session || !this.isExecuting(session))) return;
-      const summary = (
+      const summary = sessionPreview(
         session?.sidebarPreview ||
-        session?.taskInput?.text ||
-        session?.draft ||
-        session?.recovered.at(-1) ||
-        session?.recoveredDrafts.at(-1)?.text ||
-        session?.attachments
-          .map((item) =>
-            item.kind === 'path' ? item.name : (item.image.name ?? '图片'),
-          )
-          .join('、') ||
-        ''
-      )
-        .replace(/\s+/g, ' ')
-        .trim()
-        .slice(0, 80);
+          session?.taskInput?.text ||
+          session?.draft ||
+          session?.recovered.at(-1) ||
+          session?.recoveredDrafts.at(-1)?.text ||
+          session?.attachments
+            .map((item) =>
+              item.kind === 'path' ? item.name : (item.image.name ?? '图片'),
+            )
+            .join('、') ||
+          '',
+      );
       const content = !!(
         summary ||
         session?.attachments.length ||
