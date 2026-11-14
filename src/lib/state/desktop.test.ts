@@ -895,7 +895,11 @@ describe('desktop business behavior', () => {
     expect(desktop.project).toBe('C:/Users/mock');
     expect(desktop.connection).toBe('ready');
     expect(desktop.settings.recentProjects).toEqual(['C:/Users/mock']);
-    expect(desktop.isExpanded('C:/Users/mock')).toBe(true);
+    // 宿主解析工作目录不等于用户展开项目，默认布局应保持不变。
+    expect(desktop.expandedProjects).toEqual([]);
+    expect(desktop.projects.map((project) => project.path)).toContain(
+      'C:/Users/mock',
+    );
   });
   it('persists pin changes and retains previous pins on save failure', async () => {
     const save = vi.fn().mockResolvedValue(undefined);

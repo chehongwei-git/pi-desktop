@@ -1101,8 +1101,8 @@ export class Desktop {
       );
       if (generation !== this.generation) return;
       this.runtimeId = connected.runtimeId;
+      // 连接只更新会话归属；项目展开由用户控制，避免挤走最近／置顶入口。
       this.project = connected.project;
-      this.expandProject(this.project);
       this.version = connected.version;
       this.snapshot = connected.snapshot;
       this.stats = null;
@@ -2326,8 +2326,8 @@ export class Desktop {
     this.visible.clear();
     await this.syncState();
     const previousProject = this.project;
+    // 恢复历史不改变侧栏布局，搜索的临时展开也不能写入普通浏览偏好。
     this.project = this.snapshot.cwd || project;
-    this.expandProject(this.project);
     await Promise.all([
       this.refreshHistory(),
       this.refreshMetadata(),
