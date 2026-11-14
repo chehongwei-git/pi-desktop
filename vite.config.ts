@@ -18,6 +18,22 @@ export default defineConfig(({ mode }) => ({
     // 提前转换主页面依赖，避免首次浏览器用例与 Svelte 冷编译争用启动时间。
     warmup: { clientFiles: ['src/main.ts'] },
   },
+  build: {
+    rollupOptions: {
+      output: {
+        // Markdown 是首屏正文的同步依赖，单独分包便于缓存；不混入按需加载的高亮语言。
+        // Rollup 模块 ID 通常使用 /，仍兼容 Windows 插件返回的反斜杠路径。
+        manualChunks(id) {
+          const path = id.replaceAll('\\', '/');
+          if (
+            path.includes('/node_modules/markdown-it/') ||
+            path.includes('/node_modules/dompurify/')
+          )
+            return 'markdown-vendor';
+        },
+      },
+    },
+  },
   clearScreen: false,
   test: {
     environment: 'jsdom',

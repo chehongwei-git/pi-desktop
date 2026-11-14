@@ -15,8 +15,12 @@
   import Transcript from './lib/components/Transcript.svelte';
   import { conversationActivity } from './lib/conversation-activity';
   import Modal from './lib/components/Modal.svelte';
-  import SettingsDialog from './lib/components/SettingsDialog.svelte';
-  import PluginsPage from './lib/components/PluginsPage.svelte';
+  import type SettingsDialog from './lib/components/SettingsDialog.svelte';
+  import type PluginsPage from './lib/components/PluginsPage.svelte';
+  import LazyPage from './lib/components/LazyPage.svelte';
+  // 低频管理功能不进入启动依赖图；类型引用不产生同步加载。
+  const loadSettings = () => import('./lib/components/SettingsDialog.svelte');
+  const loadPlugins = () => import('./lib/components/PluginsPage.svelte');
   import ExtensionDialog from './lib/components/ExtensionDialog.svelte';
   import BuiltinCommandDialog from './lib/components/BuiltinCommandDialog.svelte';
   import SidebarSession from './lib/components/SidebarSession.svelte';
@@ -1177,24 +1181,36 @@
     {/snippet}
     {#if sidebarCollection !== null || settingsVisible || pluginsOpen}{@render notices()}{/if}
     {#if pluginsOpen}
-      <PluginsPage
-        bind:this={pluginsPage}
-        projects={workspace.projects}
-        sessions={workspace.sessions}
-        onclose={() => {
-          void closePlugins();
-        }}
-      />
+      <LazyPage
+        title="插件管理"
+        load={loadPlugins}
+        onclose={() => void closePlugins()}
+      >
+        {#snippet children(Page)}
+          <Page
+            bind:this={pluginsPage}
+            projects={workspace.projects}
+            sessions={workspace.sessions}
+            onclose={() => void closePlugins()}
+          />
+        {/snippet}
+      </LazyPage>
     {/if}
     {#if settingsVisible}
-      <SettingsDialog
-        bind:this={settingsPage}
-        {desktop}
-        bind:unsaved={settingsUnsaved}
-        onclose={() => {
-          void closeSettings();
-        }}
-      />
+      <LazyPage
+        title="应用设置"
+        load={loadSettings}
+        onclose={() => void closeSettings()}
+      >
+        {#snippet children(Page)}
+          <Page
+            bind:this={settingsPage}
+            {desktop}
+            bind:unsaved={settingsUnsaved}
+            onclose={() => void closeSettings()}
+          />
+        {/snippet}
+      </LazyPage>
     {/if}
     {#if sidebarCollection && !settingsVisible}
       <div class="collection-navigation">
